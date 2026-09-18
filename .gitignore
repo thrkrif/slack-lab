@@ -1,0 +1,46 @@
+# 비밀값 — Slack 토큰·Signing Secret (CLAUDE.md 규칙 6)
+.env
+.env.*
+!.env.example
+
+# Gradle / 빌드 산출물
+.gradle/
+build/
+out/
+bin/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE (경로 등 개인 환경 정보가 들어간다)
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+
+# 로그 — 실험 로그 원본에는 event_id·채널 ID가 들어간다. 가공한 결과만 docs/EXPERIMENT-LOG.md에 남긴다
+*.log
+logs/
+
+# Claude Code 로컬 설정·개인 권한 (.claude/docs 등 공유 문서는 커밋한다)
+.claude/settings.local.json
+.claude/*.local.*
+
+# OMC 런타임 상태 (세션 ID·로컬 경로 포함). 계획 산출물(plans, drafts)은 커밋한다
+.omc/*
+!.omc/plans/
+!.omc/drafts/
+
+# 선택적 Codex / OMX 로컬 도구 설정·스킬·실행 상태 (전체 비커밋)
+.codex/
+.omx/
+.omx-state-locks/
+.omx-state-locks.identity.json
+
+# Codex
+AGENTS.md
