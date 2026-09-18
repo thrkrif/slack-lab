@@ -5,6 +5,19 @@
 근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`CLAUDE.md`](../../CLAUDE.md)
 범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (CLAUDE.md 규칙 1).
 
+## 진행 상태
+
+세션을 작업 단위로 교체하며 진행한다. 새 세션은 이 절과 `docs/EXPERIMENT-LOG.md`를 먼저 읽는다. 마일스톤을 끝낼 때마다 갱신한다.
+
+- 현재 브랜치 기준: `develop` (기본 브랜치). 기능은 `feature/mN-…`에서 작업한다.
+- [ ] **M0 사전 준비** — 진행 중
+  - [x] Ollama 0.34.0 설치, `qwen2.5:7b` 실응답·모델 정보 기록 (`docs/EXPERIMENT-LOG.md` §1·§2.1)
+  - [x] ngrok 3.39.11 설치
+  - [ ] Slack 앱 생성·스코프 설치, 토큰·Signing Secret을 `.env`에 저장 (사용자)
+  - [ ] ngrok authtoken 등록 (사용자) → 60초 지연 실측
+  - [x] `.env.example` 작성 (키 이름만, 미커밋)
+- [ ] M1 · M1.5 · M2 · M3 · M4 · M5 · M6 · M7 · M8 — 미착수
+
 ---
 
 ## 1. 요구사항 요약
