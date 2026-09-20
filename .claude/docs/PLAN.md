@@ -2,8 +2,8 @@
 
 **상태: pending approval** (Consensus 1회전 완료: Architect·Critic 모두 APPROVE-WITH-IMPROVEMENTS, 개선안 병합됨. 승인 전에는 코드·설정 파일을 만들지 않는다)
 정본: 이 파일 (`.omc/plans/stage1-p0-plan.md`는 consensus 산출물 사본)
-근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`CLAUDE.md`](../../CLAUDE.md)
-범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (CLAUDE.md 규칙 1).
+근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`AGENTS.md`](../../AGENTS.md)
+범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (AGENTS.md 규칙 1).
 
 ## 진행 상태
 
@@ -15,7 +15,7 @@
   - [x] ngrok 3.39.11 설치
   - [ ] Slack 앱 생성·스코프 설치, 토큰·Signing Secret을 `.env`에 저장 (사용자)
   - [ ] ngrok authtoken 등록 (사용자) → 60초 지연 실측
-  - [x] `.env.example` 작성 (키 이름만, 미커밋)
+  - [x] `.env.example` 작성 (키 이름만)
 - [ ] M1 · M1.5 · M2 · M3 · M4 · M5 · M6 · M7 · M8 — 미착수
 
 ---
@@ -42,7 +42,7 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 | A11 | 재전송 횟수·중복 억제 수·중복 답글 수·LLM 소요 시간이 event_id 단위 로그로 집계된다. **정상 답변과 실패 안내를 분리 집계**하고 `ack_delivered`를 포함 | 실험 후 로그 집계 스크립트/수동 표 |
 | A12 | `EXPERIMENT-LOG.md`에 장비·Ollama 버전·모델 ID·digest·양자화·토큰 상한이 기록됨 | 문서 확인 (PRD §5 P1 환경 고정 전제). digest·양자화는 M0에서 미리 확보 |
 | A13 | `SlackEventHandler` 계열에 HTTP 타입 import 없음 | `grep -rE "jakarta\.servlet|org\.springframework\.http" src/main/java/com/slack/lab/event/` 결과 0건 |
-| A14 | `./gradlew build` 통과 — **단, 완료 판정은 A1~A12·A15·A16** | CLAUDE.md 규칙 5 |
+| A14 | `./gradlew build` 통과 — **단, 완료 판정은 A1~A12·A15·A16** | AGENTS.md 규칙 5 |
 | A15 | LLM이 기한을 소진해 발신 예산이 남지 않으면 **발신 0회**, 상태 `FAILED`, 로그에 실패 단계 명시 | `llm.deadline-ms`를 총 예산에 근접하게 낮춘 스텁 실험 |
 | A16 | 처리 시작(t0)부터 컨트롤러의 응답 결정까지 총 소요가 **60초 이내** | 단조 시계 로그. 초과하면 결함으로 기록하고 초과 단계를 특정 |
 
@@ -128,7 +128,7 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 5. 선택 배치(1회): `llm.deadline-ms`·`processing.total-deadline-ms`를 늘려 50초 하드 캡이 가리는 현상(90초 뒤 답변 + 그사이 재전송) 관측.
 6. 오류 유도 매트릭스: A2·A5·A6·A7·A8·A10·A15·A16.
 7. **실험 체크리스트**: ngrok URL 재등록, 반복 타임아웃으로 Slack이 이벤트 구독을 자동 비활성화하지 않았는지 배치 사이 확인·재활성화, 배치 간 간격.
-8. 갱신: `docs/EXPERIMENT-LOG.md` 작성(채널 ID·event_id 마스킹), `CLAUDE.md` 현재 단계 줄, 구조가 바뀐 부분은 `ARCHITECTURE.md` (규칙 9). P0 실측으로 PRD §8 "7B로 충분한가"·P1 성능 목표 달성 가능성 판단.
+8. 갱신: `docs/EXPERIMENT-LOG.md` 작성(채널 ID·event_id 마스킹), `AGENTS.md` 현재 단계 줄, 구조가 바뀐 부분은 `ARCHITECTURE.md` (규칙 9). P0 실측으로 PRD §8 "7B로 충분한가"·P1 성능 목표 달성 가능성 판단.
 - **완료**: PRD §6 1단계 체크박스 3개를 실측 데이터로 채움.
 
 ## 4. 리스크와 대응

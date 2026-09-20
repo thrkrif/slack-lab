@@ -1,4 +1,4 @@
-# 비밀값 — Slack 토큰·Signing Secret (CLAUDE.md 규칙 6)
+# 비밀값 — Slack 토큰·Signing Secret (AGENTS.md 규칙 6)
 .env
 .env.*
 !.env.example
@@ -42,5 +42,3 @@ logs/
 .omx-state-locks/
 .omx-state-locks.identity.json
 
-# Codex
-AGENTS.md
