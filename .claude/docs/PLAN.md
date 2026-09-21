@@ -18,6 +18,16 @@
   - [x] `.env.example` 작성 (키 이름만)
 - [ ] M1 · M1.5 · M2 · M3 · M4 · M5 · M6 · M7 · M8 — 미착수
 
+### 다음 세션 핸드오프
+
+단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
+
+- **다음 작업**: M1(`feature/m1-skeleton`, `develop`에서 분기). 코드는 아직 없다.
+- **환경**: `.env`에 Slack 토큰·Signing Secret이 있다(값은 출력 금지). Ollama는 `curl localhost:11434`로 확인하고, 죽어 있으면 `ollama serve`. 모델 `qwen2.5:7b`. ngrok은 authtoken 등록 완료, 실행 중이 아니며 URL은 실행할 때마다 바뀐다.
+- **결정된 것**: 처리 상한 60초 유지(ngrok 60초 실측 통과). 규칙 원본은 `AGENTS.md`, `CLAUDE.md`는 참조만 한다. 세션은 마일스톤마다 교체(방식 A).
+- **M1에서 정할 것**: Spotless·gitleaks·pre-commit 훅 도입 여부. 정하면 `AGENTS.md` Git 규칙·명령어 절에 반영한다.
+- **사람 확인 지점**: M2 Request URL Verified, M6 실제 멘션 왕복, M8 실험, 각 PR 병합.
+
 ---
 
 ## 1. 요구사항 요약
