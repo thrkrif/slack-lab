@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: slack-lab
+
+# 필수 값(slack.signing-secret, slack.bot-token, llm.model)은 기본값을 두지 않는다.
+# 비어 있으면 기동이 실패해야 한다(A3). 값은 환경변수로 주입한다(.env.example 참조).
+slack:
+  signing-secret: ${SLACK_SIGNING_SECRET:}
+  bot-token: ${SLACK_BOT_TOKEN:}
+
+llm:
+  base-url: ${LLM_BASE_URL:http://localhost:11434/v1}
+  model: ${LLM_MODEL:}
