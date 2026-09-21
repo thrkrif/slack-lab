@@ -68,6 +68,19 @@
 | 필수 값 누락 | 네 키 모두 제거 후 `bootRun` | 기동 실패, 첫 실패 빈(`llm.model`)만 보고됨 — 한 번에 하나씩 나온다 |
 | 빌드 | `./gradlew build` | 통과 (바인딩·`/health` 테스트 4건) |
 
+## 2.5 M2 서명 검증·수신 컨트롤러 검증 (2026-09-22)
+
+조건: `.env` 로드 후 `bootRun`, 로컬 curl(서명은 `openssl dgst -sha256 -hmac`으로 생성). Slack 실제 서명 검증(Request URL Verified)은 사람 확인 지점으로 남아 있다.
+
+| 확인 | 결과 |
+|---|---|
+| 유효 서명 `url_verification` (A4) | 200, `{"challenge":"abc"}` |
+| 잘못된 서명 (A2) | 401 |
+| 서명은 맞고 타임스탬프 400초 전 (A2) | 401 |
+| 서명 유효 + 본문 깨짐 (A4) | 400 |
+| 재전송 헤더 `X-Slack-Retry-Num: 1`·`Reason: http_timeout` | 서명 실패(401)여도 로그 첫 줄에 `retry_num=1 retry_reason=http_timeout` 기록 |
+| 단위·슬라이스 테스트 | 검증기 7건(정상·변조·시간 경계 ±300초·헤더 누락·빈 시크릿), 컨트롤러 6건 통과 |
+
 ## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
 조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.

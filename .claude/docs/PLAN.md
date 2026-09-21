@@ -25,14 +25,17 @@
 - [x] **M1.5 기한 강제 스파이크** — 완료 (PR 병합 대기)
   - [x] 스텁 3종 × 방식 3종 측정, 서버 쪽 소켓 종료 감지로 판정 (`docs/EXPERIMENT-LOG.md` §3, 재현: `docs/spikes/DeadlineSpike.java`)
   - [x] 채택: A2 (`sendAsync` + 호출별 `cancel(true)`), `request.timeout`은 헤더까지만 덮음
-- [ ] M2 · M3 · M4 · M5 · M6 · M7 · M8 — 미착수
+- [~] **M2 서명 검증 + 수신 컨트롤러** — 코드·curl 검증 완료, **Request URL Verified 사람 확인 대기**
+  - [x] `SlackSignatureVerifier`(raw body HMAC, `isEqual`, ±300초), `SlackEventController`(401/400/challenge, 재전송 헤더 첫 줄 로그) — `docs/EXPERIMENT-LOG.md` §2.5
+  - [ ] ngrok URL을 Slack Request URL에 등록해 Verified 확인 (사용자)
+- [ ] M3 · M4 · M5 · M6 · M7 · M8 — 미착수
 
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **다음 작업**: M2 서명 검증 + 수신 컨트롤러(`feature/m2-signature`, `develop`에서 분기). M1.5 PR이 병합됐는지 먼저 확인한다.
-- **현재 코드**: 골격뿐이다(M1과 동일). M1.5 산출물은 `docs/spikes/DeadlineSpike.java` 단일 파일이며 빌드에 포함되지 않는다.
+- **다음 작업**: M2 PR 병합 전 Request URL Verified를 사람이 확인한다(`ngrok http 8080` → 앱 Event Subscriptions의 URL을 `<ngrok>/slack/events`로 등록). 이후 M3(`feature/m3-dedup`).
+- **현재 코드**: M1 골격 + `slack/SlackSignatureVerifier`·`SlackEventController`(`POST /slack/events`). `event_callback`은 200만 반환하고 처리하지 않는다(M3·M6에서 연결).
 - **환경**: `.env`에 Slack 토큰·Signing Secret·`LLM_MODEL`이 있다(값은 출력 금지). 클론·새 worktree에서는 `git config core.hooksPath .githooks`로 훅을 켠다. Ollama는 `curl localhost:11434`로 확인하고 죽어 있으면 `ollama serve`. ngrok은 실행 중이 아니다.
 - **결정된 것**: 전송 계층은 A2(`sendAsync`+`cancel(true)`, M4·M5 공통, 예외는 Cancellation·HttpTimeout 모두 기한 초과로 분류). 처리 상한 60초 유지. 규칙 원본은 `AGENTS.md`. Spotless·gitleaks·CI는 도입하지 않고 pre-commit 훅만 둔다.
 - **세션 운영 방식**: 현재는 **마일스톤마다 새 세션을 열어** 사람이 결과와 구조 변화를 확인하며 진행한다. 필요하면 아래 방식으로 바꿀 수 있다.
