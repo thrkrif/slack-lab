@@ -9,7 +9,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 - 작업 계획 → [`PLAN.md`](.claude/docs/PLAN.md)
 - 실험 기록 → [`docs/EXPERIMENT-LOG.md`](docs/EXPERIMENT-LOG.md)
 
-**현재 단계: 1단계 (동기) · 구현 전.** 큐·n8n·RAG 없음. 단계가 바뀌면 이 줄을 갱신한다.
+**현재 단계: 1단계 (동기) · 구현 중(M1 골격 완료).** 큐·n8n·RAG 없음. 단계가 바뀌면 이 줄을 갱신한다.
 
 ## 규칙
 
@@ -46,9 +46,10 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 - **커밋 메시지**: Conventional Commits. 타입은 영어, 제목은 한글 (`feat: 서명 검증기 추가`).
   타입은 `feat` `fix` `docs` `test` `refactor` `chore` 중 하나. 제목에 마침표를 붙이지 않는다.
 - **커밋 전 `git diff --cached`로 확인한다**: 토큰·시크릿, 실명, 로컬 절대경로(`/Users/...`), Slack 채널 ID·event_id 원본.
-- 린트·시크릿 검사(Spotless, gitleaks)와 CI는 M1에서 Gradle 골격을 만들 때 함께 정하고, 정해지면 이 절과 명령어 절을 갱신한다.
-  커밋 훅(pre-commit)으로 걸지도 이때 함께 정한다. CI 통과는 완료 기준이 아니다(규칙 5).
-  그 전까지는 위 diff 점검과 `.gitignore`가 유일한 방어선이다. 비밀값은 `.env`에만 두고 `.env.example`에는 키 이름만 적는다.
+- **M1 결정**: Spotless·gitleaks·CI는 **도입하지 않는다**(1인 학습 프로젝트, 서식 강제·외부 도구 설치 비용이 이득보다 크다). 필요해지면 그때 다시 정한다.
+  대신 의존성 없는 `.githooks/pre-commit`이 스테이징된 추가 줄에서 Slack 토큰 패턴·로컬 절대경로를 막는다.
+  클론 후 한 번 `git config core.hooksPath .githooks`로 켠다. 위 diff 점검·`.gitignore`와 함께 방어선이며, 훅은 보조일 뿐 diff 확인을 대체하지 않는다.
+  CI 통과는 완료 기준이 아니다(규칙 5). 비밀값은 `.env`에만 두고 `.env.example`에는 키 이름만 적는다.
 - **PR**: 제목은 커밋 규칙과 같다. 본문에 변경 요약과 검증 결과(규칙 5)를 적는다. 대상은 `develop`이다.
 - **세션**: 작업 단위마다 새 세션에서 시작한다. 단위를 끝낼 때 `.claude/docs/PLAN.md`의 진행 상태와 `docs/EXPERIMENT-LOG.md`를 갱신한다.
   다음 세션은 이 두 파일을 읽고 이어간다. 대화에만 남은 상태는 이어지지 않는다.
@@ -63,6 +64,8 @@ set -a && source .env && set +a && ./gradlew bootRun
 ngrok http 8080                                   # 별도 터미널
 ollama serve                                      # 별도 터미널
 ollama list                                       # 설정에 박을 모델 ID는 여기서 확인
+git config core.hooksPath .githooks               # 클론 후 1회: pre-commit 훅 활성화
+curl localhost:8080/health                        # bootRun 후 200 확인
 ```
 
 ## 스택 (검증된 조합 — `ARCHITECTURE.md` §7)

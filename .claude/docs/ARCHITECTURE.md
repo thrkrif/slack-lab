@@ -2,7 +2,7 @@
 
 **목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`AGENTS.md`](../../AGENTS.md).
 
-> 현재 코드는 없다. 이 문서는 앞으로 만들 구조를 기술한다.
+> 현재 코드는 M1 골격(설정 record·`/health`)뿐이다. 이 문서는 앞으로 만들 구조를 기술한다.
 > §7은 폐기한 프로토타입의 검증 기록이다. §8은 당시 결함에서 출발한 새 설계이며, 이 문서의 상태 전이·시간 제한·복구 정책은 아직 구현·검증 전이다.
 
 ---
@@ -50,7 +50,8 @@ flowchart LR
 | `llm/` | `LlmClient` | 호출 경계 인터페이스 | RAG·LangGraph가 붙는 자리 |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | 워커로 이동 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
-| `config/` | `*Properties` | `record` + `@ConfigurationProperties` | 각자 따라 이동 |
+| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController` | `record` + `@ConfigurationProperties`, `/health` | 각자 따라 이동 |
+| | `SlackProperties`(`slack/`)·`LlmProperties`(`llm/`) | 설정은 사용하는 패키지 옆에 둔다. 필수 값(`slack.signing-secret`·`slack.bot-token`·`llm.model`)은 `@Validated`+`@NotBlank`로 누락 시 기동 실패(A3) | 각자 따라 이동 |
 
 ### 절대 경계
 
@@ -329,6 +330,8 @@ Ollama가 느려서 3초 초과는 저절로 재현된다. 그래도 `experiment
 - `chat.postMessage` 실호출과 `ok:false` 처리
 - LLM 실호출 — 프로토타입은 **존재하지 않는 모델 ID**가 박혀 있었다
 - 3초 초과 재전송 동작
+
+> **M1 실증(2026-09-21)**: 골격 기동·`/health` 200·필수 설정 누락 시 기동 실패(원인 로그 출력)를 실행으로 확인했다. 위 "통과한 것" 조합이 그대로 동작한다.
 
 > **교훈**: "빌드가 통과했다"는 외부 연동이 된다는 뜻이 아니다.
 > `PLAN.md`에는 정상 흐름의 **외부 왕복 성공**과 오류 유도 시 기대한 응답·상태·로그 확인을 각각 완료 기준으로 적는다.
