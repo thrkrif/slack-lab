@@ -68,9 +68,31 @@
 | 필수 값 누락 | 네 키 모두 제거 후 `bootRun` | 기동 실패, 첫 실패 빈(`llm.model`)만 보고됨 — 한 번에 하나씩 나온다 |
 | 빌드 | `./gradlew build` | 통과 (바인딩·`/health` 테스트 4건) |
 
-## 3. 기한 강제 스파이크 (M1.5)
+## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
-미수행.
+조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.
+재현: `java docs/spikes/DeadlineSpike.java` (약 1분). 2회 실행해 같은 결과를 얻었다.
+판정: 클라이언트 예외가 아니라 **스텁 서버가 상대 종료(EOF)를 감지한 시각**으로 소켓 종료를 판정한다.
+
+스텁: (1) 헤더(`Content-Length: 1000`)만 보내고 정지 (2) 헤더 + 본문 100바이트 후 정지 (3) accept·요청 수신 후 무응답.
+
+| 스텁 | 방식 | 클라 실패(ms) | 예외 | 소켓 종료 감지(ms) |
+|---|---|---|---|---|
+| 헤더만 | `request.timeout(2s)`만 | **끝까지 실패 안 함** | - | **닫히지 않음** |
+| 헤더만 | `cancel(true)` 2s | 2006~2011 | CancellationException | 2006~2012 (FIN) |
+| 본문 절단 | `request.timeout(2s)`만 | **끝까지 실패 안 함** | - | **닫히지 않음** |
+| 본문 절단 | `cancel(true)` 2s | 2006~2008 | CancellationException | 2006~2008 (FIN) |
+| 무응답 | `request.timeout(2s)`만 | 2004~2006 | HttpTimeoutException | 2004~2005 (FIN) |
+| 무응답 | `cancel(true)` 2s | 2003~2005 | CancellationException | 2003~2005 (FIN) |
+| 3종 | `request.timeout` + `cancel(true)` 병용 | 2001~2005 | 헤더 수신 후엔 Cancellation, 무응답은 Cancellation 또는 HttpTimeout(경합) | 2001~2006 (FIN) |
+
+발견:
+- **`HttpRequest.timeout`은 응답 헤더 수신까지만 덮는다.** 헤더가 도착한 뒤 본문이 멈추면 무기한 대기하고 소켓도 닫히지 않는다(관측 창 6초 초과). PLAN M1.5의 1순위 측정 대상에 대한 답이다.
+- **`sendAsync` 반환 future의 `cancel(true)`는 3종 모두에서 소켓을 실제로 닫는다**(서버가 FIN 감지, 지연 약 1~12ms). 진행 중 요청을 끊는 수단으로 충분하다.
+- 병용 시 무응답 스텁은 두 타이머가 경합해 예외 종류가 달라진다. 호출부는 `CancellationException`과 `HttpTimeoutException`을 모두 "기한 초과"로 분류해야 한다.
+
+채택: **A2 — `sendAsync` + 호출별 남은 기한에 `cancel(true)` 예약.** `request.timeout(남은 시간)`은 보조로만 둔다(권한은 cancel). Apache 기반(B)은 시도하지 않았다 — A2가 성공 기준을 충족해 의존성을 추가할 이유가 없다. M4(LLM)·M5(Slack) 전송 계층에 동일하게 적용한다.
+한계: 루프백 정상 케이스만 측정했다. 실제 Ollama의 잔여 추론 종료, 연결 수립 정체(비라우팅 주소), 대용량 본문은 재지 않았다(M4 이후 관측).
 
 ## 4. 경계 실험 (M8)
 
