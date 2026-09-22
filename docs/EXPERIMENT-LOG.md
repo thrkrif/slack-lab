@@ -81,6 +81,18 @@
 | 재전송 헤더 `X-Slack-Retry-Num: 1`·`Reason: http_timeout` | 서명 실패(401)여도 로그 첫 줄에 `retry_num=1 retry_reason=http_timeout` 기록 |
 | 단위·슬라이스 테스트 | 검증기 7건(정상·변조·시간 경계 ±300초·헤더 누락·빈 시크릿), 컨트롤러 6건 통과 |
 
+## 2.6 M4 LLM 클라이언트 검증 (2026-09-22)
+
+조건: `.env` 로드 후 `bootRun`, Ollama `qwen2.5:7b` 로컬 기동 중.
+
+| 확인 | 방법 | 결과 |
+|---|---|---|
+| 기동 시 모델 확인 + 웜업 | 정상 `.env`로 `bootRun` | `LLM 모델 확인됨 model=qwen2.5:7b` 로그, 이어서 `LLM 호출 성공 elapsed_ms=765`(애플리케이션 코드 경유, curl 아님) |
+| 잘못된 모델 ID (A6 경로 (b) 준비) | `LLM_MODEL=not-a-real-model`로 `bootRun` | `IllegalStateException: llm.model=not-a-real-model ... 에 없음`, `BUILD FAILED`, `/health` 미기동(000) |
+| 검증 우회 | 위와 동일 모델 + `--llm.verify-model-on-startup=false` | 기동 성공(`/health` 200), 웜업 호출은 실제로 시도되고 `status=404`로 명확히 실패 기록(`LLM 호출 실패 status=404`) — M6에서 이 상태로 A6(b) 실패 안내 유도 |
+| 취소 재확인 | 단위 테스트: 무응답 스텁 + 기한 500ms | `TimedOut` 반환, 경과 3초 미만(스텁의 sleep 30초까지 기다리지 않음 — M1.5 A2 결론 재확인) |
+| 단위 테스트 | `./gradlew build` | LLM 신규 8건(OpenAiCompatible 6, Echo 2) 포함 전체 통과 |
+
 ## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
 조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.
