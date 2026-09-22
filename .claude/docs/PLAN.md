@@ -25,24 +25,29 @@
 - [x] **M1.5 기한 강제 스파이크** — 완료 (PR 병합 대기)
   - [x] 스텁 3종 × 방식 3종 측정, 서버 쪽 소켓 종료 감지로 판정 (`docs/EXPERIMENT-LOG.md` §3, 재현: `docs/spikes/DeadlineSpike.java`)
   - [x] 채택: A2 (`sendAsync` + 호출별 `cancel(true)`), `request.timeout`은 헤더까지만 덮음
-- [~] **M2 서명 검증 + 수신 컨트롤러** — 코드·curl 검증 완료, **Request URL Verified 사람 확인 대기**
-  - [x] `SlackSignatureVerifier`(raw body HMAC, `isEqual`, ±300초), `SlackEventController`(401/400/challenge, 재전송 헤더 첫 줄 로그) — `docs/EXPERIMENT-LOG.md` §2.5
-  - [ ] ngrok URL을 Slack Request URL에 등록해 Verified 확인 (사용자)
-- [ ] M3 · M4 · M5 · M6 · M7 · M8 — 미착수
+- [x] **M2 서명 검증 + 수신 컨트롤러** — 완료 (병합됨, #6)
+  - [x] `SlackSignatureVerifier`·`SlackEventController`, curl 검증 (`docs/EXPERIMENT-LOG.md` §2.5)
+  - [x] ngrok URL을 Slack Request URL에 등록해 **Verified** 확인 (사용자, 2026-09-22)
+- [x] **M3 값 객체 + 중복 억제** — 완료 (PR 병합 대기)
+  - [x] `SlackMessageEvent`(shouldIgnore·replyThreadTs·promptText), `EventDeduplicator`·`AttemptHandle`·`ClaimResult`·`ProcessingState`
+  - [x] 단위 테스트 20건: 동시 64회 선점 1승(A9), 소유자 아닌 전이 거절, TTL 경계, 청소가 실행 중 엔트리를 안 지움, FAILED 재선점, dedup 스위치. 선점을 비원자적(get 후 판단)으로 바꾸면 동시성 테스트가 실패함을 확인
+  - [x] A13: `grep -rE "jakarta\.servlet|org\.springframework\.http" src/main/java/com/slack/lab/event/` 0건
+- [ ] M4 · M5 · M6 · M7 · M8 — 미착수
 
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **다음 작업**: M2 PR 병합 전 Request URL Verified를 사람이 확인한다(`ngrok http 8080` → 앱 Event Subscriptions의 URL을 `<ngrok>/slack/events`로 등록). 이후 M3(`feature/m3-dedup`).
-- **현재 코드**: M1 골격 + `slack/SlackSignatureVerifier`·`SlackEventController`(`POST /slack/events`). `event_callback`은 200만 반환하고 처리하지 않는다(M3·M6에서 연결).
+- **다음 작업**: M4 LLM 클라이언트(`feature/m4-llm-client`, `develop`에서 분기). M3 PR이 병합됐는지 먼저 확인한다. 전송 계층은 A2(`sendAsync`+`cancel(true)`).
+- **현재 코드**: M2 + `event/` 패키지(값 객체·중복 억제). 컨트롤러는 아직 `event_callback`에 200만 반환하고 `EventDeduplicator`를 호출하지 않는다(연결은 M6). `EventDeduplicator.claim(eventId)` → `Claimed(AttemptHandle)`/`Duplicate(state)`.
+- **M6에서 확인할 가정**: `SlackMessageEvent`는 봇 자신의 멘션 토큰을 `authorizations[0].user_id`로 식별한다. 실제 Slack 페이로드에 이 필드가 오는지는 M6 실제 멘션에서 확인한다(없으면 문장 앞 멘션만 지우는 폴백이 동작).
 - **환경**: `.env`에 Slack 토큰·Signing Secret·`LLM_MODEL`이 있다(값은 출력 금지). 클론·새 worktree에서는 `git config core.hooksPath .githooks`로 훅을 켠다. Ollama는 `curl localhost:11434`로 확인하고 죽어 있으면 `ollama serve`. ngrok은 실행 중이 아니다.
 - **결정된 것**: 전송 계층은 A2(`sendAsync`+`cancel(true)`, M4·M5 공통, 예외는 Cancellation·HttpTimeout 모두 기한 초과로 분류). 처리 상한 60초 유지. 규칙 원본은 `AGENTS.md`. Spotless·gitleaks·CI는 도입하지 않고 pre-commit 훅만 둔다.
 - **세션 운영 방식**: 현재는 **마일스톤마다 새 세션을 열어** 사람이 결과와 구조 변화를 확인하며 진행한다. 필요하면 아래 방식으로 바꿀 수 있다.
   - 한 세션에서 연속 실행: ralph 등으로 여러 마일스톤을 이어서 진행한다. 자동화가 가장 높지만 컨텍스트가 쌓이고 잘못된 방향을 늦게 발견한다.
   - 마일스톤마다 서브에이전트·worktree: 한 세션이 조율하고 각 마일스톤은 격리된 작업 공간에서 새 컨텍스트로 진행한다. 중간 과정은 요약으로만 받는다.
   - 어느 방식이든 사람 확인 지점에서는 멈춘다.
-- **사람 확인 지점**: M2 Request URL Verified(ngrok 실행·URL 등록 필요), M6 실제 멘션 왕복, M8 실험, 각 PR 병합.
+- **사람 확인 지점**: M6 실제 멘션 왕복(ngrok 실행·URL 재등록 필요), M8 실험, 각 PR 병합.
 
 ---
 
