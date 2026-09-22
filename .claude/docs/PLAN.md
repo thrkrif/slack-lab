@@ -36,14 +36,19 @@
   - [x] `LlmClient`/`OpenAiCompatibleLlmClient`(M1.5 A2 전송)/`EchoLlmClient`/`LlmConfig`, 기동 시 fail-fast 모델 확인+웜업
   - [x] 실제 Ollama 호출 성공, 잘못된 모델 기동 실패, 우회 플래그 확인 (`docs/EXPERIMENT-LOG.md` §2.6)
   - [x] codex critic 2회전(REQUEST CHANGES → 4건 수정 → 승인, `docs/EXPERIMENT-LOG.md` §2.8)
-- [ ] M5 · M6 · M7 · M8 — 미착수
+- [x] **M5 Slack 발신 클라이언트** — 완료 (PR 병합 대기)
+  - [x] `SlackClient`(3분류 `SlackSendResult`: Success/Failed/Unknown), M1.5 A2 전송, 예산 소진 시 미발신(A15 대비)
+  - [x] 실제 스레드 답글 성공, `ok:false`(스코프 부족·미초대·잘못된 채널) 각각 분류 확인 (`docs/EXPERIMENT-LOG.md` §2.7)
+  - [x] 사람 조작: Slack 앱에 `chat:write` 스코프 추가 후 재설치, 테스트 채널에 봇 초대
+  - [x] codex critic 2회전 검토 대상에 포함(§2.8), `SlackClient`의 interrupt 미취소 결함도 M4 리뷰에서 함께 발견해 수정
+- [ ] M6 · M7 · M8 — 미착수
 
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **다음 작업**: M5 Slack 발신 클라이언트(`feature/m5-slack-client`, `develop`에서 분기).
-- **현재 코드**: M3 + `llm/` 패키지(`LlmClient`·`OpenAiCompatibleLlmClient`·`EchoLlmClient`·`LlmConfig`). 컨트롤러 연결은 아직 없음(M6). `llm.client=ollama`가 기본, `llm.verify-model-on-startup=true`가 기본.
+- **다음 작업**: M6 핸들러+흐름 조립(`feature/m6-handler`, `develop`에서 분기). 여기서 **A1 실제 멘션 왕복**(사람 확인 지점)을 만난다.
+- **현재 코드**: M4 + `slack/SlackClient`·`SlackSendResult`. 컨트롤러·핸들러 연결은 아직 없음(M6). 테스트 채널은 봇이 이미 초대돼 있고 `chat:write` 스코프도 반영됨(재설치 완료, 토큰 값은 안 바뀜).
 - **M6에서 확인할 가정**: `SlackMessageEvent`는 봇 자신의 멘션 토큰을 `authorizations[0].user_id`로 식별한다. 실제 Slack 페이로드에 이 필드가 오는지는 M6 실제 멘션에서 확인한다(없으면 문장 앞 멘션만 지우는 폴백이 동작).
 - **환경**: `.env`에 Slack 토큰·Signing Secret·`LLM_MODEL`이 있다(값은 출력 금지). 클론·새 worktree에서는 `git config core.hooksPath .githooks`로 훅을 켠다. Ollama는 `curl localhost:11434`로 확인하고 죽어 있으면 `ollama serve`. ngrok은 실행 중이 아니다.
 - **결정된 것**: 전송 계층은 A2(`sendAsync`+`cancel(true)`, M4·M5 공통, 예외는 Cancellation·HttpTimeout 모두 기한 초과로 분류). 처리 상한 60초 유지. 규칙 원본은 `AGENTS.md`. Spotless·gitleaks·CI는 도입하지 않고 pre-commit 훅만 둔다.

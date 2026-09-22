@@ -32,7 +32,10 @@ import org.slf4j.LoggerFactory;
 public class OpenAiCompatibleLlmClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);
-    private static final String SYSTEM_PROMPT = "간결하게 한국어로 답하라. 500자 이내로 답하라.";
+    // qwen2.5:7b가 느슨한 지시에서는 중국어·영어를 섞어 답하는 경우가 있어(실측), 금지 조건을 명시적으로 반복한다.
+    private static final String SYSTEM_PROMPT =
+            "너는 한국어로만 답하는 챗봇이다. 어떤 경우에도 중국어·영어·다른 언어 단어를 섞지 마라. "
+                    + "모든 문장을 한국어로만 작성하라. 간결하게 500자 이내로 답하라.";
 
     private final LlmProperties props;
     private final HttpClient httpClient;
@@ -60,7 +63,15 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             return new LlmResult.Failed("남은 기한 없음", 0);
         }
         long start = System.nanoTime();
-        HttpRequest request = buildRequest(prompt, remainingMs);
+        HttpRequest request;
+        try {
+            request = buildRequest(prompt, remainingMs);
+        } catch (Exception e) {
+            // 요청 준비 단계에서 예외가 나면 호출자(SlackEventHandler)까지 전파시키지 않는다 — LlmClient 계약은
+            // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙).
+            log.warn("LLM 요청 준비 실패 reason={}", e.getClass().getSimpleName());
+            return new LlmResult.Failed("request_build_failed:" + e.getClass().getSimpleName(), elapsedMs(start));
+        }
         HttpOutcome outcome = execute(request, remainingMs);
         long elapsed = elapsedMs(start);
 
@@ -186,7 +197,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                         Map.of("role", "system", "content", SYSTEM_PROMPT),
                         Map.of("role", "user", "content", prompt)),
                 "max_tokens", props.maxTokens(),
-                "keep_alive", props.keepAlive());
+                "keep_alive", props.keepAlive(),
+                // 언어 혼용(중국어·영어 섞임) 실측 후 낮춤 — 창의성보다 지시 준수가 우선이다.
+                "temperature", 0.3);
         String json;
         try {
             json = mapper.writeValueAsString(body);
