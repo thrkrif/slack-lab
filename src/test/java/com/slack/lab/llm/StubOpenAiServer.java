@@ -55,28 +55,32 @@ final class StubOpenAiServer implements AutoCloseable {
         return startHeadersThenHang("/v1/models");
     }
 
+    /**
+     * codex 리뷰 지적: 고정 Content-Length를 예고한 뒤 그보다 적게 쓰고 닫으면, 스트림 자체 close()가
+     * 길이 불일치로 IOException을 던져 "상대가 끊었다"고 오판할 수 있었다. 청크 전송(length=0)으로 바꿔
+     * 자체 close가 성공하게 하고, 반복 상한도 넉넉히 둬야 IOException이 오직 실제 취소에서만 발생한다.
+     */
     private static StubOpenAiServer startHeadersThenHang(String path) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         StubOpenAiServer stub = new StubOpenAiServer(server);
         server.createContext(path, ex -> {
             ex.getRequestBody().readAllBytes();
             ex.getResponseHeaders().add("Content-Type", "application/json");
-            ex.sendResponseHeaders(200, 1000); // Content-Length 예고, 본문은 안 보냄 — 헤더까지만 나간 상태
+            ex.sendResponseHeaders(200, 0); // 0 = 청크 전송, Content-Length 예고 없음
             long start = System.nanoTime();
             try (var out = ex.getResponseBody()) {
-                for (int i = 0; i < 40; i++) { // 최대 4초, 200ms마다 1바이트 써서 상대 종료를 감지
+                for (int i = 0; i < 300; i++) { // 최대 30초 — 테스트의 어떤 대기 시간보다 넉넉하다
                     Thread.sleep(100);
                     out.write('x');
                     out.flush();
                 }
+                stub.peerClosedAtMs.complete(-1L); // 상한까지 안 끊김
             } catch (IOException e) {
                 // 클라이언트가 취소해 연결을 끊으면(FIN/RST) 여기서 쓰기가 실패한다 — 소켓이 실제로 닫혔다는 증거.
                 stub.peerClosedAtMs.complete((System.nanoTime() - start) / 1_000_000);
-                return;
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
-            stub.peerClosedAtMs.complete(-1L); // 40회 안에 끊기지 않음
         });
         server.start();
         return stub;

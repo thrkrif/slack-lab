@@ -85,4 +85,53 @@ class SlackClientTest {
             assertThat(result).isEqualTo(new SlackSendResult.Failed("status=429"));
         }
     }
+
+    @Test
+    void 서버_오류_5xx는_결과_불명이다() throws Exception {
+        // codex 리뷰 지적: 5xx는 Slack 쪽에서 일부 처리됐을 가능성이 있어 명확한 실패로 단정할 수 없다.
+        try (var stub = StubSlackServer.respondsWith("internal error", 500)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.postMessage("C1", null, "안녕", 5_000);
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown("status=500"));
+        }
+    }
+
+    @Test
+    void internal_error는_결과_불명으로_분류한다() throws Exception {
+        // Slack 문서: internal_error·fatal_error는 일부 처리가 성공했을 수 있다.
+        try (var stub = StubSlackServer.respondsWith("{\"ok\":false,\"error\":\"internal_error\"}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.postMessage("C1", null, "안녕", 5_000);
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown("internal_error"));
+        }
+    }
+
+    @Test
+    void ok_필드가_없거나_boolean이_아니면_결과_불명이다() throws Exception {
+        try (var stub = StubSlackServer.respondsWith("{}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            assertThat(client.postMessage("C1", null, "안녕", 5_000)).isInstanceOf(SlackSendResult.Unknown.class);
+        }
+        try (var stub = StubSlackServer.respondsWith("{\"ok\":\"true\"}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            assertThat(client.postMessage("C1", null, "안녕", 5_000)).isInstanceOf(SlackSendResult.Unknown.class);
+        }
+    }
+
+    @Test
+    void ok_true인데_ts가_없으면_결과_불명이다() throws Exception {
+        try (var stub = StubSlackServer.respondsWith("{\"ok\":true}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.postMessage("C1", null, "안녕", 5_000);
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown("success_without_ts"));
+        }
+    }
+
+    @Test
+    void 잘못된_URL로_인한_요청_준비_실패는_예외_없이_명확한_실패다() {
+        var client = new SlackClient(props("not a url"), new ObjectMapper());
+        var result = client.postMessage("C1", null, "안녕", 5_000);
+        assertThat(result).isInstanceOf(SlackSendResult.Failed.class);
+        assertThat(((SlackSendResult.Failed) result).reason()).startsWith("request_build_failed");
+    }
 }

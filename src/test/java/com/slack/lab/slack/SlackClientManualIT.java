@@ -17,6 +17,8 @@ class SlackClientManualIT {
 
     @Test
     void 실제_채널에_스레드_답글을_보낸다() {
+        // codex 리뷰 지적: threadTs=null이면 최상위 메시지만 검증하고 "스레드 답글"(A1이 요구하는 형태)은
+        // 검증하지 않는다. 부모 메시지를 먼저 보내 ts를 얻고, 그 ts로 실제 스레드 답글을 보낸다.
         String channel = System.getenv("SLACK_MANUAL_TEST_CHANNEL");
         assumeTrue(channel != null && !channel.isBlank(), "SLACK_MANUAL_TEST_CHANNEL 미설정 — 건너뜀");
         String token = System.getenv("SLACK_BOT_TOKEN");
@@ -25,8 +27,12 @@ class SlackClientManualIT {
         var props = new SlackProperties("unused", token, "https://slack.com/api", 10_000);
         var client = new SlackClient(props, new ObjectMapper());
 
-        var result = client.postMessage(channel, null, "slack-lab M5 수동 검증 (자동 삭제되지 않음)", 10_000);
-        assertThat(result).isInstanceOf(SlackSendResult.Success.class);
+        var parent = client.postMessage(channel, null, "slack-lab M5 수동 검증 — 부모 메시지 (자동 삭제되지 않음)", 10_000);
+        assertThat(parent).isInstanceOf(SlackSendResult.Success.class);
+        String parentTs = ((SlackSendResult.Success) parent).ts();
+
+        var reply = client.postMessage(channel, parentTs, "slack-lab M5 수동 검증 — 스레드 답글", 10_000);
+        assertThat(reply).isInstanceOf(SlackSendResult.Success.class);
     }
 
     @Test
