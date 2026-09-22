@@ -93,6 +93,44 @@
 | 취소 재확인 | 단위 테스트: 무응답 스텁 + 기한 500ms | `TimedOut` 반환, 경과 3초 미만(스텁의 sleep 30초까지 기다리지 않음 — M1.5 A2 결론 재확인) |
 | 단위 테스트 | `./gradlew build` | LLM 신규 8건(OpenAiCompatible 6, Echo 2) 포함 전체 통과 |
 
+## 2.7 M5 Slack 발신 클라이언트 검증 (2026-09-22)
+
+조건: `.env` 로드, 실제 Slack 워크스페이스(테스트 채널, ID는 마스킹). curl이 아니라 `SlackClient`(애플리케이션 코드)로 호출.
+
+| 확인 | 방법 | 결과 |
+|---|---|---|
+| 스코프 부족 재현 | `chat:write` 없는 토큰으로 발신 | `ok:false` → `Failed(reason=missing_scope)`로 정확히 분류(예외 누출 없음) |
+| 스코프 추가 후 재설치 | Slack 앱에 `chat:write` 추가 + Reinstall (사람 조작) | 토큰 값 불변, `x-oauth-scopes`에 `chat:write` 추가 확인 |
+| 채널 미초대 재현 | 봇이 채널에 없는 상태로 발신 | `Failed(reason=not_in_channel)` |
+| 봇 채널 초대 (사람 조작) | 테스트 채널에 `/invite` | 이후 발신 성공 |
+| **실제 스레드 답글 (A1 전신)** | `SlackClientManualIT`(수동 통합 테스트, `SLACK_MANUAL_TEST_CHANNEL` 플래그로만 실행) | `Success(ts=...)` — 애플리케이션 코드 경로로 실제 채널에 메시지 도달 확인 |
+| 잘못된 채널 (`ok:false`) | 존재하지 않는 채널 ID로 발신 | `Failed(reason=channel_not_found)` |
+| 취소 재확인 | 단위 테스트: 무응답 스텁 + 기한 500ms | `Unknown` 반환, 경과 3초 미만(M1.5 A2 결론 재확인) |
+| 연결 자체 실패 | 존재하지 않는 포트로 발신 | `Failed(reason=connect_failed:...)` — 결과 불명이 아니라 명확한 실패로 분류(연결도 안 됐으므로) |
+| 예산 소진 | `remainingMs=0`으로 호출 | 네트워크 호출 없이 즉시 `Failed(reason=budget_exhausted)` |
+| 단위 테스트 | `./gradlew build` | Slack 신규 7건(interrupt 취소 회귀 포함) 포함 전체 통과. `SlackClientManualIT` 2건은 플래그 없으면 스킵(평소 빌드는 실제 API를 부르지 않음) |
+
+## 2.8 M4/M5 codex critic 리뷰 (2026-09-22)
+
+`omc ask` 대신 `codex exec --sandbox read-only`를 critic으로 직접 호출(1차 시도는 프롬프트에 포함된 백틱이 셸에서
+명령 치환으로 해석돼 멈춤 — stdin으로 프롬프트를 넘기는 방식으로 교체해 해결).
+
+**1차 리뷰(M4)**: REQUEST CHANGES. 발견 4건 — (1) 파싱 예외가 `Failed`로 감싸이지 않고 누출 (2) `content` 필드
+누락·빈 값을 성공으로 처리 (3) `InterruptedException` 경로에서 `future.cancel(true)` 누락 (4) `/models` 확인이
+동기 `send()`+`request.timeout`만 써서 본문 정체 시 기동이 무기한 대기 가능. 모두 수정: `execute()` 헬퍼로
+sendAsync+cancel(true) 패턴을 채팅·모델확인 공통화, `parseContentSafely`로 파싱 실패·빈 응답을 모두 `Failed`로.
+같은 결함(3)이 `SlackClient`에도 있어 함께 수정.
+
+**2차 리뷰**: 코드 수정 4건 모두 승인. 다만 회귀 테스트 2건이 결함을 실제로 검출하지 못함을 지적(헤더 없이 멈추는
+스텁은 `request.timeout`만으로도 통과, 인터럽트 테스트는 스레드 종료만 확인). 헤더는 보내고 본문에서 정지하며
+서버가 소켓 종료를 직접 감지하는 스텁(`chatHeadersThenHangs`/`modelsHeadersThenHang`/`headersThenHangs`, M1.5와
+동일한 방식)으로 교체.
+
+**변이 검증 결과(한계, 정직하게 기록)**: `future.cancel(true)` 호출을 실제로 제거해 인터럽트 테스트가 잡아내는지
+확인했다. 이 JDK 21 `HttpClient`는 명시적 취소 없이도 인터럽트 후 약 4.1초 뒤 소켓이 닫혀, 이 테스트는 그 결함을
+완전히 구분하지 못했다(원인 미상 — 추정하지 않음). `future.cancel(true)`는 API 계약상 맞는 코드라 유지하되,
+이 특정 회귀 테스트의 검출력 한계를 그대로 남긴다.
+
 ## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
 조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.
