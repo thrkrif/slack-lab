@@ -41,26 +41,24 @@
   - [x] 실제 스레드 답글 성공, `ok:false`(스코프 부족·미초대·잘못된 채널) 각각 분류 확인 (`docs/EXPERIMENT-LOG.md` §2.7)
   - [x] 사람 조작: Slack 앱에 `chat:write` 스코프 추가 후 재설치, 테스트 채널에 봇 초대
   - [x] codex critic 2회전 모두 승인: 1차(§2.8, interrupt 미취소 결함 발견·수정) → 2차(ok 필드·5xx·부분 처리 오류코드를 결과 불명으로 재분류) → OKAY, WATCH 등급의 비차단 보완 의견 2건은 §2.9에 후속 과제로 기록
-- [~] **M6 핸들러 + 흐름 조립** — 진행 중, 코드리뷰 2회전 완료·최종 재검토 대기
+- [x] **M6 핸들러 + 흐름 조립** — 완료 (병합됨, #12)
   - [x] `HandlingResult`·`SlackEventHandler`(LLM→답변/실패안내, markSending 게이트, sealed switch)·컨트롤러 연결(dedup+handler), `AckLoggingFilter`
-  - [x] 단위 테스트 27건(handler 12 + controller 11 + AckLoggingFilter 5 신규 포함), A13 재확인
+  - [x] 단위 테스트 27건(handler 11 + controller 11 + AckLoggingFilter 5 신규 포함), A13 재확인
   - [x] curl 유도: A5(bot_id 무시), 실제 LLM+Slack 왕복 성공(답변 경로), A6(b) 실패 안내 경로, A8(ok:false invalid_thread_ts로 실증)
   - [x] A1 실제 멘션 왕복 성공 — 막힘 원인은 Slack 앱의 Socket Mode 활성화였음(§2.9)
-  - [x] code-reviewer(대체) 1차 REQUEST CHANGES 6건 중 코드 5건 반영(§2.10): HIGH(`handle()` 예외 가드), MEDIUM 4건(LLM 예산 clamp, `event_callback` 외 200+무시, slow-mode ArgumentCaptor 검증, `AckLoggingFilter` 테스트+로그 생략). 6번째(브랜치 분리)는 별도 완료
-  - [x] **브랜치 분리 완료**: M5 수정분만 먼저 커밋(`ea80c92`)→PR #11 갱신→codex critic 재검토 OKAY→병합. `develop`에서 `feature/m6-handler` 새로 분기해 M6 파일만 올림(PR #12)
-  - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차: REQUEST CHANGES 1건(HIGH — 예외 가드 자체의 회귀 테스트 0건) + MEDIUM 2건 권고. HIGH·권고 MEDIUM 모두 반영: 예외 주입 테스트 2건 추가, LLM 예산 clamp를 `llmBudgetMs()` 헬퍼로 통합해 slow-mode sleep에도 적용, `AckLoggingFilter`를 상태코드 denylist 대신 event_id 존재 여부(positive guard)로 전환 + 테스트 갱신. `ARCHITECTURE.md` §2에 `AckLoggingFilter`·`HandlingResult`(및 누락돼 있던 M3 타입) 추가(규칙 9)
-  - [ ] 위 2차 수정에 대한 최종 재검토(코드는 그대로, 회귀테스트·문서만 추가) → PR #12 병합
+  - [x] code-reviewer(대체) 1차 REQUEST CHANGES 6건 중 코드 5건 반영(§2.10), 6번째(브랜치 분리)는 별도 완료(M5 PR #11 분리 병합)
+  - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차 REQUEST CHANGES 1건(예외 가드 회귀 테스트 0건) + MEDIUM 2건 모두 반영: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼로 slow-mode에도 clamp 적용, `AckLoggingFilter` positive guard 전환. `ARCHITECTURE.md` §2 갱신(규칙 9)
+  - [x] PR #12 병합 완료(2026-09-23). 반영 안 한 LOW 5건·Open Question 1건은 P1 후속 과제로만 남김(§2.11)
 - [ ] M7 · M8 — 미착수
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
 - **다음 작업(우선순위 순)**:
-  1. PR #12(M6) 최종 재검토(2차 REQUEST CHANGES 반영분: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼, `AckLoggingFilter` positive guard) → 승인되면 병합.
-  2. M6 완료 조건(A1~A16, A13)은 이미 다 채워졌다 — 재검토·병합만 남음.
-  3. M7(계측): `AckLoggingFilter`는 이미 있고 테스트도 채워짐. 로그 grep 집계 방법만 `docs/EXPERIMENT-LOG.md`에 문서화하면 된다.
-  4. M8(실험): PLAN §3 M8 절차대로 slow-mode 경계 실험(echo 고정, 2.5/3.0/5/30s × 5회) → 실제 LLM 실험 → dedup on/off 대비 → 오류 유도 매트릭스.
-  5. P1 후속 과제로만 남기는 것들(병합 차단 아님): codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감), code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등), 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증.
+  1. M7(계측): `AckLoggingFilter`는 이미 있고 테스트도 채워짐. 로그 grep 집계 방법(재전송 횟수·중복 억제 수·중복 답글 수·LLM 소요 시간을 답변/실패안내 분리 집계, `ack_delivered` 포함)만 `docs/EXPERIMENT-LOG.md`에 문서화하면 된다. 새 코드는 필요 없다.
+  2. M8(실험): PLAN §3 M8 절차대로 slow-mode 경계 실험(echo 고정, 2.5/3.0/5/30s × 5회) → 실제 LLM 실험 → dedup on/off 대비 → 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16).
+  3. M8 완료 후 `docs/EXPERIMENT-LOG.md`·`AGENTS.md` 현재 단계 줄 갱신, PRD §6 1단계 체크박스 3개를 실측 데이터로 채운다(§3 M8-8). **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`)는 사용자 승인 필요 — 자동 진행하지 않는다.**
+  4. P1 후속 과제로만 남기는 것들(병합 차단 아님, M6 리뷰에서 발견): codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감), code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등), 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증.
 - **LLM 품질 튜닝(2026-09-23)**: qwen2.5:7b가 느슨한 지시에서 중국어·영어를 섞어 답한 사례 실측. `OpenAiCompatibleLlmClient`의 시스템 프롬프트를 강화하고 `temperature=0.3` 추가로 해결 확인(실제 멘션 재검증 완료).
 ---
 
