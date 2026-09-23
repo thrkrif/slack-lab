@@ -41,12 +41,14 @@ flowchart LR
 
 | 패키지 | 클래스 | 책임 | 2단계에서 |
 |---|---|---|---|
-| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 | 수신 서버에 남고 큐 저장 결과에 따라 응답 |
+| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 · dedup/handler 연결 | 수신 서버에 남고 큐 저장 결과에 따라 응답 |
 | | `SlackSignatureVerifier` | HMAC-SHA256 서명 검증 | 수신 서버에 남음 |
 | | `SlackClient` | `chat.postMessage` 발신 | **워커로 이동** |
+| | `AckLoggingFilter` | 응답 쓰기 성공/실패를 `ack_delivered`로 관측(P0-7). dedup 상태는 바꾸지 않는다 | 수신 서버에 남음 |
 | `event/` | `SlackMessageEvent` | 페이로드 → 값 객체 | 큐 메시지 스키마가 됨 |
-| | `EventDeduplicator` | `event_id` 중복 제거 | 워커의 공유 처리 상태로 확장 (§3.2) |
-| | `SlackEventHandler` | LLM 호출 + 답글 | 워커에서 호출하며 처리 결과 계약을 확장 |
+| | `EventDeduplicator`·`AttemptHandle`·`ClaimResult`·`ProcessingState` | `event_id` 중복 제거·전이 상태 기계 | 워커의 공유 처리 상태로 확장 (§3.2) |
+| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트 | 워커에서 호출하며 처리 결과 계약을 확장 |
+| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`) | 워커 결과 타입으로 확장 |
 | `llm/` | `LlmClient` | 호출 경계 인터페이스 | RAG·LangGraph가 붙는 자리 |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | 워커로 이동 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |

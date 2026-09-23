@@ -131,6 +131,69 @@ sendAsync+cancel(true) 패턴을 채팅·모델확인 공통화, `parseContentSa
 완전히 구분하지 못했다(원인 미상 — 추정하지 않음). `future.cancel(true)`는 API 계약상 맞는 코드라 유지하되,
 이 특정 회귀 테스트의 검출력 한계를 그대로 남긴다.
 
+**codex 세션 소진**: GPT-5h 세션이 소진돼 M6부터는 ralph 지침의 폴백대로 codex 대신 oh-my-claudecode code-reviewer를 critic으로 쓴다. 필요하면 codex 세션 복구 후 재검토한다.
+
+## 2.9 M6 실제 멘션 왕복 (A1, 2026-09-23)
+
+**막힘 원인과 해결**: 처음엔 Event Subscriptions에 app_mention을 추가·저장하고 Enable Events도 켜져 있었는데도 ngrok에 이벤트가 전혀 도착하지 않았다.
+원인은 Slack 앱의 **Socket Mode가 켜져 있었던 것** — Socket Mode가 활성화되면 Request URL이 Verified여도 실제 이벤트는 WebSocket으로만 전달되고 HTTP로는 안 온다.
+Socket Mode를 끄고 Request URL을 지웠다가 다시 등록(재검증)한 뒤에야 이벤트가 도착했다.
+
+| 확인 | 결과 |
+|---|---|
+| A1: 실제 멘션 → 스레드 답글 | 성공. 콜드 스타트 첫 시도 elapsed_ms=19600(LLM), 이후 elapsed_ms=5209로 정상화 |
+| 재전송 관측 | Slack이 3초 타임아웃으로 `retry_num=1 retry_reason=http_timeout` 재전송 — dedup이 정확히 `중복 억제`로 막음(P0-7 목표 현상 실측) |
+| ack_delivered | 정상 처리·중복 억제 양쪽 다 `ack_delivered=true` 로그 확인 |
+| LLM 언어 혼용 | qwen2.5:7b가 느슨한 프롬프트에서 중국어·영어를 섞어 답한 사례 발견. 시스템 프롬프트 강화("한국어로만", 혼용 금지 명시) + `temperature=0.3` 추가로 해결, 재검증 완료 |
+
+**미해결(당시)**: code-reviewer(codex 세션 소진으로 대체) 리뷰에서 HIGH 1건 발견 — `SlackEventHandler.handle()`에 예외 가드가 없어 예상 못한 예외 시 dedup이 `PROCESSING`에 영구 고착한다(함정 1·3번). 아래 §2.10에서 해결.
+
+## 2.10 M5 codex critic 2차 재검토 + M6 HIGH/MEDIUM 수정 (2026-09-23)
+
+**codex 세션 복구 확인**: ping 요청에 정상 응답 — M4/M5 리뷰 당시 소진됐던 세션이 복구됐다. 이후 critic 요청은 codex로 재개.
+
+**브랜치 분리**: `feature/m5-slack-client`에 섞여 있던 M5 codex 2차 수정(`SlackClient`·`OpenAiCompatibleLlmClient` 등)과 M6 신규 파일을 diff 단위로 분리했다.
+M5 수정분만 커밋(`ea80c92`)해 PR #11에 반영 → codex critic 재검토 → **OKAY**(병합 차단 결함 없음, 종합 권고 COMMENT/WATCH) → 병합.
+M6 파일은 `git stash`로 보관했다가 병합된 `develop`에서 새로 판 `feature/m6-handler`에 복원했다.
+
+codex가 짚은 비차단 의견 2건(모두 병합 안 막음, P0 범위 밖으로 분류):
+- MEDIUM: `SlackClient.postMessage`의 `sendAsync()` 제출과 취소 타이머 예약이 같은 `try` 안에 있어, 제출 성공 후 예약 자체가 실패하면 이미 나갔을 수 있는 요청을 `Failed`로 오분류할 수 있다(일반 실행 경로에서 발생 조건은 미확인).
+- LOW: 같은 패턴이 `OpenAiCompatibleLlmClient`에도 있고, 두 클라이언트 모두 요청 준비 시간을 `remainingMs`에서 차감하지 않는다(이번 커밋 이전부터 있던 사항, 회귀 아님).
+
+**M6 HIGH 버그 수정**: `SlackEventHandler.handle()` 전체를 try/catch로 감싸고, `markSending` 진입 여부를 `boolean[]` 플래그로 추적해
+예외 발생 시 진입 전이면 `markFailed`, 진입 후면 `markUnknown`으로 종료 상태를 확정하도록 고쳤다. 같은 원리로
+`OpenAiCompatibleLlmClient.buildRequest`의 직렬화 실패도 예외 대신 `LlmResult.Failed`를 반환하게 했다.
+
+**M6 MEDIUM 4건**: LLM 예산을 `llm.deadline-ms`뿐 아니라 총 처리 기한에서 발신 몫(`slack.send-deadline-ms`)을 뺀 값으로도 clamp(A16),
+`event_callback` 외 타입은 400 대신 200+무시로 변경(재전송 유발 방지), slow-mode 테스트를 `ArgumentCaptor`로 실제 차감된 `remainingMs` 값을 검증하도록 강화,
+`AckLoggingFilter` 단위 테스트 5건 신규 작성 + 401/400 응답엔 `ack_delivered` 로그를 생략하도록 수정.
+
+수정 후 `./gradlew build` 전체 통과 확인(기존 테스트 회귀 없음, 신규 테스트 포함).
+
+## 2.11 M6 PR #12 최종 검토 2회전 (2026-09-23)
+
+**codex usage limit**: PR #12(커밋 `21b7da2`)에 codex critic 재검토를 요청했으나 `ERROR: You've hit your usage limit`로 exit=1 실패 —
+판정을 받지 못했다(§2.9의 "codex 세션 소진"과는 다른 원인). 계획대로 code-reviewer(대체)로 폴백.
+
+**code-reviewer 2차 리뷰 결과 — REQUEST CHANGES (차단 1건)**:
+- **[HIGH]** 이번 커밋의 핵심 수정인 `SlackEventHandler.handle()`의 예외 가드에 회귀 테스트가 0건이었다. 8건의 handler 테스트 중
+  `thenThrow`로 예외를 주입하는 테스트가 하나도 없어, 지난 라운드에 고친 "예외 시 PROCESSING 영구 고착" 결함이 재발해도 빌드가 그대로 통과하는 상태였다(규칙 5 위반).
+- **[MEDIUM]** slow-mode의 인위적 지연(sleep)이 LLM 호출과 다른 예산식을 써서, `llm.deadline-ms` 계산에만 추가한 총 기한 clamp가 sleep에는 적용되지 않았다.
+  `processing.total-deadline-ms`를 줄이거나 `slow-mode-ms`를 크게 준 M8 실험 조합에서 A16을 넘길 수 있는 경로가 남아 있었다.
+- **[MEDIUM]** `AckLoggingFilter`의 `ack_delivered` 생략 조건이 상태 코드 denylist(400·401)라, `url_verification` 200·무시된 type 200 등
+  event_id가 애초에 없는 다른 200 응답 경로에서 `ack_delivered=true event_id=null`이 새고 있었다. M7의 로그 집계를 오염시키는 경로였다.
+- 그 외 LOW 5건(SlackClient 워치독 +500ms, `EventDeduplicator.markFailed`가 SENDING 상태에서 항상 먼저 "전이 거절" WARN을 남기는 노이즈,
+  handle() 종료 로그 자체에서 예외 나면 반환값이 실제와 어긋나는 경계, 필터 경로 비교의 컨텍스트 패스 취약성, `boolean[]` 대신 지역 변수로도 충분하다는 최적성 의견)과
+  Open Question 1건(시계 소스 결합)은 병합 차단 아님 — P1 검토 대상으로만 PLAN에 남긴다.
+
+**반영**: HIGH·MEDIUM 2건 모두 수정.
+- 예외 주입 회귀 테스트 2건 추가(`markSending` 전/후 각각 `thenThrow` → `Failed`/`Unknown` + dedup 상태 확인).
+- `llmBudgetMs(t0)` 헬퍼로 예산식을 하나로 합쳐 slow-mode sleep과 LLM 호출 양쪽에 동일하게 적용.
+- `AckLoggingFilter`를 상태 코드 denylist 대신 `EVENT_ID_ATTR` 존재 여부(positive guard)로 전환 — 컨트롤러가 처리 대상으로 판단한 요청에만 로그가 남는다. 테스트도 상태 코드 스텁에서 event_id 유무 스텁으로 갱신.
+- `ARCHITECTURE.md` §2에 `AckLoggingFilter`·`HandlingResult`(및 M3부터 누락돼 있던 `AttemptHandle`·`ClaimResult`·`ProcessingState`)를 추가(규칙 9).
+
+수정 후 `./gradlew build` 재확인 통과(신규 회귀 테스트 포함, A13 재확인 0건).
+
 ## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
 조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.

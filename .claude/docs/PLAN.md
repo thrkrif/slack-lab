@@ -36,25 +36,32 @@
   - [x] `LlmClient`/`OpenAiCompatibleLlmClient`(M1.5 A2 전송)/`EchoLlmClient`/`LlmConfig`, 기동 시 fail-fast 모델 확인+웜업
   - [x] 실제 Ollama 호출 성공, 잘못된 모델 기동 실패, 우회 플래그 확인 (`docs/EXPERIMENT-LOG.md` §2.6)
   - [x] codex critic 2회전(REQUEST CHANGES → 4건 수정 → 승인, `docs/EXPERIMENT-LOG.md` §2.8)
-- [x] **M5 Slack 발신 클라이언트** — 완료 (PR 병합 대기)
+- [x] **M5 Slack 발신 클라이언트** — 완료 (병합됨, #11)
   - [x] `SlackClient`(3분류 `SlackSendResult`: Success/Failed/Unknown), M1.5 A2 전송, 예산 소진 시 미발신(A15 대비)
   - [x] 실제 스레드 답글 성공, `ok:false`(스코프 부족·미초대·잘못된 채널) 각각 분류 확인 (`docs/EXPERIMENT-LOG.md` §2.7)
   - [x] 사람 조작: Slack 앱에 `chat:write` 스코프 추가 후 재설치, 테스트 채널에 봇 초대
-  - [x] codex critic 2회전 검토 대상에 포함(§2.8), `SlackClient`의 interrupt 미취소 결함도 M4 리뷰에서 함께 발견해 수정
-- [ ] M6 · M7 · M8 — 미착수
-
+  - [x] codex critic 2회전 모두 승인: 1차(§2.8, interrupt 미취소 결함 발견·수정) → 2차(ok 필드·5xx·부분 처리 오류코드를 결과 불명으로 재분류) → OKAY, WATCH 등급의 비차단 보완 의견 2건은 §2.9에 후속 과제로 기록
+- [~] **M6 핸들러 + 흐름 조립** — 진행 중, 코드리뷰 2회전 완료·최종 재검토 대기
+  - [x] `HandlingResult`·`SlackEventHandler`(LLM→답변/실패안내, markSending 게이트, sealed switch)·컨트롤러 연결(dedup+handler), `AckLoggingFilter`
+  - [x] 단위 테스트 27건(handler 12 + controller 11 + AckLoggingFilter 5 신규 포함), A13 재확인
+  - [x] curl 유도: A5(bot_id 무시), 실제 LLM+Slack 왕복 성공(답변 경로), A6(b) 실패 안내 경로, A8(ok:false invalid_thread_ts로 실증)
+  - [x] A1 실제 멘션 왕복 성공 — 막힘 원인은 Slack 앱의 Socket Mode 활성화였음(§2.9)
+  - [x] code-reviewer(대체) 1차 REQUEST CHANGES 6건 중 코드 5건 반영(§2.10): HIGH(`handle()` 예외 가드), MEDIUM 4건(LLM 예산 clamp, `event_callback` 외 200+무시, slow-mode ArgumentCaptor 검증, `AckLoggingFilter` 테스트+로그 생략). 6번째(브랜치 분리)는 별도 완료
+  - [x] **브랜치 분리 완료**: M5 수정분만 먼저 커밋(`ea80c92`)→PR #11 갱신→codex critic 재검토 OKAY→병합. `develop`에서 `feature/m6-handler` 새로 분기해 M6 파일만 올림(PR #12)
+  - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차: REQUEST CHANGES 1건(HIGH — 예외 가드 자체의 회귀 테스트 0건) + MEDIUM 2건 권고. HIGH·권고 MEDIUM 모두 반영: 예외 주입 테스트 2건 추가, LLM 예산 clamp를 `llmBudgetMs()` 헬퍼로 통합해 slow-mode sleep에도 적용, `AckLoggingFilter`를 상태코드 denylist 대신 event_id 존재 여부(positive guard)로 전환 + 테스트 갱신. `ARCHITECTURE.md` §2에 `AckLoggingFilter`·`HandlingResult`(및 누락돼 있던 M3 타입) 추가(규칙 9)
+  - [ ] 위 2차 수정에 대한 최종 재검토(코드는 그대로, 회귀테스트·문서만 추가) → PR #12 병합
+- [ ] M7 · M8 — 미착수
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **다음 작업**: M6 핸들러+흐름 조립(`feature/m6-handler`, `develop`에서 분기). 여기서 **A1 실제 멘션 왕복**(사람 확인 지점)을 만난다.
-- **현재 코드**: M4 + `slack/SlackClient`·`SlackSendResult`. 컨트롤러·핸들러 연결은 아직 없음(M6). 테스트 채널은 봇이 이미 초대돼 있고 `chat:write` 스코프도 반영됨(재설치 완료, 토큰 값은 안 바뀜).
-- **M6에서 확인할 가정**: `SlackMessageEvent`는 봇 자신의 멘션 토큰을 `authorizations[0].user_id`로 식별한다. 실제 Slack 페이로드에 이 필드가 오는지는 M6 실제 멘션에서 확인한다(없으면 문장 앞 멘션만 지우는 폴백이 동작).
-- **환경**: `.env`에 Slack 토큰·Signing Secret·`LLM_MODEL`이 있다(값은 출력 금지). 클론·새 worktree에서는 `git config core.hooksPath .githooks`로 훅을 켠다. Ollama는 `curl localhost:11434`로 확인하고 죽어 있으면 `ollama serve`. ngrok은 실행 중이 아니다.
-- **결정된 것**: 전송 계층은 A2(`sendAsync`+`cancel(true)`, M4·M5 공통, 예외는 Cancellation·HttpTimeout 모두 기한 초과로 분류). 처리 상한 60초 유지. 규칙 원본은 `AGENTS.md`. Spotless·gitleaks·CI는 도입하지 않고 pre-commit 훅만 둔다.
-- **세션 운영 방식(2026-09-22 변경)**: `/ralph --critic=codex`로 1단계 남은 마일스톤(M4~M8)을 자동 진행 중이다. 마일스톤마다 새 세션을 열지 않고, PR 병합도 승인 없이 진행한다(`AGENTS.md` Git 규칙). codex를 critic으로 병합 전 검증한다. 멈추는 지점은 Slack 화면 조작·ngrok 재등록·단계 전환뿐이다.
-- **사람 확인 지점**: M6 실제 멘션 왕복(ngrok 실행·URL 재등록 필요), M8 실험, 스코프·앱 화면 조작. PR 병합은 1단계 안에서는 승인 없이 진행한다(2026-09-22 결정).
-
+- **다음 작업(우선순위 순)**:
+  1. PR #12(M6) 최종 재검토(2차 REQUEST CHANGES 반영분: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼, `AckLoggingFilter` positive guard) → 승인되면 병합.
+  2. M6 완료 조건(A1~A16, A13)은 이미 다 채워졌다 — 재검토·병합만 남음.
+  3. M7(계측): `AckLoggingFilter`는 이미 있고 테스트도 채워짐. 로그 grep 집계 방법만 `docs/EXPERIMENT-LOG.md`에 문서화하면 된다.
+  4. M8(실험): PLAN §3 M8 절차대로 slow-mode 경계 실험(echo 고정, 2.5/3.0/5/30s × 5회) → 실제 LLM 실험 → dedup on/off 대비 → 오류 유도 매트릭스.
+  5. P1 후속 과제로만 남기는 것들(병합 차단 아님): codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감), code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등), 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증.
+- **LLM 품질 튜닝(2026-09-23)**: qwen2.5:7b가 느슨한 지시에서 중국어·영어를 섞어 답한 사례 실측. `OpenAiCompatibleLlmClient`의 시스템 프롬프트를 강화하고 `temperature=0.3` 추가로 해결 확인(실제 멘션 재검증 완료).
 ---
 
 ## 1. 요구사항 요약
