@@ -49,16 +49,23 @@
   - [x] code-reviewer(대체) 1차 REQUEST CHANGES 6건 중 코드 5건 반영(§2.10), 6번째(브랜치 분리)는 별도 완료(M5 PR #11 분리 병합)
   - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차 REQUEST CHANGES 1건(예외 가드 회귀 테스트 0건) + MEDIUM 2건 모두 반영: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼로 slow-mode에도 clamp 적용, `AckLoggingFilter` positive guard 전환. `ARCHITECTURE.md` §2 갱신(규칙 9)
   - [x] PR #12 병합 완료(2026-09-23). 반영 안 한 LOW 5건·Open Question 1건은 P1 후속 과제로만 남김(§2.11)
-- [x] **M7 계측** — 완료. 새 코드 없이 로그 grep 집계 방법을 문서화(`docs/EXPERIMENT-LOG.md` §4): 재전송 횟수·중복 억제 수·중복 답글 수(dedup 끈 배치 전용)·LLM 소요 시간(답변/실패 안내 분리)·`ack_delivered`. **아직 실제 로그로 실행해보지 않았다 — M8-1에서 처음 돌리며 검증**
-- [ ] M8 — 미착수
+- [x] **M7 계측** — 완료. 로그 grep 집계 방법을 문서화(`docs/EXPERIMENT-LOG.md` §4). M8 파일럿 로그로 실제 검증 완료, 버그 1건(재전송 사유 집계가 `retry_reason=null`도 같이 셈) 발견·수정
+- [~] **M8 실험** — 진행 중(핵심 관측 완료, 전체 매트릭스는 남음)
+  - [x] 실제 멘션으로 재전송+dedup 억제 관측(§5.1): Slack이 정확히 3.0초에 재전송, dedup이 즉시 막아 답글 1건만 나감
+  - [x] `experiment.dedup-enabled=false`로 실제 중복 답글 재현(§5.2, M8-4): 같은 event_id가 다른 attempt_id로 독립 처리돼 채널에 댓글 2개 — "왜 큐가 필요한가"의 직접 증거 확보
+  - [x] 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16)는 이미 확보된 근거로 §5.4에 표로 정리(재유도 없음)
+  - [ ] **범위 축소**: PLAN §3 M8-2가 요구하는 전체 매트릭스(지연 4종×각 5회=20회)는 각 회차가 실제 Slack 멘션+앱 재시작을 요구해 이번엔 5초 지연 1회씩만 실측했다(§5). 전체 반복과 M8-5(선택 배치)는 다음 세션 과제
+  - [ ] PRD §6 1단계 체크박스 3개를 이 실측으로 채우는 작업은 아직 안 함(부분 데이터라 통계적 판정엔 이름)
+- [ ] 1단계 완료(`main` 병합·태그) — **사용자 승인 필요, 자동 진행 안 함**
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
 - **다음 작업(우선순위 순)**:
-  1. M8(실험): PLAN §3 M8 절차대로 slow-mode 경계 실험(echo 고정, 2.5/3.0/5/30s × 5회) → 실제 LLM 실험 → dedup on/off 대비 → 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16). `docs/EXPERIMENT-LOG.md` §4의 grep 명령을 여기서 처음 실행해보고, 필드명 오타 등이 있으면 그 자리에서 고친다.
-  2. M8 완료 후 `docs/EXPERIMENT-LOG.md`·`AGENTS.md` 현재 단계 줄 갱신, PRD §6 1단계 체크박스 3개를 실측 데이터로 채운다(§3 M8-8). **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`)는 사용자 승인 필요 — 자동 진행하지 않는다.**
+  1. M8 나머지: 전체 5회×4종(2.5/3.0/5/30s) 경계 매트릭스, M8-5(기한 늘려 하드캡 가리는 현상 관측). 방법은 §5와 동일(echo client + `EXPERIMENT_SLOWMODEMS` 환경변수로 앱 재시작, 실제 Slack 멘션으로 재전송 유도 — 합성 curl로는 Slack의 진짜 3초 재전송이 안 생긴다).
+  2. 전체 매트릭스 완료 후 `AGENTS.md` 현재 단계 줄 갱신, PRD §6 1단계 체크박스 3개를 실측 데이터로 채운다(§3 M8-8). **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`)는 사용자 승인 필요 — 자동 진행하지 않는다.**
   3. P1 후속 과제로만 남기는 것들(병합 차단 아님, M6 리뷰에서 발견): codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감), code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등), 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증.
+  4. 실험용으로 쓴 테스트 채널 메시지(M8 파일럿 2건, 태그 `M8 경계실험 A`·`M8 중복답글 실험 B`)는 정리(삭제)가 필요하면 다음 세션에서 처리 — 이번 세션에선 그대로 남겨뒀다.
 - **LLM 품질 튜닝(2026-09-23)**: qwen2.5:7b가 느슨한 지시에서 중국어·영어를 섞어 답한 사례 실측. `OpenAiCompatibleLlmClient`의 시스템 프롬프트를 강화하고 `temperature=0.3` 추가로 해결 확인(실제 멘션 재검증 완료).
 ---
 

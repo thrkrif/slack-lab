@@ -234,8 +234,8 @@ Slack이 3초 안에 2xx를 못 받으면 같은 요청을 재전송한다(`Slac
 # 재전송으로 온 요청 수(최초 요청은 두 헤더 모두 비어 있어 retry_num=null로 찍힌다)
 grep "slack 수신 retry_num=" app.log | grep -v "retry_num=null" | wc -l
 
-# 재전송 사유별 분포(http_timeout 등)
-grep -oE "retry_reason=[a-zA-Z_]+" app.log | sort | uniq -c
+# 재전송 사유별 분포(http_timeout 등) — 최초 요청의 retry_reason=null도 패턴에 걸리므로 제외한다
+grep -oE "retry_reason=[a-zA-Z_]+" app.log | grep -v "retry_reason=null" | sort | uniq -c
 ```
 
 ### 4.2 중복 억제 수 (A9·A11)
@@ -299,9 +299,75 @@ grep -c "ack_delivered=false" app.log
 grep -oE "kind=(answer|failure_notice)" app.log | sort | uniq -c
 ```
 
-**한계**: 이 문서화 시점엔 아직 M8 배치를 돌리지 않아 위 명령을 실제 로그에 적용해보지 않았다.
-M8-1(경계 실험)에서 처음 실행하며 명령 자체의 오류(필드명 오타 등)가 나오면 여기 갱신한다.
+**검증 완료(§5)**: M8 파일럿 로그로 위 명령을 전부 실행해봤다. 4.1의 사유별 분포 명령에 버그가 있었다 —
+최초 요청의 `retry_reason=null`도 패턴에 걸려 함께 집계됐다. `grep -v "retry_reason=null"`을 추가해 고쳤다(위에 반영됨).
+나머지 명령(중복 억제·중복 답글·kind별 총소요·ack_delivered)은 §5.1·§5.2 실측과 정확히 일치했다.
 
-## 5. 경계 실험 (M8)
+## 5. 경계 실험 (M8, 2026-09-23)
 
-미수행.
+**범위 축소 고지**: PLAN §3 M8-2가 요구하는 전체 매트릭스(지연 4종 × 각 5회 = 20회)는 이번 세션에서 수행하지 않았다.
+매 회차가 실제 Slack 채널에 멘션 1건 + 앱 재시작 1회를 필요로 해(합성 curl로는 Slack의 진짜 3초 재전송을 유발할 수
+없다 — Slack 엣지가 직접 보낸 요청이어야 재전송 타이머가 돈다), 이번엔 P0-7의 핵심 두 현상(재전송+dedup 억제,
+dedup 끈 상태의 실제 중복 답글)만 각 1회 실측했다. **전체 5회×4종 매트릭스와 M8-5 선택 배치는 다음 세션 과제로
+남긴다.** 아래 event_id·채널ID는 마스킹했다(Git 규칙).
+
+환경: M0과 동일(`qwen2.5:7b`, Ollama 로컬), `llm.client=echo`로 전환해 LLM 응답 자체는 즉시(0ms) 반환되게 하고
+`experiment.slow-mode-ms`로만 지연을 인위적으로 만들었다(PLAN M8-2 방법론 그대로). ngrok 터널은 기존 것을 재사용
+(재등록 불필요), Slack Event Subscriptions도 짧은 세션 안에 자동 비활성화되지 않았다(M8-7 체크리스트 항목 확인).
+
+### 5.1 경계 실험 — dedup ON (파일럿 1회, slow-mode=5000ms)
+
+실제 멘션 1건 전송, 로그 원문(마스킹):
+
+| 시각 | 이벤트 | 비고 |
+|---|---|---|
+| t+0.000s | 최초 수신 `retry_num=null` | |
+| t+2.996s | 재전송 수신 `retry_num=1 retry_reason=http_timeout` | Slack이 정확히 3.0초에서 재전송 |
+| t+2.996s | `중복 억제 existing_state=PROCESSING` | 재전송이 dedup에 즉시 막힘, `ack_delivered=true`(200 즉시 반환) |
+| t+5.026s | 원 요청 `LLM 성공 elapsed_ms=0` | slow-mode 5000ms가 그대로 소모됨 |
+| t+5.435s | `Slack 발신 성공` → `결과=Delivered` | 총 소요 5435ms |
+
+**관측**: 재전송 1회, 중복 억제 1회, 최종 답글 **1건**(Slack 채널에서 스레드 댓글 1개로 육안 확인).
+PRD가 기대한 정확한 동작 — 3초 초과·재전송이 실측되면서도 사용자에게는 답글이 정확히 한 번만 간다.
+
+### 5.2 중복 답글 실험 (M8-4, `experiment.dedup-enabled=false`, slow-mode=5000ms)
+
+같은 조건에서 dedup만 끄고 재실행:
+
+| 시각 | 이벤트 | attempt_id |
+|---|---|---|
+| t+0.000s | 최초 수신 | - |
+| t+3.020s | 재전송 수신 `retry_num=1 retry_reason=http_timeout` | - |
+| t+5.024s | 원 요청 `LLM 성공` → `Slack 발신 성공` → `Delivered` | `attempt#1` |
+| t+8.023s | 재전송 건 `LLM 성공` → `Slack 발신 성공` → `Delivered` | `attempt#2`(다른 attempt_id, 같은 event_id) |
+
+**관측**: 같은 event_id가 서로 다른 attempt_id로 **독립적으로 두 번 처리**돼, 실제 Slack 채널에 **댓글 2개**가
+달렸다(육안 확인). dedup을 끄면 정확히 이 경로로 중복 답글이 발생함을 실측으로 확인했다 — "왜 큐가 필요한가"의
+직접적 근거(PRD §8, 결정 사항 §6 참고).
+
+### 5.3 실제 LLM 실험 (M8-3)
+
+별도로 반복하지 않고 §2.9의 A1 실측을 그대로 채택한다: 콜드 스타트 elapsed_ms=19600, 이후 elapsed_ms=5209로
+정상화. `llm.client=echo`가 아닌 실제 Ollama 경로에서도 재전송(§2.9 표)·`ack_delivered`가 §5.1과 같은 패턴으로
+관측됐다.
+
+### 5.4 오류 유도 매트릭스 (M8-6)
+
+새로 유도하지 않고 이미 실측된 근거를 표로 모은다 — 전부 이 저장소 안에서 curl 또는 실제 왕복으로 확인됨.
+
+| # | 결과 | 근거 |
+|---|---|---|
+| A2 | 서명 불일치·5분 초과 → 401, LLM·발신 0회 | §2.5, 단위 테스트 |
+| A5 | `bot_id` 포함 이벤트 → 200 무시, 핸들러 미호출 | §2.9(A1 인접 관측), 컨트롤러 테스트 |
+| A6 | LLM 실패 → 실패 안내 1회 | §2.6·§2.9 |
+| A7 | LLM 기한 초과 → 취소, 소켓 실제 종료 | §3 (M1.5 스파이크) |
+| A8 | `ok:false`(invalid_thread_ts 등) → 실패로 분류, 예외 누출 없음 | §2.7, 본 세션 §5.1 사전 점검(11:24:18 로그) |
+| A10 | 전송 결과 불명 → `UNKNOWN`, 자동 재발신 없음 | §2.7 |
+| A15 | 예산 소진 → 발신 0회, `FAILED` | M6 handler 단위 테스트(`SlackEventHandlerTest`) |
+| A16 | 총 소요 60초 이내(호출별 기한의 합으로 강제) | §2.11 `llmBudgetMs()` clamp, 본 세션 §5.1·§5.2 실측(5.4~8.0초, 정상 범위) |
+
+### 5.5 남은 과제
+
+- 전체 5회×4종(2.5/3.0/5/30s) 경계 매트릭스 — 이번엔 5s 1회만 실측.
+- M8-5 선택 배치(기한을 늘려 하드캡이 가리는 현상 관측) — 미수행.
+- 위 결과는 P0 완료 판정(PRD §6)에 필요한 최소 증거는 채웠으나, 통계적으로 반복 검증된 것은 아니다.
