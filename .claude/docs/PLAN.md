@@ -1,10 +1,79 @@
 # 1단계(P0) 작업 계획 — slack-lab
 
-**상태: pending approval** (Consensus 1회전 완료: Architect·Critic 모두 APPROVE-WITH-IMPROVEMENTS, 개선안 병합됨. 승인 전에는 코드·설정 파일을 만들지 않는다)
+**상태: 승인됨 · 구현·실험 완료(M0~M8), 단계 전환은 사용자 승인 대기** (Consensus 1회전 완료: Architect·Critic 모두 APPROVE-WITH-IMPROVEMENTS, 개선안 병합됨. 마일스톤별 진행은 아래 `진행 상태`)
 정본: 이 파일 (`.omc/plans/stage1-p0-plan.md`는 consensus 산출물 사본)
-근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`CLAUDE.md`](../../CLAUDE.md)
-범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (CLAUDE.md 규칙 1).
+근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`AGENTS.md`](../../AGENTS.md)
+범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (AGENTS.md 규칙 1).
 
+## 진행 상태
+
+세션을 작업 단위로 교체하며 진행한다. 새 세션은 이 절과 `docs/EXPERIMENT-LOG.md`를 먼저 읽는다. 마일스톤을 끝낼 때마다 갱신한다.
+
+- 현재 브랜치 기준: `develop` (기본 브랜치). 기능은 `feature/mN-…`에서 작업한다.
+- [x] **M0 사전 준비** — 완료
+  - [x] Ollama 0.34.0 설치, `qwen2.5:7b` 실응답·모델 정보 기록 (`docs/EXPERIMENT-LOG.md` §1·§2.1)
+  - [x] ngrok 3.39.11 설치
+  - [x] Slack 앱 생성·스코프 설치, 토큰·Signing Secret을 `.env`에 저장 (사용자)
+  - [x] ngrok authtoken 등록 (사용자), 60초 지연 실측 통과 — 예산 조정 없음 (`docs/EXPERIMENT-LOG.md` §2.3)
+  - [x] `.env.example` 작성 (키 이름만)
+- [x] **M1 프로젝트 골격** — 완료 (병합됨, #4)
+  - [x] Gradle Wrapper 8.14.3·Java 21·Boot 3.4.1, 패키지 `com.slack.lab`, 설정 record 4종(키는 M1 목록 그대로)
+  - [x] `.env` 로드 후 `bootRun` → `/health` 200 확인
+  - [x] `SLACK_SIGNING_SECRET` 누락 시 기동 실패, 로그에 `slack.signingSecret` 원인 출력 (A3)
+  - [x] `./gradlew build` 통과 (설정 바인딩·`/health` 테스트 4건)
+  - [x] 도구 결정: Spotless·gitleaks·CI 미도입, 의존성 없는 `.githooks/pre-commit` 도입 (`AGENTS.md` Git 규칙)
+- [x] **M1.5 기한 강제 스파이크** — 완료 (PR 병합 대기)
+  - [x] 스텁 3종 × 방식 3종 측정, 서버 쪽 소켓 종료 감지로 판정 (`docs/EXPERIMENT-LOG.md` §3, 재현: `docs/spikes/DeadlineSpike.java`)
+  - [x] 채택: A2 (`sendAsync` + 호출별 `cancel(true)`), `request.timeout`은 헤더까지만 덮음
+- [x] **M2 서명 검증 + 수신 컨트롤러** — 완료 (병합됨, #6)
+  - [x] `SlackSignatureVerifier`·`SlackEventController`, curl 검증 (`docs/EXPERIMENT-LOG.md` §2.5)
+  - [x] ngrok URL을 Slack Request URL에 등록해 **Verified** 확인 (사용자, 2026-09-22)
+- [x] **M3 값 객체 + 중복 억제** — 완료 (병합됨, #7)
+  - [x] `SlackMessageEvent`(shouldIgnore·replyThreadTs·promptText), `EventDeduplicator`·`AttemptHandle`·`ClaimResult`·`ProcessingState`
+  - [x] 단위 테스트 20건: 동시 64회 선점 1승(A9), 소유자 아닌 전이 거절, TTL 경계, 청소가 실행 중 엔트리를 안 지움, FAILED 재선점, dedup 스위치. 선점을 비원자적(get 후 판단)으로 바꾸면 동시성 테스트가 실패함을 확인
+  - [x] A13: `grep -rE "jakarta\.servlet|org\.springframework\.http" src/main/java/com/slack/lab/event/` 0건
+- [x] **M4 LLM 클라이언트** — 완료 (PR 병합 대기)
+  - [x] `LlmClient`/`OpenAiCompatibleLlmClient`(M1.5 A2 전송)/`EchoLlmClient`/`LlmConfig`, 기동 시 fail-fast 모델 확인+웜업
+  - [x] 실제 Ollama 호출 성공, 잘못된 모델 기동 실패, 우회 플래그 확인 (`docs/EXPERIMENT-LOG.md` §2.6)
+  - [x] codex critic 2회전(REQUEST CHANGES → 4건 수정 → 승인, `docs/EXPERIMENT-LOG.md` §2.8)
+- [x] **M5 Slack 발신 클라이언트** — 완료 (병합됨, #11)
+  - [x] `SlackClient`(3분류 `SlackSendResult`: Success/Failed/Unknown), M1.5 A2 전송, 예산 소진 시 미발신(A15 대비)
+  - [x] 실제 스레드 답글 성공, `ok:false`(스코프 부족·미초대·잘못된 채널) 각각 분류 확인 (`docs/EXPERIMENT-LOG.md` §2.7)
+  - [x] 사람 조작: Slack 앱에 `chat:write` 스코프 추가 후 재설치, 테스트 채널에 봇 초대
+  - [x] codex critic 2회전 모두 승인: 1차(§2.8, interrupt 미취소 결함 발견·수정) → 2차(ok 필드·5xx·부분 처리 오류코드를 결과 불명으로 재분류) → OKAY, WATCH 등급의 비차단 보완 의견 2건은 §2.9에 후속 과제로 기록
+- [x] **M6 핸들러 + 흐름 조립** — 완료 (병합됨, #12)
+  - [x] `HandlingResult`·`SlackEventHandler`(LLM→답변/실패안내, markSending 게이트, sealed switch)·컨트롤러 연결(dedup+handler), `AckLoggingFilter`
+  - [x] 단위 테스트 27건(handler 11 + controller 11 + AckLoggingFilter 5 신규 포함), A13 재확인
+  - [x] curl 유도: A5(bot_id 무시), 실제 LLM+Slack 왕복 성공(답변 경로), A6(b) 실패 안내 경로, A8(ok:false invalid_thread_ts로 실증)
+  - [x] A1 실제 멘션 왕복 성공 — 막힘 원인은 Slack 앱의 Socket Mode 활성화였음(§2.9)
+  - [x] code-reviewer(대체) 1차 REQUEST CHANGES 6건 중 코드 5건 반영(§2.10), 6번째(브랜치 분리)는 별도 완료(M5 PR #11 분리 병합)
+  - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차 REQUEST CHANGES 1건(예외 가드 회귀 테스트 0건) + MEDIUM 2건 모두 반영: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼로 slow-mode에도 clamp 적용, `AckLoggingFilter` positive guard 전환. `ARCHITECTURE.md` §2 갱신(규칙 9)
+  - [x] PR #12 병합 완료(2026-09-23). 반영 안 한 LOW 5건·Open Question 1건은 P1 후속 과제로만 남김(§2.11)
+- [x] **M7 계측** — 완료. 로그 grep 집계 방법을 문서화(`docs/EXPERIMENT-LOG.md` §4). M8 파일럿 로그로 실제 검증 완료, 버그 1건(재전송 사유 집계가 `retry_reason=null`도 같이 셈) 발견·수정
+- [x] **M8 실험** — 완료
+  - [x] 재전송+dedup 억제 관측(§5.1): Slack이 정확히 3.0초에 재전송, dedup이 즉시 막아 답글 1건만 나감
+  - [x] 지연값 스윕(§5.1.1): 1000·2000ms(재전송 0/3) vs 2500·3000·5000·30000ms(재전송 다수) — 실제 경계는 2000~2500ms 사이, PLAN 원안의 "2.5초는 안전" 가정이 틀렸음을 실측으로 발견(원인: dedup·발신 네트워크 오버헤드가 slow-mode 위에 얹힘)
+  - [x] `experiment.dedup-enabled=false`로 실제 중복 답글 재현(§5.2, M8-4): 같은 event_id가 다른 attempt_id로 독립 처리돼 채널에 댓글 — "왜 큐가 필요한가"의 직접 증거. 재시작 타이밍이 겹쳐 인메모리 dedup이 재시작에서 살아남지 못하는 P1 한계도 부수적으로 실측(§5.2 정정 내용)
+  - [x] 실제 LLM 실험은 A1(§2.9)으로 대체 확인, 재유도 없음(§5.3)
+  - [x] 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16) — 이미 확보된 근거로 §5.4에 표로 정리
+  - [x] M8-5 선택 배치(§5.6): 기한을 90/100초로 늘려 70초 지연도 정상 응답됨을 확인 — 기본 50초 하드캡이 정상 응답을 실패로 오분류할 수 있음을 실측
+  - [x] PRD §6 1단계 체크박스 3개 모두 이 실측 근거로 체크 완료
+- [ ] **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`, `AGENTS.md` 현재 단계 줄 갱신)** — **사용자 승인 필요, 자동 진행 안 함**
+### 다음 세션 핸드오프
+
+단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
+
+- **1단계 실험까지 전부 완료됐다.** 남은 건 사용자가 승인하는 단계 전환뿐이다:
+  1. 사용자가 1단계 완료를 요청하면: `AGENTS.md` 현재 단계 줄을 "2단계"로 갱신, `develop`→`main` merge commit + 태그 `v0.1.0`.
+  2. 그 전까지는 P1 후속 과제만 선택적으로 처리한다(병합 차단 아님, 모두 M6·M8 리뷰/실측에서 발견):
+     - codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감)
+     - code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등)
+     - 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증
+     - 재시작 시 인메모리 dedup 유실(§5.2) — P1 본연의 과제(큐·공유 저장소)로 자연 승계
+     - 정확한 재전송 경계값 재세분화(§5.1.1 한계 — 2100~2400ms 구간)
+  3. 실험용으로 쓴 테스트 채널 메시지(M8 파일럿·스윕 다수)는 정리(삭제)가 필요하면 처리 — 이번 세션에선 그대로 남겨뒀다.
+  4. 실험용으로 쓴 테스트 채널 메시지(M8 파일럿 2건, 태그 `M8 경계실험 A`·`M8 중복답글 실험 B`)는 정리(삭제)가 필요하면 다음 세션에서 처리 — 이번 세션에선 그대로 남겨뒀다.
+- **LLM 품질 튜닝(2026-09-23)**: qwen2.5:7b가 느슨한 지시에서 중국어·영어를 섞어 답한 사례 실측. `OpenAiCompatibleLlmClient`의 시스템 프롬프트를 강화하고 `temperature=0.3` 추가로 해결 확인(실제 멘션 재검증 완료).
 ---
 
 ## 1. 요구사항 요약
@@ -29,7 +98,7 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 | A11 | 재전송 횟수·중복 억제 수·중복 답글 수·LLM 소요 시간이 event_id 단위 로그로 집계된다. **정상 답변과 실패 안내를 분리 집계**하고 `ack_delivered`를 포함 | 실험 후 로그 집계 스크립트/수동 표 |
 | A12 | `EXPERIMENT-LOG.md`에 장비·Ollama 버전·모델 ID·digest·양자화·토큰 상한이 기록됨 | 문서 확인 (PRD §5 P1 환경 고정 전제). digest·양자화는 M0에서 미리 확보 |
 | A13 | `SlackEventHandler` 계열에 HTTP 타입 import 없음 | `grep -rE "jakarta\.servlet|org\.springframework\.http" src/main/java/com/slack/lab/event/` 결과 0건 |
-| A14 | `./gradlew build` 통과 — **단, 완료 판정은 A1~A12·A15·A16** | CLAUDE.md 규칙 5 |
+| A14 | `./gradlew build` 통과 — **단, 완료 판정은 A1~A12·A15·A16** | AGENTS.md 규칙 5 |
 | A15 | LLM이 기한을 소진해 발신 예산이 남지 않으면 **발신 0회**, 상태 `FAILED`, 로그에 실패 단계 명시 | `llm.deadline-ms`를 총 예산에 근접하게 낮춘 스텁 실험 |
 | A16 | 처리 시작(t0)부터 컨트롤러의 응답 결정까지 총 소요가 **60초 이내** | 단조 시계 로그. 초과하면 결함으로 기록하고 초과 단계를 특정 |
 
@@ -115,7 +184,7 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 5. 선택 배치(1회): `llm.deadline-ms`·`processing.total-deadline-ms`를 늘려 50초 하드 캡이 가리는 현상(90초 뒤 답변 + 그사이 재전송) 관측.
 6. 오류 유도 매트릭스: A2·A5·A6·A7·A8·A10·A15·A16.
 7. **실험 체크리스트**: ngrok URL 재등록, 반복 타임아웃으로 Slack이 이벤트 구독을 자동 비활성화하지 않았는지 배치 사이 확인·재활성화, 배치 간 간격.
-8. 갱신: `docs/EXPERIMENT-LOG.md` 작성(채널 ID·event_id 마스킹), `CLAUDE.md` 현재 단계 줄, 구조가 바뀐 부분은 `ARCHITECTURE.md` (규칙 9). P0 실측으로 PRD §8 "7B로 충분한가"·P1 성능 목표 달성 가능성 판단.
+8. 갱신: `docs/EXPERIMENT-LOG.md` 작성(채널 ID·event_id 마스킹), `AGENTS.md` 현재 단계 줄, 구조가 바뀐 부분은 `ARCHITECTURE.md` (규칙 9). P0 실측으로 PRD §8 "7B로 충분한가"·P1 성능 목표 달성 가능성 판단.
 - **완료**: PRD §6 1단계 체크박스 3개를 실측 데이터로 채움.
 
 ## 4. 리스크와 대응

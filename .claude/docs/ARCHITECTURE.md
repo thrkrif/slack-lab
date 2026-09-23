@@ -1,8 +1,8 @@
 # ARCHITECTURE.md — slack-ai-lab
 
-**목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`CLAUDE.md`](../../CLAUDE.md).
+**목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`AGENTS.md`](../../AGENTS.md).
 
-> 현재 코드는 없다. 이 문서는 앞으로 만들 구조를 기술한다.
+> 현재 코드는 M1 골격(설정 record·`/health`)뿐이다. 이 문서는 앞으로 만들 구조를 기술한다.
 > §7은 폐기한 프로토타입의 검증 기록이다. §8은 당시 결함에서 출발한 새 설계이며, 이 문서의 상태 전이·시간 제한·복구 정책은 아직 구현·검증 전이다.
 
 ---
@@ -41,16 +41,19 @@ flowchart LR
 
 | 패키지 | 클래스 | 책임 | 2단계에서 |
 |---|---|---|---|
-| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 | 수신 서버에 남고 큐 저장 결과에 따라 응답 |
+| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 · dedup/handler 연결 | 수신 서버에 남고 큐 저장 결과에 따라 응답 |
 | | `SlackSignatureVerifier` | HMAC-SHA256 서명 검증 | 수신 서버에 남음 |
 | | `SlackClient` | `chat.postMessage` 발신 | **워커로 이동** |
+| | `AckLoggingFilter` | 응답 쓰기 성공/실패를 `ack_delivered`로 관측(P0-7). dedup 상태는 바꾸지 않는다 | 수신 서버에 남음 |
 | `event/` | `SlackMessageEvent` | 페이로드 → 값 객체 | 큐 메시지 스키마가 됨 |
-| | `EventDeduplicator` | `event_id` 중복 제거 | 워커의 공유 처리 상태로 확장 (§3.2) |
-| | `SlackEventHandler` | LLM 호출 + 답글 | 워커에서 호출하며 처리 결과 계약을 확장 |
+| | `EventDeduplicator`·`AttemptHandle`·`ClaimResult`·`ProcessingState` | `event_id` 중복 제거·전이 상태 기계 | 워커의 공유 처리 상태로 확장 (§3.2) |
+| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트 | 워커에서 호출하며 처리 결과 계약을 확장 |
+| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`) | 워커 결과 타입으로 확장 |
 | `llm/` | `LlmClient` | 호출 경계 인터페이스 | RAG·LangGraph가 붙는 자리 |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | 워커로 이동 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
-| `config/` | `*Properties` | `record` + `@ConfigurationProperties` | 각자 따라 이동 |
+| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController` | `record` + `@ConfigurationProperties`, `/health` | 각자 따라 이동 |
+| | `SlackProperties`(`slack/`)·`LlmProperties`(`llm/`) | 설정은 사용하는 패키지 옆에 둔다. 필수 값(`slack.signing-secret`·`slack.bot-token`·`llm.model`)은 `@Validated`+`@NotBlank`로 누락 시 기동 실패(A3) | 각자 따라 이동 |
 
 ### 절대 경계
 
@@ -185,6 +188,7 @@ Ollama가 OpenAI 호환 엔드포인트(`/v1/chat/completions`)를 제공하므�
 - 검증을 통과하고 처리 권한을 선점한 시점을 `t0`로 잡는다. LLM 단계 기한은 `t0 + 50초`, 전체 처리 기한은 `t0 + 60초`다. 시간 차이는 단조 시계로 계산한다.
 - 인위적 지연, 연결 대기, 연결 수립, 응답 읽기를 모두 LLM 단계 50초에 포함한다. 각 호출은 남은 시간을 전달받으며, 연결 제한은 최대 3초와 남은 시간 중 작은 값이다.
 - `read timeout`만으로 전체 제한을 구현했다고 간주하지 않는다. 구현의 첫 작업으로 스파이크를 돌려 조각 응답·연결 정체에서 요청이 실제로 끊기는지 확인한 뒤 방식을 확정한다(`PLAN.md` M1.5). 사용하는 HTTP 전송 계층이 전체 호출 기한과 진행 중 요청 취소를 지원하는지 구현 시 확인하고, 느린 응답·조각 응답·연결 정체로 검증한다. 인터럽트만 보내고 작업을 방치하는 구현은 허용하지 않는다.
+- **스파이크 결론(2026-09-21, `docs/EXPERIMENT-LOG.md` §3)**: `HttpRequest.timeout`은 응답 헤더까지만 덮어 본문이 멈추면 끊지 못한다. `HttpClient.sendAsync`가 돌려준 future에 호출별 남은 기한으로 `cancel(true)`를 예약하면 3종 스텁(헤더만·본문 절단·무응답) 모두에서 소켓이 닫힌다. LLM·Slack 양쪽 전송 계층이 이 방식을 따른다.
 - LLM이 실패하거나 50초 기한에 도달하면 호출을 취소하고 실패 안내를 선택한다. 늦게 반환된 LLM 결과는 폐기한다. 취소 요청이 Ollama 내부 추론 종료까지 보장한다고 가정하지 않으며, 잔여 추론의 영향은 별도 관측한다.
 - 정상 답변 또는 실패 안내 중 하나만 전송한다. Slack 호출 기한은 `min(전송 시작 + 10초, t0 + 60초)`이며 연결 시간도 포함한다. 남은 시간이 없으면 새 발신을 시작하지 않는다.
 - 답변 전송 실패 뒤 추가 안내를 연쇄 발신하지 않는다. 전송 실패가 명확하면 `FAILED`, 이미 전송됐을 가능성이 있으면 `UNKNOWN`으로 기록한다. 로그에는 event_id·attempt_id·실패 단계·오류 분류를 남긴다.
@@ -329,6 +333,8 @@ Ollama가 느려서 3초 초과는 저절로 재현된다. 그래도 `experiment
 - `chat.postMessage` 실호출과 `ok:false` 처리
 - LLM 실호출 — 프로토타입은 **존재하지 않는 모델 ID**가 박혀 있었다
 - 3초 초과 재전송 동작
+
+> **M1 실증(2026-09-21)**: 골격 기동·`/health` 200·필수 설정 누락 시 기동 실패(원인 로그 출력)를 실행으로 확인했다. 위 "통과한 것" 조합이 그대로 동작한다.
 
 > **교훈**: "빌드가 통과했다"는 외부 연동이 된다는 뜻이 아니다.
 > `PLAN.md`에는 정상 흐름의 **외부 왕복 성공**과 오류 유도 시 기대한 응답·상태·로그 확인을 각각 완료 기준으로 적는다.
