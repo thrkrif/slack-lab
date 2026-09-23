@@ -1,6 +1,6 @@
 # 1단계(P0) 작업 계획 — slack-lab
 
-**상태: 승인됨 · 구현 진행 중** (Consensus 1회전 완료: Architect·Critic 모두 APPROVE-WITH-IMPROVEMENTS, 개선안 병합됨. 마일스톤별 진행은 아래 `진행 상태`)
+**상태: 승인됨 · 구현·실험 완료(M0~M8), 단계 전환은 사용자 승인 대기** (Consensus 1회전 완료: Architect·Critic 모두 APPROVE-WITH-IMPROVEMENTS, 개선안 병합됨. 마일스톤별 진행은 아래 `진행 상태`)
 정본: 이 파일 (`.omc/plans/stage1-p0-plan.md`는 consensus 산출물 사본)
 근거: [`PRD.md`](PRD.md) §4 P0·§5, [`ARCHITECTURE.md`](ARCHITECTURE.md) §2–§4·§8·§10–§11, [`AGENTS.md`](../../AGENTS.md)
 범위: **P0-1 ~ P0-8만.** 큐·Redis·RAG·LangGraph·스레드 문맥·"확인 중" 표시는 넣지 않는다 (AGENTS.md 규칙 1).
@@ -50,21 +50,28 @@
   - [x] codex critic 재검토는 usage limit으로 실패(§2.11) → code-reviewer(대체) 2차 REQUEST CHANGES 1건(예외 가드 회귀 테스트 0건) + MEDIUM 2건 모두 반영: 예외 주입 테스트 2건, `llmBudgetMs()` 헬퍼로 slow-mode에도 clamp 적용, `AckLoggingFilter` positive guard 전환. `ARCHITECTURE.md` §2 갱신(규칙 9)
   - [x] PR #12 병합 완료(2026-09-23). 반영 안 한 LOW 5건·Open Question 1건은 P1 후속 과제로만 남김(§2.11)
 - [x] **M7 계측** — 완료. 로그 grep 집계 방법을 문서화(`docs/EXPERIMENT-LOG.md` §4). M8 파일럿 로그로 실제 검증 완료, 버그 1건(재전송 사유 집계가 `retry_reason=null`도 같이 셈) 발견·수정
-- [~] **M8 실험** — 진행 중(핵심 관측 완료, 전체 매트릭스는 남음)
-  - [x] 실제 멘션으로 재전송+dedup 억제 관측(§5.1): Slack이 정확히 3.0초에 재전송, dedup이 즉시 막아 답글 1건만 나감
-  - [x] `experiment.dedup-enabled=false`로 실제 중복 답글 재현(§5.2, M8-4): 같은 event_id가 다른 attempt_id로 독립 처리돼 채널에 댓글 2개 — "왜 큐가 필요한가"의 직접 증거 확보
-  - [x] 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16)는 이미 확보된 근거로 §5.4에 표로 정리(재유도 없음)
-  - [ ] **범위 축소**: PLAN §3 M8-2가 요구하는 전체 매트릭스(지연 4종×각 5회=20회)는 각 회차가 실제 Slack 멘션+앱 재시작을 요구해 이번엔 5초 지연 1회씩만 실측했다(§5). 전체 반복과 M8-5(선택 배치)는 다음 세션 과제
-  - [ ] PRD §6 1단계 체크박스 3개를 이 실측으로 채우는 작업은 아직 안 함(부분 데이터라 통계적 판정엔 이름)
-- [ ] 1단계 완료(`main` 병합·태그) — **사용자 승인 필요, 자동 진행 안 함**
+- [x] **M8 실험** — 완료
+  - [x] 재전송+dedup 억제 관측(§5.1): Slack이 정확히 3.0초에 재전송, dedup이 즉시 막아 답글 1건만 나감
+  - [x] 지연값 스윕(§5.1.1): 1000·2000ms(재전송 0/3) vs 2500·3000·5000·30000ms(재전송 다수) — 실제 경계는 2000~2500ms 사이, PLAN 원안의 "2.5초는 안전" 가정이 틀렸음을 실측으로 발견(원인: dedup·발신 네트워크 오버헤드가 slow-mode 위에 얹힘)
+  - [x] `experiment.dedup-enabled=false`로 실제 중복 답글 재현(§5.2, M8-4): 같은 event_id가 다른 attempt_id로 독립 처리돼 채널에 댓글 — "왜 큐가 필요한가"의 직접 증거. 재시작 타이밍이 겹쳐 인메모리 dedup이 재시작에서 살아남지 못하는 P1 한계도 부수적으로 실측(§5.2 정정 내용)
+  - [x] 실제 LLM 실험은 A1(§2.9)으로 대체 확인, 재유도 없음(§5.3)
+  - [x] 오류 유도 매트릭스(A2·A5·A6·A7·A8·A10·A15·A16) — 이미 확보된 근거로 §5.4에 표로 정리
+  - [x] M8-5 선택 배치(§5.6): 기한을 90/100초로 늘려 70초 지연도 정상 응답됨을 확인 — 기본 50초 하드캡이 정상 응답을 실패로 오분류할 수 있음을 실측
+  - [x] PRD §6 1단계 체크박스 3개 모두 이 실측 근거로 체크 완료
+- [ ] **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`, `AGENTS.md` 현재 단계 줄 갱신)** — **사용자 승인 필요, 자동 진행 안 함**
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **다음 작업(우선순위 순)**:
-  1. M8 나머지: 전체 5회×4종(2.5/3.0/5/30s) 경계 매트릭스, M8-5(기한 늘려 하드캡 가리는 현상 관측). 방법은 §5와 동일(echo client + `EXPERIMENT_SLOWMODEMS` 환경변수로 앱 재시작, 실제 Slack 멘션으로 재전송 유도 — 합성 curl로는 Slack의 진짜 3초 재전송이 안 생긴다).
-  2. 전체 매트릭스 완료 후 `AGENTS.md` 현재 단계 줄 갱신, PRD §6 1단계 체크박스 3개를 실측 데이터로 채운다(§3 M8-8). **1단계 완료(`develop`→`main` 병합, 태그 `v0.1.0`)는 사용자 승인 필요 — 자동 진행하지 않는다.**
-  3. P1 후속 과제로만 남기는 것들(병합 차단 아님, M6 리뷰에서 발견): codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감), code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등), 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증.
+- **1단계 실험까지 전부 완료됐다.** 남은 건 사용자가 승인하는 단계 전환뿐이다:
+  1. 사용자가 1단계 완료를 요청하면: `AGENTS.md` 현재 단계 줄을 "2단계"로 갱신, `develop`→`main` merge commit + 태그 `v0.1.0`.
+  2. 그 전까지는 P1 후속 과제만 선택적으로 처리한다(병합 차단 아님, 모두 M6·M8 리뷰/실측에서 발견):
+     - codex WATCH 2건(제출-후-예약 실패 시 Unknown 미분류, 요청준비시간 미차감)
+     - code-reviewer 2차 LOW 5건(§2.11 — `SlackClient` 워치독 +500ms, `EventDeduplicator.markFailed`의 SENDING 경로 오탐성 WARN 등)
+     - 설정값 상호 불변식(`llm.deadline-ms+slack.send-deadline-ms<=processing.total-deadline-ms`) 기동 시 미검증
+     - 재시작 시 인메모리 dedup 유실(§5.2) — P1 본연의 과제(큐·공유 저장소)로 자연 승계
+     - 정확한 재전송 경계값 재세분화(§5.1.1 한계 — 2100~2400ms 구간)
+  3. 실험용으로 쓴 테스트 채널 메시지(M8 파일럿·스윕 다수)는 정리(삭제)가 필요하면 처리 — 이번 세션에선 그대로 남겨뒀다.
   4. 실험용으로 쓴 테스트 채널 메시지(M8 파일럿 2건, 태그 `M8 경계실험 A`·`M8 중복답글 실험 B`)는 정리(삭제)가 필요하면 다음 세션에서 처리 — 이번 세션에선 그대로 남겨뒀다.
 - **LLM 품질 튜닝(2026-09-23)**: qwen2.5:7b가 느슨한 지시에서 중국어·영어를 섞어 답한 사례 실측. `OpenAiCompatibleLlmClient`의 시스템 프롬프트를 강화하고 `temperature=0.3` 추가로 해결 확인(실제 멘션 재검증 완료).
 ---
