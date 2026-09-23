@@ -220,6 +220,88 @@ codex가 짚은 비차단 의견 2건(모두 병합 안 막음, P0 범위 밖으
 채택: **A2 — `sendAsync` + 호출별 남은 기한에 `cancel(true)` 예약.** `request.timeout(남은 시간)`은 보조로만 둔다(권한은 cancel). Apache 기반(B)은 시도하지 않았다 — A2가 성공 기준을 충족해 의존성을 추가할 이유가 없다. M4(LLM)·M5(Slack) 전송 계층에 동일하게 적용한다.
 한계: 루프백 정상 케이스만 측정했다. 실제 Ollama의 잔여 추론 종료, 연결 수립 정체(비라우팅 주소), 대용량 본문은 재지 않았다(M4 이후 관측).
 
-## 4. 경계 실험 (M8)
+## 4. 계측 집계 방법 (M7, 2026-09-23)
+
+P0-7의 진짜 산출물은 이 집계다. 새 코드나 지표 라이브러리는 넣지 않는다(AGENTS.md 규칙 1·M7) — 이미 있는 로그를
+`grep`/`awk`로 모으는 수준으로 충분하다. 아래 명령은 실제 로그 문자열(각 클래스의 `log.info`/`log.warn` 호출)과
+정확히 맞춘 것이다. `app.log`는 `bootRun`의 표준출력을 리다이렉트한 파일이라고 가정한다.
+
+### 4.1 재전송 횟수 (A11)
+
+Slack이 3초 안에 2xx를 못 받으면 같은 요청을 재전송한다(`SlackEventController` 첫 줄 로그, 검증 결과와 무관하게 남음).
+
+```bash
+# 재전송으로 온 요청 수(최초 요청은 두 헤더 모두 비어 있어 retry_num=null로 찍힌다)
+grep "slack 수신 retry_num=" app.log | grep -v "retry_num=null" | wc -l
+
+# 재전송 사유별 분포(http_timeout 등)
+grep -oE "retry_reason=[a-zA-Z_]+" app.log | sort | uniq -c
+```
+
+### 4.2 중복 억제 수 (A9·A11)
+
+```bash
+# dedup이 선점 실패로 막은 총 횟수
+grep -c "중복 억제 event_id=" app.log
+
+# 어떤 상태에서 막았는지(PROCESSING 중 재도착이 대부분이어야 정상)
+grep -oE "existing_state=[A-Z]+" app.log | sort | uniq -c
+```
+
+참고: `bot_id`·`subtype`으로 걸러진 건(무한 루프 방지, A5)은 dedup 이전 단계라 별도다 —
+`grep -c "무시된 이벤트 event_id=" app.log`.
+
+### 4.3 중복 답글 수 (A11, M8-4 dedup 끈 배치 전용)
+
+평소엔 dedup이 막아 관측되지 않는다. `experiment.dedup-enabled=false`로 낸 배치에서만 의미가 있다.
+같은 `event_id`가 두 번 이상 `Delivered`로 종료됐는지를 본다.
+
+```bash
+grep -oE "처리 종료 event_id=[^ ]+ .*kind=(answer|failure_notice) result=Delivered" app.log \
+  | grep -oE "event_id=[^ ]+" | sort | uniq -c | awk '$1 > 1 {print "중복 답글:", $0}'
+```
+
+### 4.4 LLM 소요 시간 (답변 / 실패 안내 분리, A11)
+
+핸들러의 `kind`(`answer`|`failure_notice`)가 답변·실패 안내를 가른다. 총 소요(LLM+발신 합)와
+순수 LLM 소요를 나눠 본다.
+
+```bash
+# kind별 총 처리 소요(핸들러가 발신까지 끝낸 시점 기준)
+for kind in answer failure_notice; do
+  echo "== $kind =="
+  grep "kind=$kind" app.log | grep -oE "총_소요_ms=[0-9]+" | cut -d= -f2 \
+    | awk '{sum+=$1; n++; if($1>max) max=$1} END{if(n>0) print "n="n, "avg_ms="sum/n, "max_ms="max}'
+done
+
+# 순수 LLM 호출 소요만(성공만 elapsed_ms를 남긴다 — OpenAiCompatibleLlmClient)
+grep "LLM 호출 성공 elapsed_ms=" app.log | grep -oE "elapsed_ms=[0-9]+" | cut -d= -f2 \
+  | awk '{sum+=$1; n++} END{if(n>0) print "success n="n, "avg_ms="sum/n}'
+
+# LLM 실패·기한초과 소요(콜드 스타트·타임아웃 확인용)
+grep -E "LLM 호출 (기한 초과|실패)" app.log | grep -oE "elapsed_ms=[0-9]+" | cut -d= -f2 \
+  | awk '{sum+=$1; n++; if($1>max) max=$1} END{if(n>0) print "failed n="n, "avg_ms="sum/n, "max_ms="max}'
+```
+
+### 4.5 ack_delivered (§4.1 dedup·재전송 관측과 교차 확인)
+
+3초 뒤 Slack이 이미 연결을 끊었으면 응답 쓰기 자체가 실패한다(`AckLoggingFilter`, 리스크 표).
+처리 대상이 아니었던 요청(401·400·url_verification·무시된 type)은 애초에 로그가 안 남는다(§2.11 positive guard).
+
+```bash
+grep -c "ack_delivered=true" app.log
+grep -c "ack_delivered=false" app.log
+```
+
+### 4.6 답변 vs 실패 안내 건수
+
+```bash
+grep -oE "kind=(answer|failure_notice)" app.log | sort | uniq -c
+```
+
+**한계**: 이 문서화 시점엔 아직 M8 배치를 돌리지 않아 위 명령을 실제 로그에 적용해보지 않았다.
+M8-1(경계 실험)에서 처음 실행하며 명령 자체의 오류(필드명 오타 등)가 나오면 여기 갱신한다.
+
+## 5. 경계 실험 (M8)
 
 미수행.
