@@ -44,22 +44,21 @@ public class SlackEventHandler {
         long t0 = attempt.startNanos();
         // markSending 진입 여부를 기록해둔다 — 예상 못한 예외가 나도 이 값으로 markFailed/markUnknown을 가른다.
         // markSending 전이면 발신이 나가지 않았음이 확실하므로 명확한 실패, 이후라면 발신 여부를 알 수 없다(A10과 같은 원칙).
+        // send()가 private 헬퍼라 지역 변수를 그대로 갱신할 수 없어 배열로 감싼다(대안: 게이트를 handle()로 올리는 것,
+        // code-reviewer LOW 의견 — 지금은 markSending()이 send() 내부의 발신 분기와 한 몸이라 그대로 둔다).
         boolean[] sendingMarked = {false};
         try {
-            // 인위적 지연은 LLM 예산 안에서 소모된다(ADR-7) — 별도 예산을 주지 않는다.
+            // 인위적 지연과 LLM 호출 모두 같은 예산식을 쓴다 — 따로 계산하면 slow-mode가 총 처리 기한(A16)을
+            // 넘기는 경로가 생긴다(code-reviewer MEDIUM: sleep에만 clamp가 빠져 있었음).
             long slowModeMs = experimentProps.slowModeMs();
             if (slowModeMs > 0) {
-                long budgetBeforeSleep = llmProps.deadlineMs() - elapsedMs(t0);
-                long sleepMs = Math.min(slowModeMs, Math.max(budgetBeforeSleep, 0));
+                long sleepMs = Math.min(slowModeMs, Math.max(llmBudgetMs(t0), 0));
                 if (sleepMs > 0) {
                     sleep(sleepMs);
                 }
             }
 
-            // llm.deadline-ms만으로 clamp하면 slow-mode 소모분과 겹쳐 총 처리 기한(A16)을 넘길 수 있다 —
-            // 발신 몫(slack.send-deadline-ms)을 남겨두고 총 잔여 시간으로도 함께 제한한다.
-            long llmRemainingMs = Math.min(llmProps.deadlineMs() - elapsedMs(t0),
-                    totalRemainingMs(t0) - slackProps.sendDeadlineMs());
+            long llmRemainingMs = llmBudgetMs(t0);
             LlmResult llmResult = llmRemainingMs > 0
                     ? llmClient.chat(event.promptText(), llmRemainingMs)
                     : new LlmResult.TimedOut(0);
@@ -97,6 +96,15 @@ public class SlackEventHandler {
             attempt.markFailed(stage);
             return new HandlingResult.Failed(stage);
         }
+    }
+
+    /**
+     * LLM 호출(및 그 앞의 인위적 지연)에 실제로 쓸 수 있는 예산(ms). {@code llm.deadline-ms}만으로 clamp하면
+     * 총 처리 기한(A16)을 넘길 수 있어, 발신 몫({@code slack.send-deadline-ms})을 남겨두고 총 잔여 시간으로도
+     * 함께 제한한다. 음수일 수 있다 — 그러면 LLM을 호출하지 않고 바로 실패 안내로 간다.
+     */
+    private long llmBudgetMs(long t0) {
+        return Math.min(llmProps.deadlineMs() - elapsedMs(t0), totalRemainingMs(t0) - slackProps.sendDeadlineMs());
     }
 
     private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, String kind,

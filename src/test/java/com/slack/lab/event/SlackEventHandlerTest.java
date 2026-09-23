@@ -9,8 +9,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import org.mockito.ArgumentCaptor;
-
 import com.slack.lab.config.ExperimentProperties;
 import com.slack.lab.config.ProcessingProperties;
 import com.slack.lab.llm.LlmClient;
@@ -20,6 +18,7 @@ import com.slack.lab.slack.SlackClient;
 import com.slack.lab.slack.SlackProperties;
 import com.slack.lab.slack.SlackSendResult;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class SlackEventHandlerTest {
 
@@ -153,6 +152,35 @@ class SlackEventHandlerTest {
         // 총 15s - 발신 몫 10s = 약 5s. llm.deadline-ms(50s)를 그대로 넘겼다면 이 상한을 넘었을 것이다.
         assertThat(actualRemainingMs).isLessThanOrEqualTo(5_000);
         assertThat(actualRemainingMs).isGreaterThan(0);
+    }
+
+    @Test
+    void markSending_전_예외는_FAILED로_확정되고_PROCESSING에_고착되지_않는다() {
+        // HIGH 수정의 핵심 회귀 테스트: 예외 가드가 없으면 이 시나리오에서 dedup이 PROCESSING에 영원히 갇힌다.
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenThrow(new RuntimeException("예상 못한 LLM 클라이언트 오류"));
+
+        var attempt = f.claim();
+        var result = f.handler(50_000, 60_000, 0).handle(event(), attempt);
+
+        assertThat(result).isInstanceOf(HandlingResult.Failed.class);
+        assertThat(f.dedup().stateOf("Ev1")).isEqualTo(ProcessingState.FAILED);
+        verify(f.slack(), never()).postMessage(anyString(), anyString(), anyString(), anyLong());
+    }
+
+    @Test
+    void markSending_후_예외는_UNKNOWN으로_확정되고_자동_재발신_대상이_아니다() {
+        // A10과 같은 원칙: 발신 여부를 확인할 수 없으면 UNKNOWN이지 FAILED(재시도 가능)가 아니다.
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Success("답변", 10));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenThrow(new RuntimeException("예상 못한 Slack 클라이언트 오류"));
+
+        var attempt = f.claim();
+        var result = f.handler(50_000, 60_000, 0).handle(event(), attempt);
+
+        assertThat(result).isInstanceOf(HandlingResult.Unknown.class);
+        assertThat(f.dedup().stateOf("Ev1")).isEqualTo(ProcessingState.UNKNOWN);
     }
 
     @Test

@@ -170,6 +170,30 @@ codex가 짚은 비차단 의견 2건(모두 병합 안 막음, P0 범위 밖으
 
 수정 후 `./gradlew build` 전체 통과 확인(기존 테스트 회귀 없음, 신규 테스트 포함).
 
+## 2.11 M6 PR #12 최종 검토 2회전 (2026-09-23)
+
+**codex usage limit**: PR #12(커밋 `21b7da2`)에 codex critic 재검토를 요청했으나 `ERROR: You've hit your usage limit`로 exit=1 실패 —
+판정을 받지 못했다(§2.9의 "codex 세션 소진"과는 다른 원인). 계획대로 code-reviewer(대체)로 폴백.
+
+**code-reviewer 2차 리뷰 결과 — REQUEST CHANGES (차단 1건)**:
+- **[HIGH]** 이번 커밋의 핵심 수정인 `SlackEventHandler.handle()`의 예외 가드에 회귀 테스트가 0건이었다. 8건의 handler 테스트 중
+  `thenThrow`로 예외를 주입하는 테스트가 하나도 없어, 지난 라운드에 고친 "예외 시 PROCESSING 영구 고착" 결함이 재발해도 빌드가 그대로 통과하는 상태였다(규칙 5 위반).
+- **[MEDIUM]** slow-mode의 인위적 지연(sleep)이 LLM 호출과 다른 예산식을 써서, `llm.deadline-ms` 계산에만 추가한 총 기한 clamp가 sleep에는 적용되지 않았다.
+  `processing.total-deadline-ms`를 줄이거나 `slow-mode-ms`를 크게 준 M8 실험 조합에서 A16을 넘길 수 있는 경로가 남아 있었다.
+- **[MEDIUM]** `AckLoggingFilter`의 `ack_delivered` 생략 조건이 상태 코드 denylist(400·401)라, `url_verification` 200·무시된 type 200 등
+  event_id가 애초에 없는 다른 200 응답 경로에서 `ack_delivered=true event_id=null`이 새고 있었다. M7의 로그 집계를 오염시키는 경로였다.
+- 그 외 LOW 5건(SlackClient 워치독 +500ms, `EventDeduplicator.markFailed`가 SENDING 상태에서 항상 먼저 "전이 거절" WARN을 남기는 노이즈,
+  handle() 종료 로그 자체에서 예외 나면 반환값이 실제와 어긋나는 경계, 필터 경로 비교의 컨텍스트 패스 취약성, `boolean[]` 대신 지역 변수로도 충분하다는 최적성 의견)과
+  Open Question 1건(시계 소스 결합)은 병합 차단 아님 — P1 검토 대상으로만 PLAN에 남긴다.
+
+**반영**: HIGH·MEDIUM 2건 모두 수정.
+- 예외 주입 회귀 테스트 2건 추가(`markSending` 전/후 각각 `thenThrow` → `Failed`/`Unknown` + dedup 상태 확인).
+- `llmBudgetMs(t0)` 헬퍼로 예산식을 하나로 합쳐 slow-mode sleep과 LLM 호출 양쪽에 동일하게 적용.
+- `AckLoggingFilter`를 상태 코드 denylist 대신 `EVENT_ID_ATTR` 존재 여부(positive guard)로 전환 — 컨트롤러가 처리 대상으로 판단한 요청에만 로그가 남는다. 테스트도 상태 코드 스텁에서 event_id 유무 스텁으로 갱신.
+- `ARCHITECTURE.md` §2에 `AckLoggingFilter`·`HandlingResult`(및 M3부터 누락돼 있던 `AttemptHandle`·`ClaimResult`·`ProcessingState`)를 추가(규칙 9).
+
+수정 후 `./gradlew build` 재확인 통과(신규 회귀 테스트 포함, A13 재확인 0건).
+
 ## 3. 기한 강제 스파이크 (M1.5, 2026-09-21)
 
 조건: Java 21.0.9 `java.net.http.HttpClient`(HTTP/1.1 고정, connect timeout 3s), 루프백 스텁, 기한 2초·관측 창 6초. Ollama·Slack 미사용.

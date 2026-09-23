@@ -31,19 +31,22 @@ public class AckLoggingFilter extends OncePerRequestFilter {
         }
         try {
             chain.doFilter(request, response);
-            int status = response.getStatus();
-            if (status == 400 || status == 401) {
-                // 서명·본문 검증에서 거절된 요청은 event_id 자체가 없거나(EVENT_ID_ATTR 미설정) 처리 대상이
-                // 아니었다 — ack_delivered는 "처리한 이벤트가 실제로 전달됐는가"를 보는 지표라 여기 끼워 넣지 않는다.
+            // 컨트롤러가 처리 대상 이벤트로 판단했을 때만 EVENT_ID_ATTR을 심는다(SlackEventController 참고) —
+            // 그 외(서명 실패 401·본문 파싱 400·url_verification·무시된 type 200 등)는 event_id 자체가 없으므로
+            // 상태 코드를 나열해 거르는 대신 이 값의 존재로 직접 판단한다(denylist가 새 경로를 놓치는 걸 방지).
+            Object eventId = request.getAttribute(EVENT_ID_ATTR);
+            if (eventId == null) {
                 return;
             }
             // 필터 체인이 예외 없이 끝났어도 커밋된 응답의 실제 소켓 쓰기가 이미 끊겼을 수 있다.
             // 서블릿 API로는 이 이상 확인할 수 없어(로컬 버퍼까지만 안다), 정상 경로는 성공으로 기록한다.
-            log.info("ack_delivered=true event_id={}", request.getAttribute(EVENT_ID_ATTR));
+            log.info("ack_delivered=true event_id={}", eventId);
         } catch (IOException e) {
-            // Tomcat이 클라이언트 연결 끊김을 여기까지 전파하면(예: ClientAbortException) 응답 쓰기 실패로 본다.
-            log.warn("ack_delivered=false event_id={} reason={}", request.getAttribute(EVENT_ID_ATTR),
-                    e.getClass().getSimpleName());
+            Object eventId = request.getAttribute(EVENT_ID_ATTR);
+            if (eventId != null) {
+                // Tomcat이 클라이언트 연결 끊김을 여기까지 전파하면(예: ClientAbortException) 응답 쓰기 실패로 본다.
+                log.warn("ack_delivered=false event_id={} reason={}", eventId, e.getClass().getSimpleName());
+            }
             throw e;
         }
     }

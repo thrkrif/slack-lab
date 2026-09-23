@@ -42,18 +42,17 @@ class AckLoggingFilterTest {
         ((Logger) LoggerFactory.getLogger(AckLoggingFilter.class)).detachAppender(appender);
     }
 
-    private HttpServletRequest requestFor(String uri) {
+    private HttpServletRequest requestFor(String uri, String eventId) {
         HttpServletRequest request = mock(HttpServletRequest.class);
         when(request.getRequestURI()).thenReturn(uri);
-        when(request.getAttribute("slack.eventId")).thenReturn("Ev1");
+        when(request.getAttribute("slack.eventId")).thenReturn(eventId);
         return request;
     }
 
     @Test
     void 정상_처리면_ack_delivered_true를_기록한다() throws Exception {
-        HttpServletRequest request = requestFor("/slack/events");
+        HttpServletRequest request = requestFor("/slack/events", "Ev1");
         HttpServletResponse response = mock(HttpServletResponse.class);
-        when(response.getStatus()).thenReturn(200);
         FilterChain chain = mock(FilterChain.class);
 
         filter.doFilter(request, response, chain);
@@ -63,23 +62,12 @@ class AckLoggingFilterTest {
     }
 
     @Test
-    void 서명_검증_실패_401은_ack_delivered를_기록하지_않는다() throws Exception {
-        // 처리 대상이 아니었던 요청까지 ack_delivered를 남기면 "전달된 이벤트" 지표가 오염된다.
-        HttpServletRequest request = requestFor("/slack/events");
+    void event_id가_없으면_상태코드와_무관하게_ack_delivered를_기록하지_않는다() throws Exception {
+        // 처리 대상 이벤트로 판단된 요청만 EVENT_ID_ATTR이 심긴다(SlackEventController) — 서명 실패 401,
+        // 본문 파싱 400뿐 아니라 url_verification 200, 무시된 type 200도 전부 이 경로로 걸러져야 한다.
+        // 상태 코드를 나열해 거르면(예: 400·401만) 이런 200 응답 경로가 새서 지표가 오염된다.
+        HttpServletRequest request = requestFor("/slack/events", null);
         HttpServletResponse response = mock(HttpServletResponse.class);
-        when(response.getStatus()).thenReturn(401);
-        FilterChain chain = mock(FilterChain.class);
-
-        filter.doFilter(request, response, chain);
-
-        assertThat(appender.list).noneMatch(e -> e.getFormattedMessage().contains("ack_delivered"));
-    }
-
-    @Test
-    void 본문_파싱_실패_400은_ack_delivered를_기록하지_않는다() throws Exception {
-        HttpServletRequest request = requestFor("/slack/events");
-        HttpServletResponse response = mock(HttpServletResponse.class);
-        when(response.getStatus()).thenReturn(400);
         FilterChain chain = mock(FilterChain.class);
 
         filter.doFilter(request, response, chain);
@@ -90,7 +78,7 @@ class AckLoggingFilterTest {
     @Test
     void 응답_쓰기_중_IO예외는_ack_delivered_false를_기록하고_다시_던진다() throws Exception {
         // 3초 뒤 Slack이 연결을 끊어 응답 쓰기가 실패하는 경우(ARCHITECTURE 리스크 표)를 재현한다.
-        HttpServletRequest request = requestFor("/slack/events");
+        HttpServletRequest request = requestFor("/slack/events", "Ev1");
         HttpServletResponse response = mock(HttpServletResponse.class);
         FilterChain chain = mock(FilterChain.class);
         doThrow(new IOException("클라이언트 연결 끊김")).when(chain).doFilter(any(), any());
@@ -101,8 +89,21 @@ class AckLoggingFilterTest {
     }
 
     @Test
+    void event_id_없이_응답_쓰기_중_IO예외가_나도_ack_delivered를_기록하지_않는다() throws Exception {
+        // 처리 대상이 아니었던 요청(예: challenge 응답 쓰기 실패)까지 ack_delivered=false를 남기지 않는다.
+        HttpServletRequest request = requestFor("/slack/events", null);
+        HttpServletResponse response = mock(HttpServletResponse.class);
+        FilterChain chain = mock(FilterChain.class);
+        doThrow(new IOException("클라이언트 연결 끊김")).when(chain).doFilter(any(), any());
+
+        assertThatThrownBy(() -> filter.doFilter(request, response, chain)).isInstanceOf(IOException.class);
+
+        assertThat(appender.list).noneMatch(e -> e.getFormattedMessage().contains("ack_delivered"));
+    }
+
+    @Test
     void slack_events가_아닌_경로는_그대로_통과시키고_아무_것도_기록하지_않는다() throws Exception {
-        HttpServletRequest request = requestFor("/health");
+        HttpServletRequest request = requestFor("/health", null);
         HttpServletResponse response = mock(HttpServletResponse.class);
         FilterChain chain = mock(FilterChain.class);
 
