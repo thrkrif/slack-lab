@@ -216,6 +216,7 @@ P1은 수신 서버의 메모리에서 event_id를 봤다는 이유만으로 200
 **P0**: `COMPLETED`와 `UNKNOWN`은 전이 시점부터 10분 유지한다. 실행 중인 엔트리를 일반 TTL 청소로 삭제하지 않는다. 처리 기한에 도달하면 발신 시작 여부에 따라 `FAILED` 또는 `UNKNOWN`으로 정리한다. 프로세스 재시작·보존 기간 이후에는 중복 억제를 보장하지 않는다.
 
 **P1**: `PROCESSING`의 소유권은 30초 임대, 10초마다 갱신하는 초기 정책으로 둔다. 갱신 실패 시 새 발신을 금지한다. 임대 만료된 `PROCESSING`만 재선점할 수 있고, 만료된 `SENDING`은 반드시 `UNKNOWN`으로 보낸다. 이전 소유자의 상태 갱신은 거절한다. 공유 상태의 원자적 갱신으로 `SENDING`까지 진입해야 발신할 수 있다.
+`EventWorker`가 처리 시작 직후부터 `state.renew-ms` 주기로 별도 스케줄러에서 `store.renew()`를 호출해 이 임대를 실제로 갱신한다(핸들러 종료 시 취소). 갱신이 거절되면 `WorkerAttemptHandle`이 소유권 상실을 기억해, 이후 `markSending()`이 저장소를 다시 부르지 않고 즉시 거절한다(M12).
 
 P1의 자동 재시도·재전달 허용 기간은 최초 수신부터 24시간이다. `COMPLETED`는 최소 7일 유지하고, 24시간이 지난 미완료 이벤트는 새 실행 대신 복구 대상으로 전환한다. `UNKNOWN`·미해결 DLQ는 시간 만료만으로 삭제하지 않는다. 이는 보장 범위를 제한하는 초기 운영 정책이며 변경 시 PRD와 실험 조건을 함께 갱신한다.
 
@@ -339,7 +340,7 @@ flowchart TB
 |---|---|---|
 | `SlackEventController` | 검증·필터링 후 발행 호출, 저장 확인 결과를 HTTP 응답으로 변환 | M12 완료 |
 | `EventPublisher` | event_id·최초 수신 시각·채널·스레드·입력·스키마 버전을 큐에 저장하고 내구성 있는 저장 확인을 반환 | M12 완료 |
-| `EventWorker` | 큐 소비, 처리 권한 선점, 핸들러 호출, 결과 분류, 종료 기록 뒤 ACK(Rejected는 ACK 안 함) | M12 완료(최소 정책. 재시도는 M13) |
+| `EventWorker` | 큐 소비, 처리 권한 선점, 임대 주기적 갱신(§3.2), 핸들러 호출, 결과 분류, 종료 기록 뒤 ACK(Rejected는 ACK 안 함) | M12 완료(최소 정책. 재시도는 M13) |
 | `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 | M11 완료 |
 | `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환 | M12 완료 |
 | `RetryPolicy` / `RecoveryService` | 재시도 예약·최종 안내·DLQ·UNKNOWN 확인 및 수동 복구 | M13·M14 예정 |

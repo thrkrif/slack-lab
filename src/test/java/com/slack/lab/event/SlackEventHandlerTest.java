@@ -71,7 +71,7 @@ class SlackEventHandlerTest {
     record Fixture(LlmClient llm, SlackClient slack, FakeAttemptHandle attempt) {
         SlackEventHandler handler(long llmDeadlineMs, long totalDeadlineMs, long slowModeMs) {
             return new SlackEventHandler(llm, slack, llmProps(llmDeadlineMs), slackProps(),
-                    new ProcessingProperties(totalDeadlineMs), new ExperimentProperties(slowModeMs, true));
+                    new ProcessingProperties(totalDeadlineMs), new ExperimentProperties(slowModeMs));
         }
     }
 

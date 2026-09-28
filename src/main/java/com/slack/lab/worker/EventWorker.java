@@ -10,6 +10,7 @@ import com.slack.lab.state.ClaimOutcome;
 import com.slack.lab.state.ClaimRequest;
 import com.slack.lab.state.Finalization;
 import com.slack.lab.state.ProcessingStateStore;
+import com.slack.lab.state.StateProperties;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
@@ -20,6 +21,8 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,18 +57,22 @@ public class EventWorker {
     private final StringRedisTemplate redis;
     private final QueueProperties queueProps;
     private final WorkerProperties workerProps;
+    private final StateProperties stateProps;
     private final ProcessingStateStore store;
     private final SlackEventHandler handler;
 
     private ExecutorService pool;
-    private ScheduledExecutorService reclaimScheduler;
+    // reclaim 주기 작업과 시도별 임대 갱신 작업을 함께 돌린다(MAJOR-1) — 동시에 여러 시도가 갱신을 스케줄하므로
+    // 스레드 1개짜리 스케줄러면 한 시도의 지연이 다른 시도의 갱신을 밀어낼 수 있어, concurrency+1개로 둔다.
+    private ScheduledExecutorService scheduler;
     private volatile boolean running;
 
     public EventWorker(StringRedisTemplate redis, QueueProperties queueProps, WorkerProperties workerProps,
-            ProcessingStateStore store, SlackEventHandler handler) {
+            StateProperties stateProps, ProcessingStateStore store, SlackEventHandler handler) {
         this.redis = redis;
         this.queueProps = queueProps;
         this.workerProps = workerProps;
+        this.stateProps = stateProps;
         this.store = store;
         this.handler = handler;
     }
@@ -79,8 +86,8 @@ public class EventWorker {
             String consumer = "worker-" + i + "-" + UUID.randomUUID().toString().substring(0, 8);
             pool.submit(() -> loop(consumer));
         }
-        reclaimScheduler = Executors.newSingleThreadScheduledExecutor();
-        reclaimScheduler.scheduleWithFixedDelay(this::reclaimStale, RECLAIM_INTERVAL_MS, RECLAIM_INTERVAL_MS,
+        scheduler = Executors.newScheduledThreadPool(workerProps.concurrency() + 1, daemonThreadFactory());
+        scheduler.scheduleWithFixedDelay(this::reclaimStale, RECLAIM_INTERVAL_MS, RECLAIM_INTERVAL_MS,
                 TimeUnit.MILLISECONDS);
         log.info("워커 시작 concurrency={} stream={} group={}", workerProps.concurrency(), queueProps.streamKey(),
                 queueProps.group());
@@ -92,9 +99,17 @@ public class EventWorker {
         if (pool != null) {
             pool.shutdownNow();
         }
-        if (reclaimScheduler != null) {
-            reclaimScheduler.shutdownNow();
+        if (scheduler != null) {
+            scheduler.shutdownNow();
         }
+    }
+
+    private static ThreadFactory daemonThreadFactory() {
+        return r -> {
+            Thread t = new Thread(r, "event-worker-scheduler");
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     private void ensureGroupExists() {
@@ -121,9 +136,11 @@ public class EventWorker {
     private void loop(String consumer) {
         while (running) {
             try {
+                // block 값은 spring.data.redis.timeout(1s, MAJOR-2)보다 짧아야 한다 — 아니면 서버의 BLOCK이
+                // 끝나기 전에 Lettuce의 명령 타임아웃이 먼저 터져 매번 QueryTimeoutException으로 끝난다.
                 List<MapRecord<String, Object, Object>> records = redis.opsForStream().read(
                         Consumer.from(queueProps.group(), consumer),
-                        StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2)),
+                        StreamReadOptions.empty().count(1).block(Duration.ofMillis(900)),
                         StreamOffset.create(queueProps.streamKey(), ReadOffset.lastConsumed()));
                 if (records != null) {
                     for (MapRecord<String, Object, Object> record : records) {
@@ -163,6 +180,10 @@ public class EventWorker {
             List<MapRecord<String, Object, Object>> reclaimed = redis.opsForStream().claim(queueProps.streamKey(),
                     queueProps.group(), RECLAIM_CONSUMER, XClaimOptions.minIdleMs(queueProps.claimMinIdleMs()).ids(stale));
             log.info("죽은 소비자 항목 회수 stale_count={} reclaimed_count={}", stale.size(), reclaimed.size());
+            // MINOR-4(알려진 문제, 미수정): 여기서 스케줄러 스레드가 직접 process()를 호출해 handler.handle()까지
+            // 수행한다. worker.concurrency로 고정한 동시성 상한(M9, LLM 동시성 1)이 회수 경로에서는 깨진다
+            // (풀 스레드 concurrency개 + 이 스케줄러 스레드까지 최대 concurrency+1). 회수는 드물게 발생하므로
+            // 지금은 남겨두고, 고치려면 회수된 레코드를 pool에 제출해 동시성 상한 안에서 처리해야 한다.
             for (MapRecord<String, Object, Object> record : reclaimed) {
                 process(record);
             }
@@ -206,6 +227,12 @@ public class EventWorker {
         long startNanos = System.nanoTime();
         WorkerAttemptHandle handle = new WorkerAttemptHandle(eventId, claimed.attemptId(), startNanos, store);
 
+        // MAJOR-1: 임대(state.lease-ms)를 주기적으로 갱신하지 않으면 LLM+지연 합이 임대를 넘는 처리는 전부
+        // markSending()에서 거절돼 조용한 실패가 된다(ARCHITECTURE §3.2). 처리 시작부터 끝까지 갱신을 돌린다.
+        ScheduledFuture<?> renewal = scheduler.scheduleWithFixedDelay(
+                () -> renewLease(eventId, claimed.attemptId(), handle), stateProps.renewMs(), stateProps.renewMs(),
+                TimeUnit.MILLISECONDS);
+
         HandlingResult result;
         try {
             result = handler.handle(event, handle);
@@ -215,9 +242,24 @@ public class EventWorker {
             log.error("처리 중 예상 못한 예외 event_id={} attempt_id={} sending_marked={}", eventId, claimed.attemptId(),
                     handle.sendingMarked(), e);
             result = handle.sendingMarked() ? new HandlingResult.Unknown(stage) : new HandlingResult.Failed(stage, false);
+        } finally {
+            renewal.cancel(false);
         }
 
         finalizeResult(streamId, eventId, claimed.attemptId(), result);
+    }
+
+    /** 임대 갱신 실패(소유권 상실)를 핸들에 반영해, 이후 markSending()이 저장소를 다시 부르지 않고 거절하게 한다. */
+    private void renewLease(String eventId, String attemptId, WorkerAttemptHandle handle) {
+        try {
+            boolean ok = store.renew(eventId, attemptId);
+            if (!ok) {
+                handle.markOwnershipLost();
+                log.warn("임대 갱신 실패 — 소유권 상실 event_id={} attempt_id={}", eventId, attemptId);
+            }
+        } catch (RuntimeException e) {
+            log.error("임대 갱신 중 오류 event_id={} attempt_id={}", eventId, attemptId, e);
+        }
     }
 
     /**

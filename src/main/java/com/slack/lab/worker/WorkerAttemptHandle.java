@@ -14,6 +14,7 @@ final class WorkerAttemptHandle implements AttemptHandle {
     private final long startNanos;
     private final ProcessingStateStore store;
     private volatile boolean sendingMarked;
+    private volatile boolean ownershipLost;
 
     WorkerAttemptHandle(String eventId, String attemptId, long startNanos, ProcessingStateStore store) {
         this.eventId = eventId;
@@ -39,6 +40,11 @@ final class WorkerAttemptHandle implements AttemptHandle {
 
     @Override
     public boolean markSending() {
+        if (ownershipLost) {
+            // 임대 갱신이 이미 실패했다 — 저장소를 다시 부르지 않아도 거절될 것이 확실하다(ARCHITECTURE §3.2
+            // "갱신 실패 시 새 발신 금지"). 불필요한 Redis 호출을 줄인다.
+            return false;
+        }
         boolean ok = store.markSending(eventId, attemptId);
         if (ok) {
             sendingMarked = true;
@@ -48,5 +54,10 @@ final class WorkerAttemptHandle implements AttemptHandle {
 
     boolean sendingMarked() {
         return sendingMarked;
+    }
+
+    /** 백그라운드 임대 갱신이 실패했을 때(소유권 상실) 워커가 호출한다. */
+    void markOwnershipLost() {
+        ownershipLost = true;
     }
 }

@@ -131,7 +131,11 @@ class EventWorkerTest {
     }
 
     private EventWorker newWorker(ProcessingStateStore store, SlackEventHandler handler) {
-        EventWorker w = new EventWorker(redis, QUEUE, WORKER_PROPS, store, handler);
+        return newWorker(STATE, store, handler);
+    }
+
+    private EventWorker newWorker(StateProperties stateProps, ProcessingStateStore store, SlackEventHandler handler) {
+        EventWorker w = new EventWorker(redis, QUEUE, WORKER_PROPS, stateProps, store, handler);
         w.start();
         this.worker = w;
         return w;
@@ -283,6 +287,33 @@ class EventWorkerTest {
         awaitTrue(() -> "UNKNOWN".equals(stateOf("W6").get("state")));
         awaitTrue(() -> pending() == 0);
         assertThat(listed(RECOVERY_KEY, "W6")).isTrue();
+    }
+
+    // --- 5b. MAJOR-1 회귀: 임대보다 오래 걸려도 주기적 갱신이 소유권을 지켜 markSending이 성공한다
+
+    @Test
+    void 처리가_임대보다_오래_걸려도_주기적_갱신으로_markSending이_성공한다() {
+        // lease=400ms인데 핸들러가 markSending() 전에 600ms를 기다린다 — 갱신(renewMs=100ms)이 없으면
+        // 임대가 이미 만료돼 markSending()이 거절(Rejected)돼야 정상이다. 갱신이 있으면 Delivered로 끝난다.
+        StateProperties shortLease = new StateProperties(LEASE_MS, 100, 7, 24);
+        ProcessingStateStore store = new RedisProcessingStateStore(redis, shortLease, QUEUE);
+        SlackEventHandler handler = mock(SlackEventHandler.class);
+        when(handler.handle(any(SlackMessageEvent.class), any(AttemptHandle.class))).thenAnswer(inv -> {
+            sleep(600); // 임대(400ms)보다 길게 대기 — 갱신 없이는 여기서 이미 소유권을 잃는다
+            AttemptHandle attempt = inv.getArgument(1);
+            boolean marked = attempt.markSending();
+            if (!marked) {
+                return new HandlingResult.Rejected("mark_sending_rejected");
+            }
+            return new HandlingResult.Delivered("answer", "300.1");
+        });
+
+        newWorker(shortLease, store, handler);
+        publishRaw("W5B");
+
+        awaitTrue(() -> "COMPLETED".equals(stateOf("W5B").get("state")));
+        awaitTrue(() -> pending() == 0);
+        assertThat(stateOf("W5B")).containsEntry("slack_ts", "300.1");
     }
 
     // --- 6. finalize 자체가 실패(연결 끊김 등) → ACK 안 함, 입력 유실 없음
