@@ -252,8 +252,8 @@ Slack 전송 장애 시 사용자 안내의 도달까지 보장하지는 않는�
 
 | 질문 | 언제 정하나 |
 |---|---|
-| 워커를 Java로 둘까, Python(LangGraph)으로 뺄까 | P1 착수 전 |
-| 큐는 Redis Streams인가 RabbitMQ인가 | P1 착수 전 |
+| 워커를 Java로 둘까, Python(LangGraph)으로 뺄까 | **결정(2026-09-28)**: 2단계는 Java 워커, 4단계에서 재검토 (ARCHITECTURE ADR-5) |
+| 큐는 Redis Streams인가 RabbitMQ인가 | **결정(2026-09-28)**: Redis Streams + 같은 Redis의 공유 상태 (ADR-8) |
 | Vector DB를 pgvector로 할까, 별도로 띄울까 | P2 착수 전 |
 | 어떤 문서를 색인할까 (과거 장애 스레드? 위키?) | P2 착수 전 |
 | Ollama 모델 크기 — 7B로 충분한가 | P0 실측 후 |
