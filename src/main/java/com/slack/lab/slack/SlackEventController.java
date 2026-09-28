@@ -2,6 +2,8 @@ package com.slack.lab.slack;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.event.AttemptHandle;
 import com.slack.lab.event.ClaimResult;
 import com.slack.lab.event.EventDeduplicator;
@@ -22,7 +24,9 @@ import org.springframework.web.bind.annotation.RestController;
  * ARCHITECTURE §3.1 표대로 HTTP 응답을 결정한다. 처리 권한(claim)을 확보한 뒤에는 어떤 예외·처리 결과가 나와도
  * 200을 유지하고 로그만 남긴다 — 선점 전 내부 오류만 500이다.
  */
+// 1단계 흐름(수신 서버가 직접 처리)은 M12까지 ALL 역할에만 남긴다. M12에서 발행자를 통해 RECEIVER로 옮긴다.
 @RestController
+@ConditionalOnRole({AppRole.ALL})
 public class SlackEventController {
 
     private static final Logger log = LoggerFactory.getLogger(SlackEventController.class);

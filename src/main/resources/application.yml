@@ -1,6 +1,14 @@
 spring:
   application:
     name: slack-lab
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+# 역할: receiver | worker | reactor | recovery | all(개발 기본값). 컨테이너는 APP_ROLE로 지정한다.
+app:
+  role: ${APP_ROLE:all}
 
 # 필수 값(slack.signing-secret, slack.bot-token, llm.model)은 기본값을 두지 않는다.
 # 비어 있으면 기동이 실패해야 한다(A3). 값은 환경변수로 주입한다(.env.example 참조).

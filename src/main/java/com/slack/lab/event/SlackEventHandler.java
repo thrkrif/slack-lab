@@ -1,5 +1,7 @@
 package com.slack.lab.event;
 
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.config.ExperimentProperties;
 import com.slack.lab.config.ProcessingProperties;
 import com.slack.lab.llm.LlmClient;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Component;
  * 입력은 이벤트와 {@link AttemptHandle}, 출력은 {@link HandlingResult}뿐이다. 저장소를 직접 알지 못한다.
  */
 @Component
+@ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
 public class SlackEventHandler {
 
     private static final Logger log = LoggerFactory.getLogger(SlackEventHandler.class);

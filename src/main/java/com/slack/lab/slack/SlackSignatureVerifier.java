@@ -1,5 +1,7 @@
 package com.slack.lab.slack;
 
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
@@ -12,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
+@ConditionalOnRole({AppRole.RECEIVER, AppRole.ALL})
 public class SlackSignatureVerifier {
 
     // 리플레이 방어. Slack 권고값이며 이보다 오래된 요청은 서명이 맞아도 거부한다.

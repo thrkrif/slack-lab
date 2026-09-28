@@ -1,5 +1,7 @@
 package com.slack.lab.event;
 
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.config.ExperimentProperties;
 import java.util.Map;
 import java.util.Set;
@@ -16,7 +18,9 @@ import org.springframework.stereotype.Component;
  * 인메모리 중복 억제 (P0). 재시작하면 잊는다 — 재시작·큐 재전달 복구는 P1이다.
  * 2단계에서 이 자리는 공유 저장소의 조건부 갱신으로 바뀐다.
  */
+// 인메모리 dedup은 ALL 역할의 1단계 흐름 전용이다. M12에서 공유 상태 저장소로 대체되며 제거한다.
 @Component
+@ConditionalOnRole({AppRole.ALL})
 public class EventDeduplicator {
 
     private static final Logger log = LoggerFactory.getLogger(EventDeduplicator.class);
