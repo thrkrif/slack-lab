@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| 상태 | 1단계 진행 중 |
+| 상태 | 1단계 완료(`v0.1.0`) · 2단계 진행 중 |
 | 작성 | 2026-09 |
 | 관련 문서 | [`ARCHITECTURE.md`](ARCHITECTURE.md) 구조·결정 / [`PLAN.md`](PLAN.md) 작업 계획 / [`AGENTS.md`](../../AGENTS.md) 작업 규칙 |
 
