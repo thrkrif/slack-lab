@@ -2,6 +2,8 @@ package com.slack.lab.slack;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.UnknownHostException;
@@ -33,6 +35,7 @@ import org.springframework.stereotype.Component;
  * M6이 재시도 가능한 실패로 오분류해 중복 발신 위험이 생긴다. 모두 결과 불명으로 남긴다.
  */
 @Component
+@ConditionalOnRole({AppRole.WORKER, AppRole.REACTOR, AppRole.RECOVERY, AppRole.ALL})
 public class SlackClient {
 
     private static final Logger log = LoggerFactory.getLogger(SlackClient.class);

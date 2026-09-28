@@ -1,0 +1,58 @@
+# 2단계 실행 환경 (2026-09-28 결정, PLAN 2단계 M10)
+# - 개발: docker compose up -d redis 후 호스트에서 bootRun
+# - 통합 검증·실험: docker compose --profile app up --build
+# Ollama는 컨테이너로 띄우지 않는다. 호스트의 ollama serve를 host.docker.internal로 호출한다.
+
+x-app: &app
+  # 세 역할이 같은 이미지를 쓴다 — 한 번만 빌드된다.
+  image: slack-lab-app
+  build: .
+  profiles: ["app"]
+  env_file: .env
+  depends_on:
+    redis:
+      condition: service_healthy
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-app-env: &app-env
+  REDIS_HOST: redis
+  LLM_BASE_URL: http://host.docker.internal:11434/v1
+
+services:
+  redis:
+    image: redis:8.2-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./infra/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  receiver:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: receiver
+    ports:
+      - "127.0.0.1:${RECEIVER_PORT:-8080}:8080"
+
+  worker:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: worker
+
+  reactor:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: reactor
+
+volumes:
+  redis-data:

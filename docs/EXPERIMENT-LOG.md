@@ -478,3 +478,15 @@ Slack API 실제 발신(네트워크 왕복 300~500ms)·ngrok 왕복 지연이 �
 - 관측용 메시지 15건은 `chat.delete`로 정리했다.
 
 **목표 변경(2026-09-28, 사용자 결정)**: 노트북 한 대에서 검증하므로 부하를 줄였다. 성능 판정은 순차 20건(수신 p95 ≤ 200ms, 답변 p95 ≤ 45s)과 버스트 5건×2(수신 p95 ≤ 200ms, 유실·중복·기한 초과 0, 답변 시간은 기록만)로 한다. 워커의 LLM 동시성은 1이다. PRD §5·§6에 반영했다.
+
+## 7. 2단계 M10 인프라·설정 골격 검증 (2026-09-28)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 96건, 실패 0 (역할별 컨텍스트 4건·불변식 5건·health 2건 추가) |
+| B2 수신 역할 빈 구성 | `receiver` 컨텍스트에 `SlackEventHandler`·`LlmClient`·`SlackClient` 0개, 웹 서버 있음. `worker`·`recovery`는 웹 서버 없음 (`AppRoleContextTest`) |
+| 호스트 `bootRun`(`all`) + compose Redis | `/health` 200 `redis=UP` → `docker compose stop redis` 후 503 `DOWN` → 재기동 후 200 `UP`. 호스트 Ollama 모델 확인 통과 |
+| `docker compose --profile app up --build` | `receiver` 컨테이너 `/health` 200 `redis=UP`. **`worker` 컨테이너가 `host.docker.internal`로 호스트 Ollama 모델 확인(`/v1/models`) 통과**. `worker`·`reactor`는 기동 후 종료한다 — 소비 루프가 붙는 M12 전까지는 정상 |
+| 불변식 위반 기동 | 컨테이너에 `STATE_RENEWMS=20000`을 주면 `설정 불변식 위반: state.renew-ms <= state.lease-ms / 3` 메시지를 남기고 기동 실패. 경계값(기한 합 = 총 기한, 회수 유휴 = 90000)은 기동 성공(테스트) |
+
+- 호스트 8080 포트에는 1단계 `bootRun`(수요일부터 실행 중인 이전 프로세스)이 떠 있었다. 그래서 검증은 8081 포트(`SERVER_PORT`·`RECEIVER_PORT`)로 했다. M12의 실제 멘션 왕복 전에 이 프로세스를 정리하고 ngrok 대상을 새 수신 서버로 맞춰야 한다.

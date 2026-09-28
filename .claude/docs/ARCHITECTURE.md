@@ -52,8 +52,24 @@ flowchart LR
 | `llm/` | `LlmClient` | 호출 경계 인터페이스 | RAG·LangGraph가 붙는 자리 |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | 워커로 이동 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
-| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController` | `record` + `@ConfigurationProperties`, `/health` | 각자 따라 이동 |
+| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController`, `AppRole`·`ConditionalOnRole`·`StartupInvariants` | `record` + `@ConfigurationProperties`, `/health`(Redis 포함), 역할별 빈 등록·설정 불변식 | 각자 따라 이동 |
 | | `SlackProperties`(`slack/`)·`LlmProperties`(`llm/`) | 설정은 사용하는 패키지 옆에 둔다. 필수 값(`slack.signing-secret`·`slack.bot-token`·`llm.model`)은 `@Validated`+`@NotBlank`로 누락 시 기동 실패(A3) | 각자 따라 이동 |
+
+### 2단계 실행 구성 (M10, 2026-09-28)
+
+한 코드베이스를 `app.role`(`APP_ROLE`)로 나눠 띄운다. 역할에 맞는 빈만 `@ConditionalOnRole`로 등록하고, 웹 서버가 필요 없는 역할은 `RoleWebTypePostProcessor`가 포트를 열지 않게 한다.
+
+| 역할 | 웹 | 등록되는 빈 | 비고 |
+|---|---|---|---|
+| `receiver` | O | 서명 검증기·`AckLoggingFilter`·`/health` | M12부터 수신 컨트롤러와 발행자가 붙는다. LLM·Slack 발신 빈은 없다(B2) |
+| `worker` | X | 핸들러·`LlmClient`·`SlackClient` | M12부터 큐 소비 |
+| `reactor` | X | `SlackClient` | M15 즉시 반응 |
+| `recovery` | X | `SlackClient` | M14 복구 CLI |
+| `all` | O | 1단계 흐름 전체(컨트롤러·인메모리 dedup·핸들러) | 개발 기본값. M12에서 큐 경유로 바뀐다 |
+
+- 실행: `compose.yaml`의 `redis`(`redis:8.2-alpine`, `infra/redis.conf` — AOF always)와 profile `app`의 `receiver`·`worker`·`reactor`가 한 이미지(`slack-lab-app`)를 쓴다. Ollama는 호스트에 두고 `host.docker.internal:11434`로 호출한다. 포트는 모두 `127.0.0.1`에만 연다.
+- 새 설정: `queue.*`·`state.*`·`retry.*`·`worker.concurrency`(기본 1, M9). `StartupInvariants`가 기동할 때 조합 불변식을 검사한다: 기한 합 ≤ 총 기한, 갱신 ≤ 임대/3, 회수 유휴 ≥ 총 기한 + 임대, 재시도 대기 수 ≥ 재시도 횟수. 위반하면 기동이 실패한다.
+- `/health`는 Redis ping 결과를 포함하고, Redis가 없으면 503을 준다.
 
 ### 절대 경계
 

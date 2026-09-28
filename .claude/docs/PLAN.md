@@ -72,7 +72,7 @@
   - [x] Ollama 타당성: 10 동시 p95 272.8s, 순차 처리량 8.8 tok/s → **답변 p95 30s 목표는 이 환경에서 불가**. 워커 LLM 동시성 1로 확정 (§6.2)
   - [x] 목표 변경 결정(2026-09-28 사용자: 노트북 부하를 줄이는 방향) → 순차 20건(답변 p95 ≤ 45s) + 버스트 5건×2(정확성만), PRD §5·§6 반영
   - [x] Slack 429: 5·10건 동시 발신 모두 429 없음 → 테스트 채널 1개 유지 (§6.3)
-- [ ] **M10 인프라·설정 골격** — Redis 구동 설정, 의존성, `app.role`, 설정 record·불변식 검증
+- [x] **M10 인프라·설정 골격** — 완료. `compose.yaml`·`Dockerfile`·`infra/redis.conf`, `app.role` 역할별 빈(B2), 설정 record 4종·불변식, `/health` Redis. 컨테이너 안에서 호스트 Ollama 호출 확인 (`EXPERIMENT-LOG.md` §7)
 - [ ] **M11 공유 처리 상태 저장소** — `ProcessingStateStore`(Redis Lua CAS·임대·gen), 선점 결과표, 원자 종료 스크립트, 통합 테스트 (기존 P0 타입·호출부는 그대로)
 - [ ] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 발행·소비·상태 확정 후 ACK, 핸들러 계약 변경, `EventDeduplicator` 제거
 - [ ] **M13 재시도·DLQ** (P1-4) — 오류 전이표, 지연 재시도(ZSET), 최종 안내, DLQ, 24시간 창
@@ -89,15 +89,12 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9 완료**, 다음은 **M10 인프라·설정 골격**(`feature/m10-infra`)이다.
-- 실행 환경: Docker Compose(Redis `redis:8.2-alpine`, 이미지 pull 완료)와 앱 역할(수신·워커·반응). Ollama는 호스트에서 쓰고, 컨테이너에서는 `host.docker.internal:11434`로 호출한다.
-- M9 확정값:
-  - `queue.enqueue-timeout-ms=150`(`XADD+WAITAOF` p95 3.18ms)
-  - 워커 LLM 동시성 1
-  - 테스트 채널 1개(`.env`의 `SLACK_TEST_CHANNEL`, 429 없음)
-- 성능 목표 변경(사용자): 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정. PRD §5·§6에 반영했다.
-- Git 정책은 1단계와 같다(자동 PR·`develop` 병합). 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
-- 실험용 테스트 채널 메시지(M8)는 아직 정리하지 않았다.
+- 2단계 진행 중. **M9·M10 완료**, 다음은 **M11 공유 처리 상태 저장소**(`feature/m11-state-store`)다. `state/` 패키지에 P1 전용 타입과 Lua 스크립트를 두고 Testcontainers로 테스트하며, 기존 P0 타입은 건드리지 않는다.
+- 실행: `docker compose up -d redis` + 호스트 `bootRun`(역할 `all`), 또는 `docker compose --profile app up --build`(이미지 `slack-lab-app`). Ollama는 호스트에 있다.
+- **호스트 8080 포트를 1단계 `bootRun` 이전 프로세스가 점유 중이다**(수요일부터). 검증은 8081 포트(`SERVER_PORT`/`RECEIVER_PORT`)로 했다. M12 실제 멘션 왕복 전에 정리가 필요하며, ngrok 대상 변경은 멈춤 지점이다.
+- M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개(`SLACK_TEST_CHANNEL`).
+- 성능 목표: 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정(사용자 결정).
+- 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
 
 ---
 

@@ -1,5 +1,7 @@
 package com.slack.lab.slack;
 
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -17,6 +19,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * HTTP를 아는 것은 이 필터와 컨트롤러의 몫이다 — {@code event} 패키지(A13 대상)에는 두지 않는다.
  */
 @Component
+@ConditionalOnRole({AppRole.RECEIVER, AppRole.ALL})
 public class AckLoggingFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(AckLoggingFilter.class);

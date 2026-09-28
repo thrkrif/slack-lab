@@ -1,0 +1,13 @@
+.git
+.gradle
+build
+.env
+.env.*
+.idea
+.omc
+.omx
+.codex
+.claude
+docs
+logs
+*.log

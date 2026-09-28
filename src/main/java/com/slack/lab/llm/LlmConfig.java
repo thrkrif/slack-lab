@@ -1,6 +1,8 @@
 package com.slack.lab.llm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -9,6 +11,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
 public class LlmConfig {
 
     private static final Logger log = LoggerFactory.getLogger(LlmConfig.class);
