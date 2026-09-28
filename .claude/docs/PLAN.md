@@ -66,12 +66,12 @@
 ### 2단계 (P1) — 진행 중
 
 - [x] **착수 조건** — (1) 1단계 완료(`v0.1.0`) (2) 계획 승인·2단계 Git 정책(1단계와 동일하게 작업 단위마다 자동 PR·`develop` 병합)·Docker Compose 실행 결정(2026-09-28 사용자). `AGENTS.md` 반영
-- [ ] **M9 착수 결정 + 타당성 스파이크** — 진행 중, **사용자 결정 대기(멈춤)**
+- [x] **M9 착수 결정 + 타당성 스파이크** — 완료
   - [x] ADR-5 결정·ADR-8 추가, PRD §8 큐·워커 질문 해소
   - [x] Redis 스파이크: `XADD+WAITAOF` p95 3.18ms, numlocal=1, `XACKDEL` 단일 명령, `docker kill` 후 보존 (`EXPERIMENT-LOG.md` §6.1)
   - [x] Ollama 타당성: 10 동시 p95 272.8s, 순차 처리량 8.8 tok/s → **답변 p95 30s 목표는 이 환경에서 불가**. 워커 LLM 동시성 1로 확정 (§6.2)
   - [x] 목표 변경 결정(2026-09-28 사용자: 노트북 부하를 줄이는 방향) → 순차 20건(답변 p95 ≤ 45s) + 버스트 5건×2(정확성만), PRD §5·§6 반영
-  - [ ] Slack 429 관측 — 테스트 채널 ID 필요(§6.3)
+  - [x] Slack 429: 5·10건 동시 발신 모두 429 없음 → 테스트 채널 1개 유지 (§6.3)
 - [ ] **M10 인프라·설정 골격** — Redis 구동 설정, 의존성, `app.role`, 설정 record·불변식 검증
 - [ ] **M11 공유 처리 상태 저장소** — `ProcessingStateStore`(Redis Lua CAS·임대·gen), 선점 결과표, 원자 종료 스크립트, 통합 테스트 (기존 P0 타입·호출부는 그대로)
 - [ ] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 발행·소비·상태 확정 후 ACK, 핸들러 계약 변경, `EventDeduplicator` 제거
@@ -89,11 +89,14 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. 실행 환경은 Docker Compose(Redis `redis:8.2-alpine`·앱 역할)와 호스트 Ollama다. Git 정책은 1단계와 같다(자동 PR·`develop` 병합).
-- **M9는 브랜치 `feature/m9-feasibility`에서 진행 중이다.** 성능 목표는 결정돼 반영했다(순차 20건 답변 p95 ≤ 45s + 버스트 5건×2 정확성, 워커 LLM 동시성 1).
-- 남은 것은 429 측정용 테스트 채널 ID(`.env`의 `SLACK_TEST_CHANNEL`)뿐이다. 버스트가 5건으로 줄어 429 위험도 줄었다. 측정 후 M9 PR을 병합하고 M10으로 넘어간다.
-- 스파이크 재현: `docs/spikes/redis_durability_spike.py`(포트 6390 컨테이너), `docs/spikes/ollama_concurrency_spike.py`. 스파이크 컨테이너 `slab-spike-redis`는 정리 대상이다.
-- 워커의 LLM 동시성은 1로 확정했다. 동시 호출은 처리량을 늘리지 못하고 개별 지연만 키워 시도당 50초 예산을 넘긴다.
+- 2단계 진행 중. **M9 완료**, 다음은 **M10 인프라·설정 골격**(`feature/m10-infra`)이다.
+- 실행 환경: Docker Compose(Redis `redis:8.2-alpine`, 이미지 pull 완료)와 앱 역할(수신·워커·반응). Ollama는 호스트에서 쓰고, 컨테이너에서는 `host.docker.internal:11434`로 호출한다.
+- M9 확정값:
+  - `queue.enqueue-timeout-ms=150`(`XADD+WAITAOF` p95 3.18ms)
+  - 워커 LLM 동시성 1
+  - 테스트 채널 1개(`.env`의 `SLACK_TEST_CHANNEL`, 429 없음)
+- 성능 목표 변경(사용자): 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정. PRD §5·§6에 반영했다.
+- Git 정책은 1단계와 같다(자동 PR·`develop` 병합). 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
 - 실험용 테스트 채널 메시지(M8)는 아직 정리하지 않았다.
 
 ---
