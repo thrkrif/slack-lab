@@ -490,3 +490,18 @@ Slack API 실제 발신(네트워크 왕복 300~500ms)·ngrok 왕복 지연이 �
 | 불변식 위반 기동 | 컨테이너에 `STATE_RENEWMS=20000`을 주면 `설정 불변식 위반: state.renew-ms <= state.lease-ms / 3` 메시지를 남기고 기동 실패. 경계값(기한 합 = 총 기한, 회수 유휴 = 90000)은 기동 성공(테스트) |
 
 - 호스트 8080 포트에는 1단계 `bootRun`(수요일부터 실행 중인 이전 프로세스)이 떠 있었다. 그래서 검증은 8081 포트(`SERVER_PORT`·`RECEIVER_PORT`)로 했다. M12의 실제 멘션 왕복 전에 이 프로세스를 정리하고 ngrok 대상을 새 수신 서버로 맞춰야 한다.
+
+## 8. 2단계 M11 공유 처리 상태 저장소 검증 (2026-09-28)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 130건, 실패 0 (state 패키지 26건 + Finalization 3건 추가) |
+| 선점 결과표 | Testcontainers Redis 8.2로 각 행·우선순위 조합(만료 SENDING+24h초과→UNKNOWN, COMPLETED+24h초과→DONE, 이전세대+24h초과→STALE)을 검증 |
+| 동시 선점 | 동일 event_id 10스레드 동시 claim → 1승 9패(Busy) |
+| `redis-cli` 수준 수동 확인 | claim→mark_sending→finalize(completed) 전 과정을 raw RESP로 실행. TTL 604800초(7일), `XLEN`·`XPENDING` 0으로 본문·pending 삭제 확인(`XACKDEL` 단일 명령) |
+| codex critic 1회전 | REVISE(MAJOR 5건: 2'행 부분보존 유실, 상태별 목적지 미검증, COMPLETED 정리 유실, stream_id-event_id 미결속, 테스트 공백) → 전부 반영 |
+| codex critic 2회전 | REVISE(MAJOR 4건 신규: DONE/STALE 무검증 ACK, 자가치유 없는 late-complete 고아, 다른 세대 DLQ 보존 삭제 위험, 테스트 공백 / MINOR 2건: 목록 정렬 점수·타입 사전검증 — 문서화 후 의도적으로 보류) → MAJOR 4건 반영 |
+| codex critic 3회전 | **usage limit으로 실패**(2026-09-29 00:51 리셋 예정, 사용자 확인: 이후 마일스톤은 Claude 기반 검증으로 진행). M6(§2.10~§2.11) 선례에 따라 code-reviewer 에이전트로 대체 |
+| code-reviewer(대체) | REVISE(MAJOR 1건: `cleanup_preserved_if_same_gen`이 "다르면 보존"이라 M14 reprocess(gen+1) 정상 완료 때 옛 세대(gen) 보존본을 못 지움 — B18 위반. MINOR 6건은 문서화 후 보류) → MAJOR 1건 반영: 비교를 "미래 세대만 보존"(`pg > gen`)으로 바꾸고 회귀 테스트 추가(총 131건) |
+
+**핵심 교훈**: Lua 스크립트는 원자적이지만 롤백하지 않는다. "검증 없이 쓰기부터" 순서로 짜면 중간 실패가 데이터를 조용히 잃는다 — 이 프로젝트에서 3회 연속 발견된 패턴(부분 보존 유실 2건, 정리 유실 1건)이었다. 보존 키를 event_id로만 채번한 것도 문제였다 — 같은 이벤트의 다른 세대가 남긴 데이터를 서로 지울 수 있었다. gen 필드로 소유권을 재확인하고 나서야 안전해졌다.
