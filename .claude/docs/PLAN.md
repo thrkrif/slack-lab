@@ -73,7 +73,7 @@
   - [x] 목표 변경 결정(2026-09-28 사용자: 노트북 부하를 줄이는 방향) → 순차 20건(답변 p95 ≤ 45s) + 버스트 5건×2(정확성만), PRD §5·§6 반영
   - [x] Slack 429: 5·10건 동시 발신 모두 429 없음 → 테스트 채널 1개 유지 (§6.3)
 - [x] **M10 인프라·설정 골격** — 완료. `compose.yaml`·`Dockerfile`·`infra/redis.conf`, `app.role` 역할별 빈(B2), 설정 record 4종·불변식, `/health` Redis. 컨테이너 안에서 호스트 Ollama 호출 확인 (`EXPERIMENT-LOG.md` §7)
-- [ ] **M11 공유 처리 상태 저장소** — `ProcessingStateStore`(Redis Lua CAS·임대·gen), 선점 결과표, 원자 종료 스크립트, 통합 테스트 (기존 P0 타입·호출부는 그대로)
+- [x] **M11 공유 처리 상태 저장소** — 완료(codex 2회전 반영, 3회전은 usage limit으로 code-reviewer 대체). `state/` 패키지·`state.lua`, 선점 결과표 9종, `finalize` 검증→보존→상태→ACK 순서, 세대 인식 정리. 통합 테스트 26건 (`EXPERIMENT-LOG.md` §8)
 - [ ] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 발행·소비·상태 확정 후 ACK, 핸들러 계약 변경, `EventDeduplicator` 제거
 - [ ] **M13 재시도·DLQ** (P1-4) — 오류 전이표, 지연 재시도(ZSET), 최종 안내, DLQ, 24시간 창
 - [ ] **M14 결과 불명 복구** (P1-3) — **착수 전 Slack 스코프 재설치에서 멈춤**, `recovery` CLI(수동 재처리 승인 포함), 발신 직후 halt 유도
@@ -89,10 +89,11 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9·M10 완료**, 다음은 **M11 공유 처리 상태 저장소**(`feature/m11-state-store`)다. `state/` 패키지에 P1 전용 타입과 Lua 스크립트를 두고 Testcontainers로 테스트하며, 기존 P0 타입은 건드리지 않는다.
-- 실행: `docker compose up -d redis` + 호스트 `bootRun`(역할 `all`), 또는 `docker compose --profile app up --build`(이미지 `slack-lab-app`). Ollama는 호스트에 있다.
-- **호스트 8080 포트를 1단계 `bootRun` 이전 프로세스가 점유 중이다**(수요일부터). 검증은 8081 포트(`SERVER_PORT`/`RECEIVER_PORT`)로 했다. M12 실제 멘션 왕복 전에 정리가 필요하며, ngrok 대상 변경은 멈춤 지점이다.
-- M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개(`SLACK_TEST_CHANNEL`).
+- 2단계 진행 중. **M9·M10·M11 완료**, 다음은 **M12 수신–큐–워커 분리**(`feature/m12-queue-split`)다. `EventPublisher`·`EventWorker`를 추가하고 컨트롤러·핸들러 호출부를 큐 경유로 바꾼다. `EventDeduplicator`는 이 마일스톤에서 제거한다.
+- M11의 `state/state.lua`는 codex critic 2회전 검토를 반영했다(부분 실패 복구, stream_id-event_id 결속, 세대 인식 정리). 3회전은 codex usage limit으로 실패해 code-reviewer 에이전트로 대체 검토했다 — 결과는 M11 PR 병합 시점에 확정한다.
+- 실행: `docker compose up -d redis` + 호스트 `bootRun`(역할 `all`), 또는 `docker compose --profile app up --build`.
+- **호스트 8080 포트를 1단계 `bootRun` 이전 프로세스가 점유 중이다**(정리 여부 확인 필요, M12 실제 왕복 전에 처리).
+- M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개.
 - 성능 목표: 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정(사용자 결정).
 - 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
 
