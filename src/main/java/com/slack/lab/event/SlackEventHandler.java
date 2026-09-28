@@ -15,8 +15,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * HTTP를 모른다(AGENTS.md 규칙 2, A13 — 이 패키지에 서블릿·스프링 HTTP 타입 import 금지).
- * 입력은 이벤트와 {@link AttemptHandle}, 출력은 {@link HandlingResult}뿐이다. 저장소를 직접 알지 못한다.
+ * HTTP를 모른다(AGENTS.md 규칙 2, A13 — 이 패키지에 서블릿·스프링 HTTP 타입 import 금지). 큐 ACK도 모른다.
+ * 입력은 이벤트와 {@link AttemptHandle}, 출력은 {@link HandlingResult}뿐이다. 종료 상태 기록·예외 가드는
+ * M12부터 워커의 몫이다 — 핸들러는 {@code markSending} 게이트만 쥐고 있으면 된다.
  */
 @Component
 @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
@@ -43,62 +44,45 @@ public class SlackEventHandler {
         this.experimentProps = experimentProps;
     }
 
+    /** 예외를 던질 수 있다 — 워커가 {@code attempt}의 {@code markSending} 여부로 Failed/Unknown을 가른다(M12). */
     public HandlingResult handle(SlackMessageEvent event, AttemptHandle attempt) {
         long t0 = attempt.startNanos();
-        // markSending 진입 여부를 기록해둔다 — 예상 못한 예외가 나도 이 값으로 markFailed/markUnknown을 가른다.
-        // markSending 전이면 발신이 나가지 않았음이 확실하므로 명확한 실패, 이후라면 발신 여부를 알 수 없다(A10과 같은 원칙).
-        // send()가 private 헬퍼라 지역 변수를 그대로 갱신할 수 없어 배열로 감싼다(대안: 게이트를 handle()로 올리는 것,
-        // code-reviewer LOW 의견 — 지금은 markSending()이 send() 내부의 발신 분기와 한 몸이라 그대로 둔다).
-        boolean[] sendingMarked = {false};
-        try {
-            // 인위적 지연과 LLM 호출 모두 같은 예산식을 쓴다 — 따로 계산하면 slow-mode가 총 처리 기한(A16)을
-            // 넘기는 경로가 생긴다(code-reviewer MEDIUM: sleep에만 clamp가 빠져 있었음).
-            long slowModeMs = experimentProps.slowModeMs();
-            if (slowModeMs > 0) {
-                long sleepMs = Math.min(slowModeMs, Math.max(llmBudgetMs(t0), 0));
-                if (sleepMs > 0) {
-                    sleep(sleepMs);
-                }
+        // 인위적 지연과 LLM 호출 모두 같은 예산식을 쓴다 — 따로 계산하면 slow-mode가 총 처리 기한(A16)을
+        // 넘기는 경로가 생긴다(code-reviewer MEDIUM: sleep에만 clamp가 빠져 있었음).
+        long slowModeMs = experimentProps.slowModeMs();
+        if (slowModeMs > 0) {
+            long sleepMs = Math.min(slowModeMs, Math.max(llmBudgetMs(t0), 0));
+            if (sleepMs > 0) {
+                sleep(sleepMs);
             }
-
-            long llmRemainingMs = llmBudgetMs(t0);
-            LlmResult llmResult = llmRemainingMs > 0
-                    ? llmClient.chat(event.promptText(), llmRemainingMs)
-                    : new LlmResult.TimedOut(0);
-
-            String text;
-            String kind;
-            if (llmResult instanceof LlmResult.Success success) {
-                kind = "answer";
-                text = success.text();
-                log.info("LLM 성공 event_id={} attempt_id={} elapsed_ms={}", event.eventId(), attempt.attemptId(),
-                        success.elapsedMs());
-            } else {
-                kind = "failure_notice";
-                text = FAILURE_NOTICE;
-                String llmStage = llmResult instanceof LlmResult.TimedOut timedOut
-                        ? "llm_timeout(elapsed_ms=" + timedOut.elapsedMs() + ")"
-                        : "llm_failed:" + ((LlmResult.Failed) llmResult).reason();
-                log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} stage={}", event.eventId(), attempt.attemptId(),
-                        llmStage);
-            }
-
-            HandlingResult result = send(event, attempt, t0, text, kind, sendingMarked);
-            log.info("처리 종료 event_id={} attempt_id={} kind={} result={} 총_소요_ms={}",
-                    event.eventId(), attempt.attemptId(), kind, result.getClass().getSimpleName(), elapsedMs(t0));
-            return result;
-        } catch (Exception e) {
-            // 예외 가드가 없으면 dedup이 PROCESSING에 영구 고착된다(함정 1·3번) — 반드시 여기서 종료 상태를 확정한다.
-            String stage = "unexpected_exception:" + e.getClass().getSimpleName();
-            log.error("처리 중 예상 못한 예외 event_id={} attempt_id={} sending_marked={}", event.eventId(),
-                    attempt.attemptId(), sendingMarked[0], e);
-            if (sendingMarked[0]) {
-                attempt.markUnknown(stage);
-                return new HandlingResult.Unknown(stage);
-            }
-            attempt.markFailed(stage);
-            return new HandlingResult.Failed(stage);
         }
+
+        long llmRemainingMs = llmBudgetMs(t0);
+        LlmResult llmResult = llmRemainingMs > 0
+                ? llmClient.chat(event.promptText(), llmRemainingMs)
+                : new LlmResult.TimedOut(0);
+
+        String text;
+        String kind;
+        if (llmResult instanceof LlmResult.Success success) {
+            kind = "answer";
+            text = success.text();
+            log.info("LLM 성공 event_id={} attempt_id={} elapsed_ms={}", event.eventId(), attempt.attemptId(),
+                    success.elapsedMs());
+        } else {
+            kind = "failure_notice";
+            text = FAILURE_NOTICE;
+            String llmStage = llmResult instanceof LlmResult.TimedOut timedOut
+                    ? "llm_timeout(elapsed_ms=" + timedOut.elapsedMs() + ")"
+                    : "llm_failed:" + ((LlmResult.Failed) llmResult).reason();
+            log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} stage={}", event.eventId(), attempt.attemptId(),
+                    llmStage);
+        }
+
+        HandlingResult result = send(event, attempt, t0, text, kind);
+        log.info("처리 종료 event_id={} attempt_id={} kind={} result={} 총_소요_ms={}",
+                event.eventId(), attempt.attemptId(), kind, result.getClass().getSimpleName(), elapsedMs(t0));
+        return result;
     }
 
     /**
@@ -110,33 +94,27 @@ public class SlackEventHandler {
         return Math.min(llmProps.deadlineMs() - elapsedMs(t0), totalRemainingMs(t0) - slackProps.sendDeadlineMs());
     }
 
-    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, String kind,
-            boolean[] sendingMarked) {
+    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, String kind) {
         if (!attempt.markSending()) {
             // 소유권을 잃었다는 뜻이다 — 이미 다른 시도가 처리 중이거나 끝났으므로 발신하지 않는다.
             log.warn("SENDING 기록 거절 — 발신 안 함 event_id={} attempt_id={}", event.eventId(), attempt.attemptId());
             return new HandlingResult.Rejected("mark_sending_rejected");
         }
-        sendingMarked[0] = true;
 
         long remainingMs = Math.min(slackProps.sendDeadlineMs(), totalRemainingMs(t0));
         SlackSendResult sendResult = slackClient.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs);
 
         // sealed 타입 switch — SlackSendResult에 분기가 늘어나면 컴파일 오류로 여기서 바로 드러난다.
         return switch (sendResult) {
-            case SlackSendResult.Success s -> {
-                attempt.markCompleted();
-                yield new HandlingResult.Delivered(kind);
-            }
+            case SlackSendResult.Success s -> new HandlingResult.Delivered(kind, s.ts());
             case SlackSendResult.Failed failed -> {
                 String stage = kind + "_send:" + failed.reason();
-                attempt.markFailed(stage);
                 log.warn("발신 실패 event_id={} attempt_id={} stage={}", event.eventId(), attempt.attemptId(), stage);
-                yield new HandlingResult.Failed(stage);
+                // M13이 SlackSendResult에 재시도 가능 여부를 더할 때까지는 항상 false다(퇴행은 일시적, M13에서 해소).
+                yield new HandlingResult.Failed(stage, false);
             }
             case SlackSendResult.Unknown unknown -> {
                 String stage = kind + "_send:" + unknown.reason();
-                attempt.markUnknown(stage);
                 log.warn("발신 결과 불명 event_id={} attempt_id={} stage={}", event.eventId(), attempt.attemptId(), stage);
                 yield new HandlingResult.Unknown(stage);
             }

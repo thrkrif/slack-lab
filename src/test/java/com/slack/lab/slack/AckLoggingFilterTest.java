@@ -58,7 +58,8 @@ class AckLoggingFilterTest {
         filter.doFilter(request, response, chain);
 
         verify(chain).doFilter(request, response);
-        assertThat(appender.list).anyMatch(e -> e.getFormattedMessage().contains("ack_delivered=true event_id=Ev1"));
+        assertThat(appender.list).anyMatch(e -> e.getFormattedMessage().contains("ack_delivered=true")
+                && e.getFormattedMessage().contains("event_id=Ev1"));
     }
 
     @Test
@@ -85,7 +86,8 @@ class AckLoggingFilterTest {
 
         assertThatThrownBy(() -> filter.doFilter(request, response, chain)).isInstanceOf(IOException.class);
 
-        assertThat(appender.list).anyMatch(e -> e.getFormattedMessage().contains("ack_delivered=false event_id=Ev1"));
+        assertThat(appender.list).anyMatch(e -> e.getFormattedMessage().contains("ack_delivered=false")
+                && e.getFormattedMessage().contains("event_id=Ev1"));
     }
 
     @Test
@@ -99,6 +101,24 @@ class AckLoggingFilterTest {
         assertThatThrownBy(() -> filter.doFilter(request, response, chain)).isInstanceOf(IOException.class);
 
         assertThat(appender.list).noneMatch(e -> e.getFormattedMessage().contains("ack_delivered"));
+    }
+
+    @Test
+    void 진입_시각을_요청_속성에_심고_recv_ms를_기록한다() throws Exception {
+        // M12 측정 경계(ARCHITECTURE §11): 컨트롤러가 이 속성을 큐 메시지의 received_at으로 불변 전달한다.
+        HttpServletRequest request = requestFor("/slack/events", "Ev1");
+        HttpServletResponse response = mock(HttpServletResponse.class);
+        FilterChain chain = mock(FilterChain.class);
+
+        long before = System.currentTimeMillis();
+        filter.doFilter(request, response, chain);
+        long after = System.currentTimeMillis();
+
+        var captor = org.mockito.ArgumentCaptor.forClass(Object.class);
+        verify(request).setAttribute(org.mockito.ArgumentMatchers.eq("slack.receivedAtMs"), captor.capture());
+        long receivedAtMs = (Long) captor.getValue();
+        assertThat(receivedAtMs).isBetween(before, after);
+        assertThat(appender.list).anyMatch(e -> e.getFormattedMessage().contains("recv_ms="));
     }
 
     @Test

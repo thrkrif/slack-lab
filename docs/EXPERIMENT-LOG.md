@@ -505,3 +505,21 @@ Slack API 실제 발신(네트워크 왕복 300~500ms)·ngrok 왕복 지연이 �
 | code-reviewer(대체) | REVISE(MAJOR 1건: `cleanup_preserved_if_same_gen`이 "다르면 보존"이라 M14 reprocess(gen+1) 정상 완료 때 옛 세대(gen) 보존본을 못 지움 — B18 위반. MINOR 6건은 문서화 후 보류) → MAJOR 1건 반영: 비교를 "미래 세대만 보존"(`pg > gen`)으로 바꾸고 회귀 테스트 추가(총 131건) |
 
 **핵심 교훈**: Lua 스크립트는 원자적이지만 롤백하지 않는다. "검증 없이 쓰기부터" 순서로 짜면 중간 실패가 데이터를 조용히 잃는다 — 이 프로젝트에서 3회 연속 발견된 패턴(부분 보존 유실 2건, 정리 유실 1건)이었다. 보존 키를 event_id로만 채번한 것도 문제였다 — 같은 이벤트의 다른 세대가 남긴 데이터를 서로 지울 수 있었다. gen 필드로 소유권을 재확인하고 나서야 안전해졌다.
+
+## 9. 2단계 M12 수신–큐–워커 분리 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 132건, 실패 0 (`EventPublisherTest`·`EventWorkerTest` 신규, `EventDeduplicatorTest` 제거) |
+| 실제 멘션 왕복 | 호스트 `bootRun`(`app.role` 기본값 `all`) + `docker start slack-lab-redis-1`, 기존 ngrok 터널(`http://localhost:8080` 대상, 이미 Slack Request URL로 등록됨) 그대로 사용. 서명 유효한 `event_callback`을 `SLACK_TEST_CHANNEL`로 직접 POST → **200(큐 발행 확인, `enqueue_ms=38`)** → 워커가 즉시 소비 → LLM 성공(`elapsed_ms=1251`) → **Slack 발신 성공** → `Delivered` 기록. 로그 전 구간 확인, 응답 텍스트 원본은 마스킹 |
+| B1(503 유도) | `SlackEventControllerTest`: `EventPublisher`가 `Failed`/`Unconfirmed`를 반환하면 503 (실제 Redis 없이 컨트롤러 단위 검증) |
+| B2(역할별 빈) | `AppRoleContextTest`: `receiver`엔 핸들러·워커 없음, `worker`엔 컨트롤러·발행자 없음 (M12 전엔 `RedisBusyException`으로 실패하던 버그를 여기서 발견·수정, 아래 참고) |
+| B10(ACK 보류) | `EventWorkerTest`: `Rejected`·`finalizeAttempt` 예외 시나리오 모두 ACK 없이 pending에 메시지가 남음을 실측(Testcontainers Redis) |
+| Unknown/Rejected 재발신 0회 | `EventWorkerTest`: 각각 핸들러 재호출 0회(300~500ms 대기 후 `verify(times(1))`)로 확인 |
+| finalize 경계 kill | `EventWorkerTest`: `ProcessingStateStore.finalizeAttempt`가 예외를 던지는 래퍼로 시뮬레이션 → ACK 안 함, 스트림에 메시지 그대로 존재(입력 유실 없음) |
+
+**버그 2건 발견·수정**:
+1. `EventWorker.ensureGroupExists()`가 `BUSYGROUP` 재생성 예외를 `e.getMessage()`로만 검사했는데, Spring이 Lettuce 예외를 `RedisSystemException("Error in execution")`으로 감싸 원본 메시지가 `getCause()`에만 남는다 — `AppRoleContextTest`의 `worker`/`all` 역할 테스트가 매번 실패했다. cause 체인을 순회하도록 수정.
+2. `EventPublisher.confirmDurable()`이 `StringRedisTemplate.execute(RedisCallback)`의 기본 `ByteArrayOutput`으로 `WAITAOF`의 정수 배열 응답을 디코딩하려다 `UnsupportedOperationException`을 던졌다 — **실서비스에서 발행이 항상 `Unconfirmed`(503)로만 끝나고 `Enqueued`(200)에 도달할 수 없는 B1 위반**이었다(테스트가 없어 그동안 발견되지 못함). `LettuceConnection.execute(String, CommandOutput, byte[]...)`에 `IntegerListOutput`을 명시해 우회.
+
+**교훈**: 두 버그 모두 "빌드가 통과하니 됐다"로는 안 잡혔다 — 하나는 실제 Redis 없이는 재현되지 않는 예외 래핑 차이였고, 다른 하나는 성공 경로를 Testcontainers 실제 Redis로 한 번도 검증하지 않아서 숨어 있었다. 규칙 5(외부 왕복 성공 기준)가 M11까지는 상태 저장소 자체를, M12부터는 발행·소비 경로까지 요구하는 이유다.

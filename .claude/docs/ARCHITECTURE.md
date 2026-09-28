@@ -2,12 +2,50 @@
 
 **목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`AGENTS.md`](../../AGENTS.md).
 
-> 현재 코드는 M1 골격(설정 record·`/health`)뿐이다. 이 문서는 앞으로 만들 구조를 기술한다.
-> §7은 폐기한 프로토타입의 검증 기록이다. §8은 당시 결함에서 출발한 새 설계이며, 이 문서의 상태 전이·시간 제한·복구 정책은 아직 구현·검증 전이다.
+> 1단계는 `v0.1.0`으로 완료했다. 2단계는 M9~M11까지 진행했고, **M12(수신–큐–워커 분리)까지 실제 구조로 반영됐다**
+> (아래 §1). §7은 폐기한 프로토타입의 검증 기록이다. §8은 당시 결함에서 출발한 설계이며, 표시된 항목은 구현·검증됐다.
 
 ---
 
-## 1. 목표 구조 (1단계 · 동기)
+## 1. 현재 구조 (2단계 · 수신–큐–워커 분리, M12)
+
+```mermaid
+flowchart LR
+    U["당직자<br/>#incident"] -->|"@봇 멘션"| SL[Slack]
+    SL -->|"POST /slack/events"| NG[ngrok]
+    NG --> C
+
+    subgraph RECEIVER["receiver 프로세스"]
+        C[SlackEventController]
+        V[SlackSignatureVerifier]
+        P[EventPublisher]
+        C --- V
+        C --> P
+    end
+
+    P -->|"XADD + WAITAOF"| RS[(Redis Streams<br/>slack:events)]
+
+    subgraph WORKER["worker 프로세스"]
+        W[EventWorker]
+        ST[(ProcessingStateStore<br/>Redis Lua CAS)]
+        H[SlackEventHandler]
+        L[LlmClient]
+        K[SlackClient]
+        W --> ST
+        W --> H
+        H --> L
+        H --> K
+    end
+
+    RS -->|"XREADGROUP"| W
+
+    L -->|"POST /v1/chat/completions"| OL["Ollama<br/>:11434"]
+    K -->|"chat.postMessage"| SL
+```
+
+수신(`receiver`)은 서명 검증·필터링 후 `EventPublisher`로 큐 저장을 확인받은 뒤에만 200/503을 결정한다(§3.1). LLM·Slack 발신 빈은 수신 프로세스에 없다(B2). 워커(`worker`)가 별도 프로세스로 큐를 소비해 `ProcessingStateStore`에서 처리 권한을 선점하고, 기존 `SlackEventHandler`로 LLM 호출·발신까지 수행한 뒤 결과에 따라 종료 상태를 기록하고 ACK한다(§3.3, §5.1). 개발 기본값 `app.role=all`은 두 역할을 한 프로세스에 띄운다.
+
+### 1.1 1단계 구조 (역사적 기록, `v0.1.0`)
 
 ```mermaid
 flowchart LR
@@ -33,7 +71,7 @@ flowchart LR
     K -->|"chat.postMessage"| SL
 ```
 
-프로세스는 하나. 외부 의존은 Slack과 Ollama뿐이다. 큐도 DB도 없다.
+프로세스는 하나, 외부 의존은 Slack과 Ollama뿐, 큐도 DB도 없었다. `EventDeduplicator`(인메모리 dedup)는 M12에서 제거됐다. 1단계 실험은 `v0.1.0` 태그에서 재현할 수 있다.
 
 ---
 
@@ -41,19 +79,24 @@ flowchart LR
 
 | 패키지 | 클래스 | 책임 | 2단계에서 |
 |---|---|---|---|
-| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 · dedup/handler 연결 | 수신 서버에 남고 큐 저장 결과에 따라 응답 |
-| | `SlackSignatureVerifier` | HMAC-SHA256 서명 검증 | 수신 서버에 남음 |
-| | `SlackClient` | `chat.postMessage` 발신 | **워커로 이동** |
-| | `AckLoggingFilter` | 응답 쓰기 성공/실패를 `ack_delivered`로 관측(P0-7). dedup 상태는 바꾸지 않는다 | 수신 서버에 남음 |
-| `event/` | `SlackMessageEvent` | 페이로드 → 값 객체 | 큐 메시지 스키마가 됨 |
-| | `EventDeduplicator`·`AttemptHandle`·`ClaimResult`·`ProcessingState` | `event_id` 중복 제거·전이 상태 기계 | 워커의 공유 처리 상태로 확장 (§3.2) |
-| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트 | 워커에서 호출하며 처리 결과 계약을 확장 |
-| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`) | 워커 결과 타입으로 확장 |
-| `llm/` | `LlmClient` | 호출 경계 인터페이스 | RAG·LangGraph가 붙는 자리 |
-| | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | 워커로 이동 |
+| `slack/` | `SlackEventController` | 수신 · 검증 · 분기 · 발행 호출 | receiver에 있다. 발행 결과(`Enqueued`→200, 그 외→503)로 응답한다(M12). 중복 입력은 거르지 않는다(§3.1) |
+| | `SlackSignatureVerifier` | HMAC-SHA256 서명 검증 | receiver에 있다 |
+| | `SlackClient` | `chat.postMessage` 발신 | **worker에 있다** |
+| | `AckLoggingFilter` | 응답 쓰기 성공/실패를 `ack_delivered`로 관측(P0-7) | receiver에 있다 |
+| `queue/` | `EventPublisher` | `XADD`+`WAITAOF`로 큐에 저장하고 저장 확인을 반환(M12) | receiver에 있다 |
+| | `PublishResult` | 발행 결과 3분류(`Enqueued`/`Failed`/`Unconfirmed`) | receiver·컨트롤러가 참조 |
+| `worker/` | `EventWorker` | `XREADGROUP` 소비, `ProcessingStateStore`로 선점, 핸들러 호출, 결과에 따른 종료 기록 후 ACK, 주기적 `XAUTOCLAIM` 회수(M12) | worker에 있다 |
+| | `WorkerAttemptHandle` | `AttemptHandle`의 M12 구현. `markSending()`을 저장소 CAS로 위임하고 호출 여부를 기억해 예외 가드(Failed/Unknown)를 가른다 | worker 내부 전용(package-private) |
+| `event/` | `SlackMessageEvent` | 페이로드 → 값 객체. 큐 메시지 필드에서 재구성(`fromQueueFields`)도 지원 | 큐 메시지 스키마가 됨(M12) |
+| | `AttemptHandle` | 핸들러가 갖는 유일한 권한: `markSending()` 게이트 | worker가 구현(`WorkerAttemptHandle`)을 주입 |
+| | ~~`EventDeduplicator`·`ClaimResult`·`ProcessingState`~~ | P0 인메모리 dedup·전이 상태 기계 | **M12에서 제거됨.** `state/ProcessingStateStore`(§3.3)가 대체 |
+| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트. HTTP도 큐 ACK도 모른다 | worker가 호출한다. 종료 상태 기록은 하지 않고 `HandlingResult`만 반환(M12) |
+| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`) | worker가 이 값으로 `finalizeAttempt`·ACK 여부를 정한다 |
+| `llm/` | `LlmClient` | 호출 경계 인터페이스 | // 3단계에서 여기가 바뀐다 (RAG) |
+| | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | worker에 있다 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
-| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController`, `AppRole`·`ConditionalOnRole`·`StartupInvariants` | `record` + `@ConfigurationProperties`, `/health`(Redis 포함), 역할별 빈 등록·설정 불변식 | 각자 따라 이동 |
-| | `SlackProperties`(`slack/`)·`LlmProperties`(`llm/`) | 설정은 사용하는 패키지 옆에 둔다. 필수 값(`slack.signing-secret`·`slack.bot-token`·`llm.model`)은 `@Validated`+`@NotBlank`로 누락 시 기동 실패(A3) | 각자 따라 이동 |
+| `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController`, `AppRole`·`ConditionalOnRole`·`StartupInvariants` | `record` + `@ConfigurationProperties`, `/health`(Redis 포함), 역할별 빈 등록·설정 불변식 | 각자 역할 조건으로 등록 |
+| | `SlackProperties`(`slack/`)·`LlmProperties`(`llm/`)·`QueueProperties`(`queue/`)·`WorkerProperties`(`worker/`)·`StateProperties`(`state/`) | 설정은 사용하는 패키지 옆에 둔다. 필수 값은 `@Validated`+`@NotBlank`/`@Positive`로 누락·범위 위반 시 기동 실패(A3) | 각자 해당 역할에서 바인딩 |
 
 ### 2단계 실행 구성 (M10, 2026-09-28)
 
@@ -61,11 +104,11 @@ flowchart LR
 
 | 역할 | 웹 | 등록되는 빈 | 비고 |
 |---|---|---|---|
-| `receiver` | O | 서명 검증기·`AckLoggingFilter`·`/health` | M12부터 수신 컨트롤러와 발행자가 붙는다. LLM·Slack 발신 빈은 없다(B2) |
-| `worker` | X | 핸들러·`LlmClient`·`SlackClient` | M12부터 큐 소비 |
+| `receiver` | O | 서명 검증기·`SlackEventController`·`EventPublisher`·`AckLoggingFilter`·`/health` | LLM·Slack 발신 빈은 없다(B2) |
+| `worker` | X | `EventWorker`·`SlackEventHandler`·`ProcessingStateStore`·`LlmClient`·`SlackClient` | 큐 소비(M12) |
 | `reactor` | X | `SlackClient` | M15 즉시 반응 |
 | `recovery` | X | `SlackClient` | M14 복구 CLI |
-| `all` | O | 1단계 흐름 전체(컨트롤러·인메모리 dedup·핸들러) | 개발 기본값. M12에서 큐 경유로 바뀐다 |
+| `all` | O | receiver+worker 빈 전체 | 개발 기본값. M12부터 큐 경유 흐름이다 |
 
 - 실행: `compose.yaml`의 `redis`(`redis:8.2-alpine`, `infra/redis.conf` — AOF always)와 profile `app`의 `receiver`·`worker`·`reactor`가 한 이미지(`slack-lab-app`)를 쓴다. Ollama는 호스트에 두고 `host.docker.internal:11434`로 호출한다. 포트는 모두 `127.0.0.1`에만 연다.
 - 새 설정: `queue.*`·`state.*`·`retry.*`·`worker.concurrency`(기본 1, M9). `StartupInvariants`가 기동할 때 조합 불변식을 검사한다: 기한 합 ≤ 총 기한, 갱신 ≤ 임대/3, 회수 유휴 ≥ 총 기한 + 임대, 재시도 대기 수 ≥ 재시도 횟수. 위반하면 기동이 실패한다.
@@ -82,22 +125,40 @@ flowchart LR
 
 ## 3. 요청 흐름과 3초 제약
 
+**2단계(M12) — 큐 경유**. 수신은 큐 저장 확인까지만 책임지고, LLM 호출·발신은 별도 워커 프로세스가 비동기로 수행한다.
+
 ```mermaid
 sequenceDiagram
     participant S as Slack
     participant C as SlackEventController
+    participant P as EventPublisher
+    participant R as Redis Streams
+    participant W as EventWorker
+    participant ST as ProcessingStateStore
     participant H as SlackEventHandler
     participant O as Ollama
 
     S->>C: POST /slack/events (event_id=Ev01)
-    C->>C: 서명 검증 · 처리 권한 원자적 선점
-    C->>H: handler.handle(event)
+    C->>C: 서명 검증
+    C->>P: publish(event)
+    P->>R: XADD slack:events
+    P->>R: WAITAOF 1 0 timeout
+    R-->>P: numlocal>=1
+    P-->>C: Enqueued
+    C-->>S: 200 OK ← 큐 저장 확인 직후(3초 안)
+
+    W->>R: XREADGROUP (블로킹)
+    R-->>W: 메시지
+    W->>ST: claim(request)
+    ST-->>W: Claimed(attempt_id)
+    W->>H: handler.handle(event, attempt)
     H->>O: POST /v1/chat/completions
-    Note over S,O: ⚠ 여기서 Slack의 3초 마감선이 지나간다
     O-->>H: 답변 (로컬 추론 · 수 초~수십 초)
+    H->>ST: markSending()
     H->>S: chat.postMessage(thread_ts)
-    H-->>C: return
-    C-->>S: 200 OK ← 전부 끝난 뒤
+    H-->>W: HandlingResult
+    W->>ST: finalizeAttempt(...)
+    W->>R: XACKDEL
 ```
 
 ### Slack이 정한 제약
@@ -110,7 +171,7 @@ sequenceDiagram
 | 오류 표현 | 실패해도 HTTP 200. 본문 `ok: false` | 상태 코드만 보면 놓침 |
 | URL 등록 | `url_verification` 요청의 `challenge`를 그대로 반환 | 서버가 떠 있어야 등록된다 |
 
-동기 처리 시간이 3초를 넘으면 재전송이 발생하는 흐름을 관찰한다. 실제 추론이 빠르면 인위적 지연으로 재현한다.
+1단계(동기)는 처리 시간이 3초를 넘으면 재전송이 발생했다(`v0.1.0`에서 재현 가능). 2단계는 수신이 큐 저장만 하고 바로 응답하므로 이 경로로는 재전송이 거의 생기지 않는다 — 대신 큐 저장 실패·확인 시간 초과(503) 쪽에서 재전송이 발생한다(§3.1 B1).
 재전송 발생과 중복 답글 발생은 별도 지표다. 중복 답글이 0이어도 실험은 성립한다.
 
 ---
@@ -241,12 +302,12 @@ P1에서도 워커 1회 시도에 이 예산을 적용한다. PRD의 답변 p95 
 
 ```mermaid
 flowchart TB
-    subgraph S1["1단계 — 지금"]
+    subgraph S1["1단계 — 완료(v0.1.0)"]
         A1[Slack] --> B1[수신 API<br/>= 처리] --> C1[Ollama]
         B1 -.->|"200 OK · 전부 끝난 뒤"| A1
     end
 
-    subgraph S2["2단계 — 분리"]
+    subgraph S2["2단계 — 분리(M12까지 반영, 지금)"]
         A2[Slack] --> B2[수신 API]
         B2 -.->|"200 OK · 큐 저장 확인 후"| A2
         B2 --> Q2[(메시지 큐)] --> W2[AI 워커] --> C2[Ollama]
@@ -260,6 +321,8 @@ flowchart TB
     S1 --> S2 --> S3
 ```
 
+<!-- 3단계에서 여기가 바뀐다: RAG(임베딩·pgvector)는 아직 코드가 없다. 위 S3는 자리만 잡아둔 것이다. -->
+
 | 단계 | 들어오는 것 | 바뀌는 파일 | 새로 생기는 문제 |
 |---|---|---|---|
 | 1 | — | — | 3초 초과 · 중복 답글 |
@@ -270,16 +333,16 @@ flowchart TB
 
 ### 5.1 P1의 변경 범위와 책임
 
-아래 컴포넌트는 P1에서 도입한다. P0에 큐·분산 상태·재시도 프레임워크를 미리 구현하지 않는다.
+아래 컴포넌트는 P1에서 도입했다(M9~M12). 재시도·DLQ·복구(M13·M14)는 계속 진행 중이다.
 
-| 컴포넌트 | 책임 |
-|---|---|
-| `SlackEventController` | 검증·필터링 후 발행 호출, 저장 확인 결과를 HTTP 응답으로 변환 |
-| `EventPublisher` | event_id·최초 수신 시각·채널·스레드·입력·스키마 버전을 큐에 저장하고 내구성 있는 저장 확인을 반환 |
-| `EventWorker` | 큐 소비, 처리 권한 선점, 핸들러 호출, 결과 분류, 완료 기록 뒤 ACK |
-| `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 |
-| `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환하도록 확장 |
-| `RetryPolicy` / `RecoveryService` | 재시도 예약·최종 안내·DLQ·UNKNOWN 확인 및 수동 복구 |
+| 컴포넌트 | 책임 | 상태 |
+|---|---|---|
+| `SlackEventController` | 검증·필터링 후 발행 호출, 저장 확인 결과를 HTTP 응답으로 변환 | M12 완료 |
+| `EventPublisher` | event_id·최초 수신 시각·채널·스레드·입력·스키마 버전을 큐에 저장하고 내구성 있는 저장 확인을 반환 | M12 완료 |
+| `EventWorker` | 큐 소비, 처리 권한 선점, 핸들러 호출, 결과 분류, 종료 기록 뒤 ACK(Rejected는 ACK 안 함) | M12 완료(최소 정책. 재시도는 M13) |
+| `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 | M11 완료 |
+| `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환 | M12 완료 |
+| `RetryPolicy` / `RecoveryService` | 재시도 예약·최종 안내·DLQ·UNKNOWN 확인 및 수동 복구 | M13·M14 예정 |
 
 - 초기 재시도 정책은 최초 시도 이후 최대 3회, 기본 대기 5초·30초·120초다. 적용 가능한 서버 지정 대기 시간이 있으면 그보다 일찍 재시도하지 않는다. 최초 수신 후 24시간을 넘으면 자동 실행을 멈추고 복구 대상으로 넘긴다.
 - LLM 일시 실패와 미전송이 확실한 일시적 발신 실패만 자동 재시도한다. 인증·권한·잘못된 입력 등 영구 오류와 전송 결과 불명은 반복 호출하지 않는다. 오류 분류는 각 클라이언트 경계에서 수행한다.
@@ -412,15 +475,18 @@ Ollama가 느려서 3초 초과는 저절로 재현된다. 그래도 `experiment
 
 ## 9. 데이터
 
-1단계에 저장소는 없다. `EventDeduplicator`의 인메모리 맵이 전부다.
+1단계는 저장소가 없었다(`EventDeduplicator`의 인메모리 맵이 전부). 2단계(M9~M12)부터 Redis 하나에 큐와 처리 상태를 함께 둔다(ADR-8).
 
-| 저장소 | 담는 것 | 후보 | 단계 |
+| 저장소 | 담는 것 | 구현 | 단계 |
 |---|---|---|---|
-| 처리 상태 | `event_id`·시도 소유자·상태·기한·확인된 메시지 식별자 (§3.2) | 인메모리 → Redis | 1 → P1 |
-| 큐 | 처리 대기 이벤트 | Redis Streams / RabbitMQ | P1 |
+| 처리 상태 | `slack:evt:{event_id}` 해시 — 소유자(`attempt_id`)·상태·gen·임대·기한·확인된 메시지 식별자 (§3.2·§3.3) | 인메모리 → `RedisProcessingStateStore` | 1 → P1(M11) |
+| 큐 | `slack:events` Redis Stream(소비 그룹 `workers`), 처리 대기 이벤트 | Redis Streams | P1(M12) |
+| 보존·복구 목록 | `slack:preserved:{event_id}` 해시(입력 본문) + `slack:dlq`·`slack:recovery` ZSET(대상 event_id) | Redis | P1(M11, M14에서 CLI로 소비) |
 | 문서 + 벡터 | 과거 장애 리포트와 임베딩 | PostgreSQL + pgvector | P2 |
 
-P1의 큐·재시도·DLQ에는 복구에 필요한 입력을 일시 보관한다. 완료·복구 종료 후 입력을 삭제하고, 보존 기간 동안 중복 억제용 메타데이터만 유지한다. 미해결 건은 운영자가 주기적으로 검토한다. 대화 내용의 **영구 아카이브는 만들지 않는다** ([`PRD.md`](PRD.md) §7).
+<!-- 3단계에서 여기가 바뀐다: 문서+벡터 저장소는 아직 코드가 없다. -->
+
+P1의 큐·재시도·DLQ에는 복구에 필요한 입력을 일시 보관한다. 완료·복구 종료 후 입력을 삭제하고, 보존 기간 동안 중복 억제용 메타데이터만 유지한다(§3.3, B18). 미해결 건은 운영자가 주기적으로 검토한다. 대화 내용의 **영구 아카이브는 만들지 않는다** ([`PRD.md`](PRD.md) §7).
 
 ---
 
