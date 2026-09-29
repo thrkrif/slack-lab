@@ -19,6 +19,9 @@ public class RedisProcessingStateStore implements ProcessingStateStore {
 
     static final String DLQ_KEY = "slack:dlq";
     static final String RECOVERY_KEY = "slack:recovery";
+    // RetryScheduler(worker 패키지)가 재시도 목록 키를 공유해야 해서 public이다 — DLQ_KEY·RECOVERY_KEY와
+    // 달리 이 상수는 패키지 경계를 넘는 계약의 일부다.
+    public static final String RETRY_KEY = "slack:retry";
 
     // 같은 스크립트를 반환 타입만 달리해 쓴다(선점은 목록, 나머지 전이는 0/1).
     @SuppressWarnings("rawtypes")
@@ -68,7 +71,7 @@ public class RedisProcessingStateStore implements ProcessingStateStore {
         String verdict = String.valueOf(res.get(0));
         return switch (verdict) {
             case "CLAIMED" -> new ClaimOutcome.Claimed(attemptId, Long.parseLong(String.valueOf(res.get(1))),
-                    "1".equals(String.valueOf(res.get(2))));
+                    "1".equals(String.valueOf(res.get(2))), Integer.parseInt(String.valueOf(res.get(3))));
             case "BUSY" -> new ClaimOutcome.Busy();
             case "NO_INPUT" -> new ClaimOutcome.NoInput();
             default -> new ClaimOutcome.Settled(ClaimOutcome.Reason.valueOf(verdict));
@@ -97,6 +100,13 @@ public class RedisProcessingStateStore implements ProcessingStateStore {
                 String.valueOf(Duration.ofDays(state.completedRetentionDays()).toMillis()));
     }
 
+    @Override
+    public boolean scheduleRetry(String eventId, String attemptId, String streamId, long nextGen, long retryAtMs,
+            int retries, String stage) {
+        return run(eventId, "retry", attemptId, nz(streamId), queue.group(), String.valueOf(nextGen),
+                String.valueOf(retryAtMs), String.valueOf(retries), nz(stage));
+    }
+
     private boolean run(String eventId, String op, String... args) {
         String[] all = new String[args.length + 3];
         all[0] = op;
@@ -108,7 +118,7 @@ public class RedisProcessingStateStore implements ProcessingStateStore {
     }
 
     private List<String> keys(String eventId) {
-        return List.of(stateKey(eventId), queue.streamKey(), preservedKey(eventId), DLQ_KEY, RECOVERY_KEY);
+        return List.of(stateKey(eventId), queue.streamKey(), preservedKey(eventId), DLQ_KEY, RECOVERY_KEY, RETRY_KEY);
     }
 
     private String fail() {

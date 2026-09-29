@@ -547,3 +547,68 @@ MINOR 12건(동시성 상한을 깨는 reclaim 처리, `experiment.dedup-enabled
 - **MAJOR-3(문서 정정)**: 위 표에 반영(합성 서명 요청으로 정정). 사용자가 실제로 Slack에서 봇을 멘션했으나 그 시점엔 호스트 `bootRun`이 꺼져 있어(이전 세션 검증 후 종료한 채로 둠) 응답이 없었다 — 재전송 창이 지난 뒤 발견해 재현이 안 되므로, 서버를 다시 켜고 동일한 방식(서명 유효한 합성 요청)으로 왕복을 재확인했다: 200(`enqueue_ms=27`) → 워커 소비 → LLM 성공(`elapsed_ms=594`) → **Slack 발신 성공** → `Delivered`(총 소요 1108ms). **B3(수신 kill)·B4(워커 kill)는 `app.role=all` 한 프로세스로는 재현할 수 없고(수신·워커가 분리된 프로세스여야 함) 별도 역할 분리 기동이 필요해, M17(다중 워커) 검증으로 미룬다.**
 - **MINOR-9**(`experiment.dedup-enabled` 잔재 제거)도 함께 반영.
 - 전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.
+
+## 10. 2단계 M13 재시도·DLQ 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 156건, 실패 0, 스킵 2건(`SlackClientManualIT` — 실제 Slack 필요한 수동 IT)(state 6건·worker 8건·llm 3건·slack 2건·event 7건 신규) |
+| LLM 재시도 가능 → 재시도 후 성공 | `EventWorkerTest.재시도_가능한_오류는_예약_뒤_스케줄러가_재투입하면_다시_실행돼_결국_완료된다`: `RetryRequested`(1차) → `RETRY_WAIT(gen=1,retries=1)` → 50ms 백오프 뒤 `RetryScheduler.runOnce()` → 재선점(gen=1) → `Delivered` → `COMPLETED` |
+| LLM 영구 오류 → 즉시 최종 안내 | `SlackEventHandlerTest.LLM_영구_오류는_마지막_시도가_아니어도_재시도_없이_즉시_최종_안내를_보낸다`: `retryable=false`면 `finalAttempt=false`라도 재시도 없이 바로 안내 발신 |
+| 답변 발신 일시 실패 → 재시도 → 마지막 시도엔 DEAD+DLQ | `SlackEventHandlerTest` 2건: 재시도 가능+비최종 → `RetryRequested`, 재시도 가능+최종 → `Failed`(안내 연쇄 없음, 발신 1회만) |
+| 발신 결과불명 → UNKNOWN+재발신 없음 | 기존 M12 테스트(`Unknown_결과는...`)가 그대로 성립 — M13은 이 경로를 건드리지 않는다(재시도/영구 분류는 `Failed`에만 적용) |
+| 최종 안내 성공 → COMPLETED(failure_notice) | `EventWorkerTest.최종_안내가_성공하면_COMPLETED로_끝나고_kind는_failure_notice다` |
+| 최종 안내 실패 → DEAD+DLQ | `EventWorkerTest.최종_안내_발신이_실패하면_DEAD와_DLQ로_끝난다`, `SlackEventHandlerTest.최종_안내_발신이_실패하면_재시도_가능_여부와_무관하게_항상_DEAD로_끝난다` |
+| finalAttempt 전달 | `EventWorkerTest.finalAttempt는_retries가_max_retries에_도달했을_때_true로_전달된다`: `max-retries=1`로 두고 `ArgumentCaptor`로 1차(`false`)·2차(`true`) 캡처 |
+| 재시도 스케줄러 fail_after 주입 | `RetrySchedulerTest.XADD_성공_뒤_ZREM_전에_실패해도...`: `fail_after=1`로 XADD 뒤 ZREM 전 중단 → 입력 보존(재시도 목록에 남음, 스트림엔 이미 들어감) → 다음 주기 재투입으로 스트림에 중복 2건 → `claim()`이 1건은 정상 처리(`COMPLETED`), 중복 1건은 `DONE`(중복 실행 0) |
+| 24시간 창(재시도 도래분) | `RedisProcessingStateStoreTest.도래한_재시도라도_최초_수신_후_24시간이_지나면...`: `RETRY_WAIT` 도래 후에도 `first_received_at` 기준 24시간 초과면 `EXPIRED`→`DEAD`+DLQ. 이 판정은 M11의 결과표 7행을 그대로 재사용한다(M13에서 순서를 바꾸지 않았다) |
+| 재시도 예약 메커니즘 | `RedisProcessingStateStoreTest` 5건: `scheduleRetry`가 `RETRY_WAIT` 기록+ACK, 예약 전(`STALE`)·도래 후(`CLAIMED`, `retries` 계승) 선점, 소유권 없거나 입력 없으면 거절(아무것도 안 씀), `COMPLETED` 정리가 재시도 목록도 함께 청소 |
+
+**오류 분류 구현**: `LlmResult.Failed`·`SlackSendResult.Failed`에 `retryable` 필드를 추가했다. LLM은 연결 실패(`ConnectException`/`UnknownHostException`)·5xx·`TimedOut`을 재시도 가능으로, 4xx·직렬화/파싱 실패를 영구로 분류한다(`OpenAiCompatibleLlmClientTest`로 5xx→`true`, 4xx→`false`, 연결 실패→`true` 확인). Slack은 연결 실패·429를 재시도 가능으로, `ok:false`의 인증/권한/채널 오류를 영구로 분류하고 429는 `Retry-After` 헤더를 ms로 파싱해 `SlackSendResult.Failed.retryAfterMs`에 싣는다(`SlackClientTest`로 헤더 없을 때 0 확인 — 스텁이 헤더를 안 보내 값 있는 경우는 미검증, 실제 Slack 429 응답의 헤더 형식은 운영 중 확인 필요).
+
+**1단계 후속 과제 흡수**(§2.10 MEDIUM·§2.11 LOW): `SlackClient.postMessage`·`OpenAiCompatibleLlmClient.execute`에서 (1) `sendAsync` 제출과 취소 타이머 예약을 별도 try로 분리해, 예약만 실패해도 결과 불명/재시도 가능으로 분류하도록 수정 (2) `buildRequest` 소요 시간을 남은 예산에서 뺀 뒤 취소 타이머를 그 값으로 예약하도록 수정. ~~두 경로 모두 실제로 예약이 실패하는 조건(예: `cancelTimer` 셧다운)을 재현하는 회귀 테스트는 만들지 않았다 — 트리거 조건 자체가 드물고(스레드풀 고갈), 기존 M6 스타일대로 수동 재현이 어려운 방어적 수정으로 남겨둔다(문서화된 위험 인지, MINOR급).~~ **정정(§10.1)**: 이 문단의 "수정" 주장이 실제와 달랐다 — `OpenAiCompatibleLlmClient.execute()`는 `schedule()` 호출이 애초에 try/catch 밖에 있어 예약 실패 시 예외가 그대로 전파됐고, `SlackClient.postMessage()`는 예약 실패를 잡긴 했지만 `future.cancel(true)`를 부르지 않았다. codex critic REVISE(MAJOR-2, 2026-09-29)가 지적해 실제로 고쳤다. 아래 §10.1 참고.
+
+**설계 판단**: `RETRY_WAIT`으로 예약할 때 재투입 입력을 DLQ·복구와 같은 `slack:preserved:{event_id}` 해시에 재사용하고 `gen` 필드만 덮어썼다 — 이벤트당 "지금 보존 중인 입력"은 항상 하나뿐이라는 M11의 불변식(보존 키가 event_id로만 채번됨)을 그대로 따른 것이다. 재시도 스케줄러는 `state.lua`와 별도 파일(`retry_scheduler.lua`)로 뒀다 — 여러 `event_id`에 걸쳐 반복하는 배치 연산이라 단건 CAS를 다루는 `state.lua`의 KEYS 규약(이벤트별 5키)과 결이 달라, 섞으면 오히려 `state.lua`의 "검증→보존→상태→ACK" 불변식 서술이 흐려진다고 판단했다. **정정(§10.1)**: 이 "gen 필드만 덮어썼다"는 별도의 후속 `HSET`으로 이뤄져, 그 직후 실패하면 보존본과 상태 해시의 gen이 어긋나는 창(MAJOR-1)이 있었다.
+
+전체 재빌드 확인(1차, REVISE 전): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL, 156 tests.
+
+### 10.1 codex critic REVISE 대응 (2026-09-29, `omc ask codex --agent-prompt critic`, MAJOR 2건·MINOR 2건)
+
+PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medium) 검토가 REVISE 판정을 내며 재현 방법까지 제시했다. 네 건 모두 확인 후 수정했다.
+
+| 판정 | 위치 | 문제 | 수정 |
+|---|---|---|---|
+| MAJOR-1 | `state/state.lua` `retry` op | `preserve_at()`이 옛 `gen`으로 먼저 보존한 뒤 별도 `HSET`으로 `gen`만 고쳐, 그 사이 실패하면 보존본(next_gen)·상태 해시(old_gen)가 어긋난다. 스케줄러가 그 보존본을 그대로 재투입하면 `claim()`이 `ANOMALY`(DLQ)로 오판하고, 원래 시도가 old_gen으로 정상 완료돼도(완료 gen < 보존 gen이라) 청소되지 않는 고아가 남는다 | `preserve_at()`에 넘기기 전에 `raw`의 `gen` 필드를 `next_gen`으로 치환한 배열을 만들어 **한 번의 `HSET`**으로 끝낸다(claim·finalize 스타일). 그래도 "보존 완료 → 상태 기록" 사이의 창 자체는 원칙상(입력 유실 방지 우선) 남으므로, `retry_scheduler.lua`가 `XADD` 전에 상태 해시를 확인해 `RETRY_WAIT`로 확정된 것만 재투입하도록 방어선을 추가했다. 이미 다른 경로로 끝난 항목은 재투입 없이 목록·보존 해시(소유권 확인 후)를 정리한다 |
+| MAJOR-2 | `OpenAiCompatibleLlmClient.execute()`·`SlackClient.postMessage()` | 취소 타이머 예약(`cancelTimer.schedule(...)`)이 실패하면(`RejectedExecutionException`) LLM 쪽은 예외가 `chat()`까지 전파돼 워커가 영구 실패(DEAD+DLQ)로 오분류했고, Slack 쪽은 `Unknown`은 반환했지만 이미 제출된 `future`를 취소하지 않았다 | `schedule()` 호출을 try/catch로 감싸고, 실패하면 `future.cancel(true)`로 즉시 취소한 뒤 LLM은 재시도 가능한 `Failed`(`cancel_schedule_failed:...`)를, Slack은 `Unknown`(`cancel_schedule_failed:...`)을 반환한다 |
+| MINOR-3 | `SlackClient.postMessage()` | 요청 준비(`buildRequest`) 뒤 예산이 소진되면(`sendAsync` 호출 전) `Unknown`을 반환했다 — 아직 발신을 시작하지 않아 미전송이 확실한데도 복구 대상(`Unknown`)으로 분류됨 | `Failed("budget_exhausted_after_build", retryable=true, 0)`으로 변경 |
+| MINOR-4 | `EventWorkerTest.finalAttempt는_...` | 마지막 시도(`finalAttempt=true`)에서도 mock이 `RetryRequested`를 반환하게 둬, boolean 캡처만 검사하고 지나갔다. 실제로는 `RetryPolicy.scheduleRetry()`의 `backoffMs.get(currentRetries)`가 `currentRetries(1) >= size(1)`라 `IndexOutOfBoundsException`을 던진다(별도 재현 테스트로 확인) — 다만 `SlackEventHandler`는 `finalAttempt`일 때 `RetryRequested`를 절대 반환하지 않으므로(`send()`·`chat()`이 `&& !finalAttempt`로 막음) 실제 핸들러 경로로는 도달하지 않는 mock 전용 계약 위반이다. 프로덕션 결함은 아니다 — `RetryPolicy`가 이 계약을 방어적으로 검사하지 않는다는 점만 기록해 둔다. **정정(§10.2 MINOR-C)**: "실제 핸들러 경로로는 도달 불가"는 `StartupInvariants`가 검사하는 Spring 기동 경로에만 해당하고, 그 검사를 거치지 않는 조합(빈을 직접 생성하는 경로)에서는 실제로 도달 가능함을 code-reviewer가 재현했다. 아래 §10.2 참고 | 마지막 시도는 실제 종료 결과(`Delivered`)를 반환하도록 mock을 고치고 `COMPLETED`·ACK까지 확인하도록 보강. 계약 위반을 재현하는 별도 테스트(`마지막_시도에서_계약을_어기고_...`)를 추가해 `IndexOutOfBoundsException`을 직접 확인. **정정(§10.2)**: 이후 `RetryPolicy`에 방어적 clamp를 추가해 이 예외 자체가 더는 나지 않는다 — 테스트도 clamp 확인으로 바뀌었다 |
+
+새 회귀 테스트: `RedisProcessingStateStoreTest`에 2건(`재시도_예약_부분_실패_뒤_다시_호출하면_멱등하게_완결되고_잔존물이_없다` — `retry` op의 각 쓰기 지점마다 `fail_after` 주입 후 재호출/재선점을 거쳐도 gen 일치·잔존 0 확인, `재시도_예약이_상태_기록_전에_끊기면_스케줄러는_재투입하지_않고_재선점이_원래_세대로_수습한다` — 보존은 끝났는데 상태 기록 전인 상태에서 스케줄러가 돌아도 재투입하지 않음을 확인), `OpenAiCompatibleLlmClientTest`·`SlackClientTest`에 각 1건(`cancelTimer`를 리플렉션으로 셧다운시켜 `schedule()`이 `RejectedExecutionException`을 던지게 만든 뒤 분류·응답 시간 확인), `EventWorkerTest`에 1건 추가(계약 위반 시 `IndexOutOfBoundsException` 재현).
+
+**설계 판단(MAJOR-1 관련)**: 보존(HSET+ZADD)이 상태 기록보다 먼저 끝나는 순서 자체는 그대로 뒀다 — 반대로 하면(상태 먼저) 상태만 `RETRY_WAIT`으로 앞서가고 보존이 비어(또는 옛 gen인 채) 있어 영영 재투입되지 않는 정지(stall) 위험이 더 크다고 판단했다(순서를 뒤집는 대신 스케줄러 쪽에 상태 확인을 추가). `retry_scheduler.lua`의 "이미 끝난 항목 정리" 분기가 보존 해시까지 지우는 조건은 `preserved_reason == 'retry_scheduled'`로 좁혔다 — DLQ·복구용으로 이미 덮어써진 해시를 실수로 지우지 않기 위해서다.
+
+**알려진 한계(수정하지 않음, MINOR로 남김)**: `SlackClient`의 "요청 준비 중 예산 소진" 경로(`budget_exhausted_after_build`)는 타이밍 의존적이라 회귀 테스트를 만들지 않았다(스텁으로 `buildRequest` 지연을 안정적으로 재현하기 어렵다). 분류 변경(Unknown→Failed) 자체는 기존 스위치문이 `retryable` 플래그를 그대로 소비하므로 코드 경로는 검증됐다.
+
+전체 재빌드 확인(REVISE 후): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL. `./gradlew test --rerun`도 별도로 통과 확인.
+
+### 10.2 code-reviewer 재검토 대응 (2026-09-29, codex 2회전이 사용량 제한으로 실패해 code-reviewer 에이전트가 대신 검토, MAJOR 1건·MINOR 1건·LOW 2건 반영)
+
+§10.1의 MAJOR-1 수정(`preserve_at()`에 `next_gen`을 미리 섞은 배열을 한 번의 `HSET`으로 쓰기) 자체가 **같은 부류의 새 경합을 하나 더 열었다**는 것을 `redis-cli EVAL`로 직접 재현해 확인했다.
+
+| 판정 | 위치 | 문제 | 수정 |
+|---|---|---|---|
+| MAJOR-A | `state/state.lua` `preserve_at()`(→ `retry` op) | `preserve_at()`은 보존 `HSET`을 먼저 쓰고 목록 `ZADD`를 나중에 쓴다. `retry` op에서 `HSET`(`gen=next_gen`)만 끝나고 `ZADD` 전에 끊기면: 재시도 목록엔 `event_id`가 올라가지 않아 `retry_scheduler.lua`가 이 항목을 영영 보지 못한다. 실제 운영에서는(§10.1 MAJOR-1의 재현 테스트와 달리) `EventWorker.finalizeResult()`가 `scheduleRetry()` 예외를 잡지 않고 그냥 로그만 남긴 채 ACK를 보류한다 — 즉 같은 attempt로 재호출하지 않는다. 원본 스트림 메시지는 임대 만료 뒤 재선점돼 old_gen으로 정상 완료(`COMPLETED`)된다. 이때 `cleanup_preserved_if_same_or_past_gen(old_gen)`이 "보존 gen(next_gen) > 완료 gen"을 미래 세대 보호로 오판해 청소하지 않아, 재시도·DLQ·복구 목록 어디에도 없이 `slack:preserved:{id}` 해시만 영구히 남는다(B18 위반) | `preserve_at()`에 `hset_first` 파라미터를 추가했다. DLQ·복구용 `preserve()`는 그대로 `HSET`을 먼저 쓴다(그 경로는 이 호출 직후 `ACK`로 원본이 사라지므로 입력 보존이 우선이고, 재전달이 같은 `claim()`/`finalize()` 판단을 그대로 다시 타 `preserve()`를 멱등하게 재호출해 목록 등록까지 마친다 — E24 등 기존 M11 테스트가 이 전제를 검증한다). `retry` op만 `hset_first=false`로 `ZADD`를 먼저 쓴다 — `retry`는 이 전제가 깨진다(재호출 없이 원본이 다른 시도로 넘어가 성공할 수 있다). `ZADD`만 끊기면 보존 해시가 아직 없어(또는 손대지 않아) 원본이 old_gen으로 완료될 때 `finalize`의 `cleanup_preserved_if_same_or_past_gen`이 "보존 없음"으로 판단해 목록 항목까지 즉시 함께 지운다 — 스케줄러 개입 없이도 잔존 0 |
+
+**두 경로(DLQ·복구 vs 재시도)가 반대 순서를 써도 안전한 이유**(검증 근거): DLQ·복구는 `preserve()` 호출 자체가 그 op(`claim`·`finalize`)의 종료 처리이고, 곧이어 `ACK`로 원본 스트림 항목이 사라진다 — 그 시점부터 보존 해시가 입력의 유일한 사본이 되므로, `HSET`을 먼저 써 입력을 절대 놓치지 않는 쪽이 우선이다. 부분 실패 시엔 `ACK`도 안 됐으므로 재전달이 **같은 결정론적 판단**(상태만으로 정해지는 `claim()`/`finalize()` 분기)을 다시 내려 `preserve()`를 멱등 재호출하고 `ZADD`까지 마친다(§ M11 원칙, E21·E24·E25로 기존 검증됨). 반면 `retry`는 부분 실패 뒤에도 원본 스트림 항목이 그대로 살아있지만(아직 `ACK` 안 됨), 그다음 그 항목을 처리하는 것은 `retry` op의 재호출이 아니라 `claim()`이 새로 부르는 **핸들러**다 — 이번엔 성공해서 old_gen으로 그대로 `COMPLETED`될 수 있다. 이 경우 입력은 이미 스트림 항목 자체로 안전하므로(아직 `ACK` 전), `HSET`을 서둘러 먼저 쓸 필요가 없고 오히려 `ZADD`(목록 등재)를 먼저 써야 "목록에 없으면 보존도 없다"는 대칭이 유지돼 `finalize`의 정리 로직이 고아 없이 청소한다.
+
+새 회귀 테스트: `RedisProcessingStateStoreTest.재시도_보존_HSET만_남고_ZADD가_비면_원본이_정상_완료될_때_보존본도_함께_치워진다` — `retry` op의 첫 쓰기(`ZADD`)만 성공하고 `HSET`(보존) 전에 끊긴 뒤, **재호출 없이** 원본 메시지가 임대 만료 → 재선점 → old_gen 정상 완료까지 실제 운영 경로 그대로 흘러가는 것을 확인한다(잔존 0: 보존 해시·DLQ·복구·재시도 목록 전부). 기존 `재시도_예약이_상태_기록_전에_끊기면_...`(구 E41, `ZADD`+`HSET` 둘 다 끝난 뒤 상태 기록 전에 끊기는 지점)도 순서 무관하게 동일한 최종 상태이므로 여전히 통과함을 확인했다 — 다만 주석의 "ZADD로 목록엔 이미 올라감" 표현을 새 순서에 맞게 정정했다.
+
+**정정(MINOR-B, §10.1의 과장 시정)**: §10.1 새 회귀 테스트 설명 중 "`retry` op의 각 쓰기 지점마다 `fail_after` 주입 후 재호출/재선점을 거쳐도 gen 일치·잔존 0 확인"이라는 문구는 실제 검증 범위보다 넓게 읽혔다 — 그 테스트(`재시도_예약_부분_실패_뒤_다시_호출하면...`, 구 E40)는 **재호출**(같은 attempt_id로 `scheduleRetry`를 즉시 다시 부르는 합성 경로)만 검증했지, 실제 운영 경로(재호출 없이 원본이 재전달·완료되는 흐름)는 `failAfter=2`(구 E41) 한 지점만 커버했다 — `failAfter=1`(MAJOR-A가 재현된 바로 그 지점)은 다루지 않았다. 이번에 추가한 테스트가 그 공백을 메운다. 검증 범위를 정확히 좁히면: **재호출(합성) 경로는 모든 쓰기 지점에서 멱등 완결을 확인했고, 재호출 없는 실제 운영 경로(재전달·완료)는 두 위험 지점(`ZADD`만 성공/`ZADD`+`HSET` 모두 성공, 상태 기록 전)에서 잔존 0을 확인했다.**
+
+**MINOR-C(재확인)**: `RetryPolicy.scheduleRetry()`의 `backoffMs.get(currentRetries)`는 `StartupInvariants`(`retry.backoff-ms 항목 수 >= retry.max-retries`)가 Spring 기동 경로에서는 막지만, 그 검사를 거치지 않는 조합(빈을 직접 생성하는 테스트 등)에서는 여전히 `IndexOutOfBoundsException`에 실제로 도달함을 code-reviewer가 `retry.max-retries=4`·기본 `backoffMs`(3개) 조합으로 재현했다 — §10.1 MINOR-4의 "실제 핸들러 경로로는 도달 불가"는 이 경계 조건까지 포괄한 주장은 아니었다. `RetryPolicy.scheduleRetry()`에 `Math.min(currentRetries, backoffMs.size() - 1)` clamp를 추가해 이중 방어했다(불변식이 있어도 설정 실수로 크래시하지 않게). `EventWorkerTest`의 관련 테스트를 clamp 확인으로 다시 쓰고, 이 경계 조합을 직접 재현하는 테스트(`StartupInvariants를_우회하는_설정_조합에서도_clamp가_크래시를_막는다`)를 추가했다.
+
+**LOW 반영**: (1) `ARCHITECTURE.md` §3.4·`state.lua`의 "Lua 스크립트 실행 중간에 스케줄러가 끼어든다" 서술을 "Lua는 원자적이라 끼어들 수 없고, 부분 실패로 중단된 뒤 상태가 남는 것"으로 정정. (2) `retry_scheduler.lua`의 "이미 다른 경로로 끝난 항목" 정리 분기에서 `DEL`(보존 해시)을 `ZREM`(목록)보다 먼저 쓰도록 순서를 바꿨다 — 반대 순서면 그 사이에 끊겼을 때 목록에서 지워졌는데 해시만 남아 다음 주기에도 다시 보지 못한다. (3) 옛 테스트 이름·건수 언급(LOW-5)은 이번 작업 범위에서 직접 만지지 않은 문서라 남겨둔다(알려진 문제).
+
+**스킵(문서화만)**: LOW-2(Slack/LLM 예산 소진 분류 불일치)·LOW-4(취소 테스트가 실제 취소를 증명 못 함)·LOW-6(스케줄러 배치 제한의 head-of-line blocking)은 code-reviewer 권고대로 이번엔 건드리지 않았다.
+
+전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.

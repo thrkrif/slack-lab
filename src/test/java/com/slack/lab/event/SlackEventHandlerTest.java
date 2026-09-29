@@ -86,7 +86,7 @@ class SlackEventHandlerTest {
         when(f.slack().postMessage(eq("C1"), eq("100.1"), eq("답변"), anyLong()))
                 .thenReturn(new SlackSendResult.Success("200.1"));
 
-        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
 
         assertThat(result).isEqualTo(new HandlingResult.Delivered("answer", "200.1"));
         verify(f.slack()).postMessage(eq("C1"), eq("100.1"), eq("답변"), anyLong());
@@ -96,11 +96,11 @@ class SlackEventHandlerTest {
     void LLM_실패하면_실패_안내를_보내고_Delivered를_돌려준다() {
         // A6: LLM 실패 시 실패 안내 1회 전송
         var f = fixture();
-        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("connection_refused", 50));
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("connection_refused", 50, false));
         when(f.slack().postMessage(eq("C1"), eq("100.1"), anyString(), anyLong()))
                 .thenReturn(new SlackSendResult.Success("200.2"));
 
-        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
 
         assertThat(result).isEqualTo(new HandlingResult.Delivered("failure_notice", "200.2"));
         verify(f.slack()).postMessage(eq("C1"), eq("100.1"), anyString(), anyLong());
@@ -114,7 +114,7 @@ class SlackEventHandlerTest {
         when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
                 .thenReturn(new SlackSendResult.Failed("channel_not_found"));
 
-        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
 
         assertThat(result).isEqualTo(new HandlingResult.Failed("answer_send:channel_not_found", false));
         // 발신은 정확히 1회만 — 실패 뒤 실패 안내를 추가로 보내지 않는다.
@@ -129,7 +129,7 @@ class SlackEventHandlerTest {
         when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
                 .thenReturn(new SlackSendResult.Unknown("read_timeout"));
 
-        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
 
         assertThat(result).isEqualTo(new HandlingResult.Unknown("answer_send:read_timeout"));
     }
@@ -137,15 +137,28 @@ class SlackEventHandlerTest {
     @Test
     void 처리_총예산이_이미_소진되면_LLM도_실행하지_않고_바로_실패_안내로_간다() {
         // A15·A16: 총 처리 예산이 이미 없으면 LLM 자체 기한(llm.deadline-ms)이 남아 있어도 호출하지 않는다.
+        // M13: 이 경로는 합성 TimedOut(재시도 가능)으로 분류되므로, 마지막 시도에서만 재시도 없이 바로
+        // 최종 안내로 간다 — 그렇지 않으면 재시도가 예약된다(아래 별도 테스트).
         var f = fixture();
         when(f.slack().postMessage(anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.longThat(ms -> ms <= 0)))
                 .thenReturn(new SlackSendResult.Failed("budget_exhausted"));
 
         // 총 예산 0ms: 시작 시점 이후 실제로 흐른 시간만큼 이미 초과 상태가 된다.
-        var result = f.handler(50_000, 0, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 0, 0).handle(event(), f.attempt(), true);
 
         assertThat(result).isEqualTo(new HandlingResult.Failed("failure_notice_send:budget_exhausted", false));
         verify(f.llm(), never()).chat(anyString(), anyLong()); // 총 예산이 없으므로 LLM 자체를 호출하지 않는다
+    }
+
+    @Test
+    void 처리_총예산이_소진됐지만_마지막_시도가_아니면_안내_없이_재시도를_예약한다() {
+        // M13: 합성 TimedOut도 재시도 가능한 오류다 — 예산이 바닥난 이번 시도에서 안내를 억지로 밀어넣지
+        // 않고, 다음 시도가 새 예산으로 다시 시도하게 둔다.
+        var f = fixture();
+        var result = f.handler(50_000, 0, 0).handle(event(), f.attempt(), false);
+
+        assertThat(result).isInstanceOf(HandlingResult.RetryRequested.class);
+        verify(f.slack(), never()).postMessage(anyString(), anyString(), anyString(), anyLong());
     }
 
     @Test
@@ -157,7 +170,7 @@ class SlackEventHandlerTest {
         when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
                 .thenReturn(new SlackSendResult.Success("200.5"));
 
-        f.handler(50_000, 15_000, 0).handle(event(), f.attempt());
+        f.handler(50_000, 15_000, 0).handle(event(), f.attempt(), false);
 
         ArgumentCaptor<Long> remainingMsCaptor = ArgumentCaptor.forClass(Long.class);
         verify(f.llm()).chat(anyString(), remainingMsCaptor.capture());
@@ -174,7 +187,7 @@ class SlackEventHandlerTest {
         var f = fixture();
         when(f.llm().chat(anyString(), anyLong())).thenThrow(new RuntimeException("예상 못한 LLM 클라이언트 오류"));
 
-        assertThatThrownBy(() -> f.handler(50_000, 60_000, 0).handle(event(), f.attempt()))
+        assertThatThrownBy(() -> f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false))
                 .isInstanceOf(RuntimeException.class).hasMessage("예상 못한 LLM 클라이언트 오류");
         assertThat(f.attempt().markSendingCalls).isZero();
         verify(f.slack(), never()).postMessage(anyString(), anyString(), anyString(), anyLong());
@@ -187,19 +200,19 @@ class SlackEventHandlerTest {
         when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
                 .thenThrow(new RuntimeException("예상 못한 Slack 클라이언트 오류"));
 
-        assertThatThrownBy(() -> f.handler(50_000, 60_000, 0).handle(event(), f.attempt()))
+        assertThatThrownBy(() -> f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false))
                 .isInstanceOf(RuntimeException.class);
         assertThat(f.attempt().markSendingCalls).isEqualTo(1);
     }
 
     @Test
-    void LLM_예산이_이미_소진되면_LLM을_호출하지_않고_바로_실패_안내로_간다() {
+    void LLM_예산이_이미_소진되고_마지막_시도면_LLM을_호출하지_않고_바로_실패_안내로_간다() {
         var f = fixture();
         when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
                 .thenReturn(new SlackSendResult.Success("200.3"));
 
         // llmDeadlineMs=0 → llmRemainingMs는 항상 <=0
-        var result = f.handler(0, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(0, 60_000, 0).handle(event(), f.attempt(), true);
 
         assertThat(result).isEqualTo(new HandlingResult.Delivered("failure_notice", "200.3"));
         verify(f.llm(), never()).chat(anyString(), anyLong());
@@ -211,7 +224,7 @@ class SlackEventHandlerTest {
         when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Success("답변", 10));
         f.attempt().rejectSending(); // 소유권을 이미 잃은 상황을 흉내 낸다
 
-        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt());
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
 
         assertThat(result).isEqualTo(new HandlingResult.Rejected("mark_sending_rejected"));
         verify(f.slack(), never()).postMessage(anyString(), anyString(), anyString(), anyLong());
@@ -228,7 +241,7 @@ class SlackEventHandlerTest {
         long llmDeadlineMs = 50_000;
         long slowModeMs = 100;
         long start = System.nanoTime();
-        f.handler(llmDeadlineMs, 60_000, slowModeMs).handle(event(), f.attempt());
+        f.handler(llmDeadlineMs, 60_000, slowModeMs).handle(event(), f.attempt(), false);
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertThat(elapsedMs).isGreaterThanOrEqualTo(slowModeMs);
@@ -239,5 +252,82 @@ class SlackEventHandlerTest {
         // slow-mode로 최소 100ms는 차감돼야 하고, 원래 예산(50_000ms)을 그대로 넘기면 안 된다.
         assertThat(actualRemainingMs).isLessThanOrEqualTo(llmDeadlineMs - slowModeMs);
         assertThat(actualRemainingMs).isGreaterThan(0);
+    }
+
+    // --- M13 전이표: 재시도 가능한 오류 분류와 finalAttempt
+
+    @Test
+    void LLM_재시도_가능한_오류이고_마지막_시도가_아니면_안내_없이_재시도를_요청한다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("connection_refused", 50, true));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
+
+        assertThat(result).isInstanceOf(HandlingResult.RetryRequested.class);
+        assertThat(f.attempt().markSendingCalls).isZero(); // 발신 자체를 시도하지 않는다(안내도 없음)
+        verify(f.slack(), never()).postMessage(anyString(), anyString(), anyString(), anyLong());
+    }
+
+    @Test
+    void LLM_재시도_가능한_오류라도_마지막_시도면_최종_안내를_보낸다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("connection_refused", 50, true));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(new SlackSendResult.Success("200.9"));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), true);
+
+        assertThat(result).isEqualTo(new HandlingResult.Delivered("failure_notice", "200.9"));
+    }
+
+    @Test
+    void LLM_영구_오류는_마지막_시도가_아니어도_재시도_없이_즉시_최종_안내를_보낸다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("status=400", 50, false));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(new SlackSendResult.Success("200.8"));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
+
+        assertThat(result).isEqualTo(new HandlingResult.Delivered("failure_notice", "200.8"));
+    }
+
+    @Test
+    void 답변_발신이_재시도_가능한_일시_실패이고_마지막_시도가_아니면_안내_없이_재시도를_요청한다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Success("답변", 10));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(new SlackSendResult.Failed("connect_failed:ConnectException", true, 0));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
+
+        assertThat(result).isInstanceOf(HandlingResult.RetryRequested.class);
+    }
+
+    @Test
+    void 답변_발신이_재시도_가능한_일시_실패라도_마지막_시도면_안내_연쇄_없이_DEAD로_끝난다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Success("답변", 10));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(new SlackSendResult.Failed("connect_failed:ConnectException", true, 0));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), true);
+
+        assertThat(result).isEqualTo(new HandlingResult.Failed("answer_send:connect_failed:ConnectException", false));
+        // 마지막 시도의 답변 발신 실패는 안내를 연쇄 발신하지 않는다 — 발신은 정확히 1회만.
+        verify(f.slack(), times(1)).postMessage(anyString(), anyString(), anyString(), anyLong());
+    }
+
+    @Test
+    void 최종_안내_발신이_실패하면_재시도_가능_여부와_무관하게_항상_DEAD로_끝난다() {
+        var f = fixture();
+        when(f.llm().chat(anyString(), anyLong())).thenReturn(new LlmResult.Failed("status=400", 50, false));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(new SlackSendResult.Failed("connect_failed:ConnectException", true, 0));
+
+        var result = f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
+
+        assertThat(result).isEqualTo(
+                new HandlingResult.Failed("failure_notice_send:connect_failed:ConnectException", false));
     }
 }

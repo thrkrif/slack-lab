@@ -9,7 +9,7 @@ public class EchoLlmClient implements LlmClient {
     @Override
     public LlmResult chat(String prompt, long remainingMs) {
         if (remainingMs <= 0) {
-            return new LlmResult.Failed("남은 기한 없음", 0);
+            return new LlmResult.Failed("남은 기한 없음", 0, false);
         }
         return new LlmResult.Success("echo: " + prompt, 0);
     }

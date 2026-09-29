@@ -7,7 +7,7 @@
 -- 사라지거나, 다른 세대의 보존본이 잘못 지워지지 않는다.
 --
 -- KEYS: 1 상태 해시 slack:evt:{id}  2 이벤트 스트림  3 보존 해시 slack:preserved:{id}
---       4 DLQ 목록(ZSET)  5 복구 목록(ZSET)
+--       4 DLQ 목록(ZSET)  5 복구 목록(ZSET)  6 재시도 목록(ZSET) slack:retry (M13)
 -- ARGV: 1 op  2 event_id  3 fail_after(테스트 전용 실패 주입, 0이면 끔)  4.. op별 인자
 --
 -- 알려진 한계(M11 codex critic 2회전, 의도적으로 남겨둠):
@@ -63,14 +63,48 @@ local function matches_event(entry)
   return id == nil or id == event_id
 end
 
--- 멱등: 같은 입력을 다시 써도 결과가 같다.
+-- 멱등: 같은 입력을 다시 써도 결과가 같다. score는 호출 시각(now)이 기본이지만, 재시도는
+-- 예약 시각(retry_at)으로 목록에 올려야 스케줄러가 도래한 항목만 골라낼 수 있어 score를 인자로 받는다.
+--
+-- hset_first(기본 true)로 두 쓰기(보존 HSET·목록 ZADD)의 순서를 고른다. DLQ·복구용 preserve()는 항상
+-- HSET을 먼저 쓴다: 그 경로는 이 호출이 끝나면 곧 ACK로 원본 스트림 항목이 사라지므로, 입력을 먼저
+-- 안전하게 박아두는 쪽이 우선이다(M11 원칙). 둘 사이에 끊기면(HSET만 됨) ACK도 안 됐으니 재전달이
+-- 같은 claim()/finalize() 로직을 그대로 다시 타 preserve()를 멱등하게 재호출하고, 그때 ZADD까지
+-- 마친다 — "같은 입력으로 같은 판단을 다시 내린다"는 전제가 성립하기 때문에 안전하다(E24 등으로 검증됨).
+--
+-- retry op(M13)만 ZADD를 먼저 쓴다(hset_first=false). retry는 이 전제가 깨진다: preserve_at 이후에도
+-- 원본 스트림 항목은 ACK되지 않은 채 남아 있고, 그 다음 실행되는 "판단"은 retry op의 재호출이 아니라
+-- claim()이 새로 부르는 핸들러다 — 이번엔 성공해서 old_gen으로 COMPLETED될 수도 있다. 그렇게 되면
+-- HSET-먼저 순서로는(gen=next_gen만 쓰이고 ZADD가 못 미친 채) 목록 어디에도 없는 보존 해시가 영원히
+-- 남는다 — cleanup_preserved_if_same_or_past_gen(old_gen)이 "보존 gen(next_gen) > 완료 gen(old_gen)"을
+-- 미래 세대로 오인해 보호하기 때문이다(codex critic 2회전 MAJOR-A). ZADD를 먼저 쓰면 그 실패 지점에서
+-- 멈춰도 보존 해시는 아직 없으므로(또는 손대지 않았으므로), 원본이 old_gen으로 정상 완료될 때 같은
+-- cleanup이 "보존 없음"으로 판단해 목록 항목까지 함께 지운다 — 입력 유실 위험이 없다(이 시점의 유일한
+-- 입력 원본은 아직 ACK 안 된 스트림 항목 자체다). 두 쓰기가 모두 끝난 뒤 끊기면(상태 HSET 전) 기존대로
+-- retry_scheduler.lua가 원본 완료를 보고 정리한다.
+local function preserve_at(entry, list_key, reason, score, hset_first)
+  if hset_first == nil then hset_first = true end
+  local function do_hset()
+    local args = { 'HSET', KEYS[3] }
+    for i = 1, #entry do args[#args + 1] = entry[i] end
+    args[#args + 1] = 'preserved_reason'
+    args[#args + 1] = reason
+    write(unpack(args))
+  end
+  local function do_zadd()
+    write('ZADD', list_key, score, event_id)
+  end
+  if hset_first then
+    do_hset()
+    do_zadd()
+  else
+    do_zadd()
+    do_hset()
+  end
+end
+
 local function preserve(entry, list_key, reason)
-  local args = { 'HSET', KEYS[3] }
-  for i = 1, #entry do args[#args + 1] = entry[i] end
-  args[#args + 1] = 'preserved_reason'
-  args[#args + 1] = reason
-  write(unpack(args))
-  write('ZADD', list_key, now, event_id)
+  preserve_at(entry, list_key, reason, now, true)
 end
 
 -- 보존 해시가 지금 완료되는 세대보다 미래 것이 아닐 때만 지운다. 더 최근 세대가 남긴 보존본을
@@ -88,6 +122,7 @@ local function cleanup_preserved_if_same_or_past_gen(gen)
   write('DEL', KEYS[3])
   write('ZREM', KEYS[4], event_id)
   write('ZREM', KEYS[5], event_id)
+  write('ZREM', KEYS[6], event_id)
 end
 
 local function ack(group, stream_id)
@@ -203,7 +238,8 @@ if op == 'claim' then
     'channel', ARGV[11], 'thread_ts', ARGV[12], 'manual_run', manual and '1' or '0')
   if manual then write('HDEL', KEYS[1], 'manual_gen') end
   write('PERSIST', KEYS[1])
-  return { 'CLAIMED', tostring(gen), manual and '1' or '0' }
+  -- retries는 이 claim이 손대지 않는다 — RETRY_WAIT이 남긴 값을 그대로 물려받는다(M13). 새 이벤트는 0이다.
+  return { 'CLAIMED', tostring(gen), manual and '1' or '0', tostring(tonumber(h.retries or '0')) }
 end
 
 if op == 'mark_sending' then
@@ -265,6 +301,54 @@ if op == 'finalize' then
   else
     write('PERSIST', KEYS[1])
   end
+  ack(group, stream_id)
+  return 1
+end
+
+if op == 'retry' then
+  -- M13. 재시도 가능한 오류를 안내 없이 예약한다: 입력을 재시도 목록에 예약 시각으로 보존 →
+  -- RETRY_WAIT(gen+1, retries+1, retry_at) 기록 → XACKDEL. finalize와 같은 검증→멱등쓰기→상태→ACK 순서.
+  -- ARGV: 4 attempt_id 5 stream_id 6 group 7 next_gen 8 retry_at 9 retries 10 stage
+  local aid, stream_id, group = ARGV[4], ARGV[5], ARGV[6]
+  local h, exists = load_state()
+  if not exists or h.attempt_id ~= aid or (h.state ~= 'PROCESSING' and h.state ~= 'SENDING') then
+    return 0
+  end
+
+  local raw = stream_entry(stream_id)
+  if raw ~= nil and not matches_event(raw) then return 0 end
+  if raw == nil then return 0 end -- 재투입할 입력이 없으면 보존할 수 없다 — 아무것도 쓰지 않고 거절
+
+  -- raw는 옛 세대(gen)를 담고 있다. "옛 gen으로 먼저 보존한 뒤 별도 HSET으로 고쳐 쓰는" 2단계 방식은
+  -- 그 사이(보존은 next_gen으로 갱신됐는데 상태 해시는 아직 old_gen인 순간)에 실패하면 보존본·상태
+  -- 해시의 gen이 서로 어긋난 채 남는다 — 스케줄러가 이 보존본을 그대로 재투입해 claim()이 ANOMALY로
+  -- 오판하고, 완료 후에도 cleanup이 "완료 gen < 보존 gen"이라 청소하지 못해 고아가 남는다(codex REVISE
+  -- MAJOR-1). claim·finalize처럼 처음부터 올바른 값으로 한 번에 쓴다: raw를 순회해 gen 필드만
+  -- next_gen으로 치환한 배열을 만들어 preserve_at에 넘긴다(단일 HSET).
+  --
+  -- 이 HSET 자체도 preserve_at의 두 쓰기(HSET·ZADD) 중 하나라 혼자 끊길 수 있다(codex critic 2회전
+  -- MAJOR-A) — preserve_at의 hset_first=false로 ZADD를 먼저 써서, HSET만 끊겨도 보존 해시가 남지 않게
+  -- 한다(위 preserve_at 정의부 주석에 근거 설명).
+  local overridden = {}
+  local gen_written = false
+  for i = 1, #raw, 2 do
+    overridden[#overridden + 1] = raw[i]
+    if raw[i] == 'gen' then
+      overridden[#overridden + 1] = ARGV[7]
+      gen_written = true
+    else
+      overridden[#overridden + 1] = raw[i + 1]
+    end
+  end
+  if not gen_written then
+    overridden[#overridden + 1] = 'gen'
+    overridden[#overridden + 1] = ARGV[7]
+  end
+
+  preserve_at(overridden, KEYS[6], 'retry_scheduled', tonumber(ARGV[8]), false)
+  write('HSET', KEYS[1], 'state', 'RETRY_WAIT', 'gen', ARGV[7], 'retry_at', ARGV[8], 'retries', ARGV[9],
+    'stage', ARGV[10])
+  write('PERSIST', KEYS[1])
   ack(group, stream_id)
   return 1
 end
