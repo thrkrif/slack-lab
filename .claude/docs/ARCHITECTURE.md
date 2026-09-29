@@ -85,13 +85,15 @@ flowchart LR
 | | `AckLoggingFilter` | 응답 쓰기 성공/실패를 `ack_delivered`로 관측(P0-7) | receiver에 있다 |
 | `queue/` | `EventPublisher` | `XADD`+`WAITAOF`로 큐에 저장하고 저장 확인을 반환(M12) | receiver에 있다 |
 | | `PublishResult` | 발행 결과 3분류(`Enqueued`/`Failed`/`Unconfirmed`) | receiver·컨트롤러가 참조 |
-| `worker/` | `EventWorker` | `XREADGROUP` 소비, `ProcessingStateStore`로 선점, 핸들러 호출, 결과에 따른 종료 기록 후 ACK, 주기적 `XAUTOCLAIM` 회수(M12) | worker에 있다 |
+| `worker/` | `EventWorker` | `XREADGROUP` 소비, `ProcessingStateStore`로 선점, `finalAttempt` 계산 후 핸들러 호출, 결과에 따른 종료 기록/재시도 예약 후 ACK, 주기적 `XAUTOCLAIM` 회수(M12) | worker에 있다 |
 | | `WorkerAttemptHandle` | `AttemptHandle`의 M12 구현. `markSending()`을 저장소 CAS로 위임하고 호출 여부를 기억해 예외 가드(Failed/Unknown)를 가른다 | worker 내부 전용(package-private) |
+| | `RetryPolicy`(M13) | `finalAttempt` 판정과 백오프 계산(`retry.backoff-ms`/`retry.max-retries`), `ProcessingStateStore.scheduleRetry` 호출 | worker에 있다 |
+| | `RetryScheduler`(M13) | 5초 주기로 도래한 재시도를 `retry_scheduler.lua`(`XADD`→`ZREM`)로 재투입 | worker에 있다 |
 | `event/` | `SlackMessageEvent` | 페이로드 → 값 객체. 큐 메시지 필드에서 재구성(`fromQueueFields`)도 지원 | 큐 메시지 스키마가 됨(M12) |
 | | `AttemptHandle` | 핸들러가 갖는 유일한 권한: `markSending()` 게이트 | worker가 구현(`WorkerAttemptHandle`)을 주입 |
 | | ~~`EventDeduplicator`·`ClaimResult`·`ProcessingState`~~ | P0 인메모리 dedup·전이 상태 기계 | **M12에서 제거됨.** `state/ProcessingStateStore`(§3.3)가 대체 |
-| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트. HTTP도 큐 ACK도 모른다 | worker가 호출한다. 종료 상태 기록은 하지 않고 `HandlingResult`만 반환(M12) |
-| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`) | worker가 이 값으로 `finalizeAttempt`·ACK 여부를 정한다 |
+| | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트, `finalAttempt`로 재시도/최종 안내 분기(M13). HTTP도 큐 ACK도 모른다 | worker가 호출한다. 종료 상태 기록은 하지 않고 `HandlingResult`만 반환(M12) |
+| | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`/`RetryRequested`(M13)) | worker가 이 값으로 `finalizeAttempt`·`scheduleRetry`·ACK 여부를 정한다 |
 | `llm/` | `LlmClient` | 호출 경계 인터페이스 | // 3단계에서 여기가 바뀐다 (RAG) |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | worker에 있다 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
@@ -244,6 +246,37 @@ P1의 자동 재시도·재전달 허용 기간은 최초 수신부터 24시간�
 **Lua는 롤백하지 않는다.** 모든 쓰기는 검증(쓰기 없음) → 멱등 보존(`HSET`+`ZADD`) → 상태 기록 → `XACKDEL` 순서를 지켜, 스크립트 중간 오류가 나도 입력을 잃지 않는다. `finalize`는 `from=='COMPLETED'→to=='COMPLETED'`(자가 재완료)도 허용해, 재전달 대상 메시지가 이미 없는 늦은 완료도 같은 인자로 다시 불러 정리를 마칠 수 있다. 보존 해시(`slack:preserved:{event_id}`)는 event_id로만 키가 갈리므로, 정리(`DEL`)는 그 안의 `gen` 필드가 지금 완료 중인 시도의 세대와 같을 때만 수행한다(다른 세대의 DLQ 보존을 보호).
 
 **알려진 한계**(의도적으로 남겨둠, `state.lua` 상단 주석 참고): 목록 정렬 점수가 재보존마다 갱신될 수 있음, 쓰기 전 Redis 키 타입을 미리 검증하지 않음(WRONGTYPE은 안전하게 스크립트를 중단시키고 같은 순서로 복구된다).
+
+### 3.4 재시도·DLQ (M13, `com.slack.lab.worker.RetryPolicy`·`RetryScheduler`)
+
+**오류 분류는 클라이언트 경계에서 한다.** `LlmResult.Failed`·`SlackSendResult.Failed`가 각각 `retryable` 플래그를 갖는다:
+
+| 클라이언트 | 재시도 가능 | 영구 |
+|---|---|---|
+| `LlmResult` | 연결 실패(`ConnectException`·`UnknownHostException`)·5xx·기한 초과(`TimedOut`, 항상 재시도 가능) | 4xx·요청 직렬화 실패·응답 파싱 실패 |
+| `SlackSendResult` | 연결 수립 실패·429(`Retry-After` 헤더를 ms로 파싱해 재시도 대기를 대체) | `ok:false`의 인증·권한·채널 오류, 요청 준비 실패 |
+
+**최초 1회 + 재시도 최대 3회(`retry.max-retries`) = 최대 4회 실행.** `RetryPolicy.isFinalAttempt(retries, manualRun)`이 `retries >= retry.max-retries || manualRun`으로 판정하고, `EventWorker`가 `claim()`이 돌려준 `retries`로 계산해 `SlackEventHandler.handle(event, attempt, finalAttempt)`에 넘긴다 — 핸들러가 이 값으로 "재시도 가능한 오류라도 마지막 시도면 재시도 없이 최종 안내로 간다"를 판단한다(안내는 재시도 사슬을 만들지 않는다).
+
+**전이표**(LLM·답변 발신·최종 안내를 모두 포함):
+
+| 오류 | 마지막 시도 전 | 마지막 시도 |
+|---|---|---|
+| LLM 재시도 가능 | 안내 없이 `RETRY_WAIT(gen+1)` | 최종 안내 1회 |
+| LLM 영구 | 즉시 최종 안내 1회(재시도 없음) | 최종 안내 1회 |
+| 답변 발신: 재시도 가능한 일시 실패 | `RETRY_WAIT(gen+1)` | `DEAD`+DLQ(안내 연쇄 없음) |
+| 답변 발신: 영구 실패 | `DEAD`+DLQ | `DEAD`+DLQ |
+| 발신 결과 불명(답변·안내 공통) | `UNKNOWN`+복구 목록, 자동 재발신 없음 | 같음 |
+| 최종 안내 성공 | — | `COMPLETED(kind=failure_notice)`, 정상 답변 지표에서 제외 |
+| 최종 안내 실패(재시도 가능 여부 무관) | — | `DEAD`+DLQ |
+
+**`RetryPolicy.scheduleRetry`**는 `backoff = retryAfterMsOverride > 0 ? retryAfterMsOverride : retry.backoff-ms[retries]`로 대기를 계산하고 `ProcessingStateStore.scheduleRetry(eventId, attemptId, streamId, gen+1, retryAt, retries+1, stage)`를 호출한다. 이 저장소 메서드는 `state.lua`의 새 `retry` 연산으로 구현된다 — `finalize`와 같은 **검증 → 멱등 보존(재시도 목록에 `retry_at`을 점수로) → 상태 기록(`RETRY_WAIT`) → `XACKDEL`** 순서를 지킨다. 재투입될 입력은 재시도 목록과 짝을 이루는 보존 해시(`slack:preserved:{event_id}`, DLQ·복구와 같은 해시를 재사용하고 `gen` 필드만 다음 세대로 덮어쓴다)에 그대로 실린다 — 재투입 메시지는 원래 `received_at`을 유지한다.
+
+**재시도 스케줄러**(`RetryScheduler`, `state/retry_scheduler.lua`)는 5초 주기로 도래한(`retry_at <= now`) 항목을 골라 **`XADD` 성공 → `ZREM`** 순서로 재투입한다. 반대 순서라면 `ZREM` 뒤 `XADD` 실패 시 입력이 재시도 목록에서도 스트림에서도 사라져 유실된다. 두 명령 사이에 실패하면 다음 주기가 같은 `event_id`를 다시 `XADD`해 스트림에 중복이 생길 수 있지만, `claim()`의 선점 결과표가 같은 세대의 재확인을 `BUSY`(처리 중)·`STALE`(이미 지난 세대)·`DONE`(이미 종료)으로 가로막아 중복 실행 자체는 발생하지 않는다.
+
+**24시간 창과의 상호작용**: `claim()`의 실행 가능 판정(도래한 `RETRY_WAIT` 포함)은 24시간 초과 판정(결과표 7행)보다 뒤에 온다 — 재시도가 도래했더라도 최초 수신부터 24시간이 지났으면 실행하지 않고 `EXPIRED` → `DEAD`+DLQ로 보낸다.
+
+**1단계 후속 과제 흡수**(`docs/EXPERIMENT-LOG.md` §2.10~§2.11): `SlackClient`·`OpenAiCompatibleLlmClient` 모두 (1) `sendAsync` 제출과 취소 타이머 예약을 분리해, 제출 성공 뒤 예약만 실패해도 명확한 실패가 아니라 결과 불명/재시도 가능으로 분류하고 (2) 요청 준비(`buildRequest`)에 걸린 시간을 남은 예산에서 뺀 뒤 취소 타이머를 예약한다.
 
 ---
 

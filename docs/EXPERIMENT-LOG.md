@@ -547,3 +547,27 @@ MINOR 12건(동시성 상한을 깨는 reclaim 처리, `experiment.dedup-enabled
 - **MAJOR-3(문서 정정)**: 위 표에 반영(합성 서명 요청으로 정정). 사용자가 실제로 Slack에서 봇을 멘션했으나 그 시점엔 호스트 `bootRun`이 꺼져 있어(이전 세션 검증 후 종료한 채로 둠) 응답이 없었다 — 재전송 창이 지난 뒤 발견해 재현이 안 되므로, 서버를 다시 켜고 동일한 방식(서명 유효한 합성 요청)으로 왕복을 재확인했다: 200(`enqueue_ms=27`) → 워커 소비 → LLM 성공(`elapsed_ms=594`) → **Slack 발신 성공** → `Delivered`(총 소요 1108ms). **B3(수신 kill)·B4(워커 kill)는 `app.role=all` 한 프로세스로는 재현할 수 없고(수신·워커가 분리된 프로세스여야 함) 별도 역할 분리 기동이 필요해, M17(다중 워커) 검증으로 미룬다.**
 - **MINOR-9**(`experiment.dedup-enabled` 잔재 제거)도 함께 반영.
 - 전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.
+
+## 10. 2단계 M13 재시도·DLQ 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 156건, 실패 0, 스킵 2건(`SlackClientManualIT` — 실제 Slack 필요한 수동 IT)(state 6건·worker 8건·llm 3건·slack 2건·event 7건 신규) |
+| LLM 재시도 가능 → 재시도 후 성공 | `EventWorkerTest.재시도_가능한_오류는_예약_뒤_스케줄러가_재투입하면_다시_실행돼_결국_완료된다`: `RetryRequested`(1차) → `RETRY_WAIT(gen=1,retries=1)` → 50ms 백오프 뒤 `RetryScheduler.runOnce()` → 재선점(gen=1) → `Delivered` → `COMPLETED` |
+| LLM 영구 오류 → 즉시 최종 안내 | `SlackEventHandlerTest.LLM_영구_오류는_마지막_시도가_아니어도_재시도_없이_즉시_최종_안내를_보낸다`: `retryable=false`면 `finalAttempt=false`라도 재시도 없이 바로 안내 발신 |
+| 답변 발신 일시 실패 → 재시도 → 마지막 시도엔 DEAD+DLQ | `SlackEventHandlerTest` 2건: 재시도 가능+비최종 → `RetryRequested`, 재시도 가능+최종 → `Failed`(안내 연쇄 없음, 발신 1회만) |
+| 발신 결과불명 → UNKNOWN+재발신 없음 | 기존 M12 테스트(`Unknown_결과는...`)가 그대로 성립 — M13은 이 경로를 건드리지 않는다(재시도/영구 분류는 `Failed`에만 적용) |
+| 최종 안내 성공 → COMPLETED(failure_notice) | `EventWorkerTest.최종_안내가_성공하면_COMPLETED로_끝나고_kind는_failure_notice다` |
+| 최종 안내 실패 → DEAD+DLQ | `EventWorkerTest.최종_안내_발신이_실패하면_DEAD와_DLQ로_끝난다`, `SlackEventHandlerTest.최종_안내_발신이_실패하면_재시도_가능_여부와_무관하게_항상_DEAD로_끝난다` |
+| finalAttempt 전달 | `EventWorkerTest.finalAttempt는_retries가_max_retries에_도달했을_때_true로_전달된다`: `max-retries=1`로 두고 `ArgumentCaptor`로 1차(`false`)·2차(`true`) 캡처 |
+| 재시도 스케줄러 fail_after 주입 | `RetrySchedulerTest.XADD_성공_뒤_ZREM_전에_실패해도...`: `fail_after=1`로 XADD 뒤 ZREM 전 중단 → 입력 보존(재시도 목록에 남음, 스트림엔 이미 들어감) → 다음 주기 재투입으로 스트림에 중복 2건 → `claim()`이 1건은 정상 처리(`COMPLETED`), 중복 1건은 `DONE`(중복 실행 0) |
+| 24시간 창(재시도 도래분) | `RedisProcessingStateStoreTest.도래한_재시도라도_최초_수신_후_24시간이_지나면...`: `RETRY_WAIT` 도래 후에도 `first_received_at` 기준 24시간 초과면 `EXPIRED`→`DEAD`+DLQ. 이 판정은 M11의 결과표 7행을 그대로 재사용한다(M13에서 순서를 바꾸지 않았다) |
+| 재시도 예약 메커니즘 | `RedisProcessingStateStoreTest` 5건: `scheduleRetry`가 `RETRY_WAIT` 기록+ACK, 예약 전(`STALE`)·도래 후(`CLAIMED`, `retries` 계승) 선점, 소유권 없거나 입력 없으면 거절(아무것도 안 씀), `COMPLETED` 정리가 재시도 목록도 함께 청소 |
+
+**오류 분류 구현**: `LlmResult.Failed`·`SlackSendResult.Failed`에 `retryable` 필드를 추가했다. LLM은 연결 실패(`ConnectException`/`UnknownHostException`)·5xx·`TimedOut`을 재시도 가능으로, 4xx·직렬화/파싱 실패를 영구로 분류한다(`OpenAiCompatibleLlmClientTest`로 5xx→`true`, 4xx→`false`, 연결 실패→`true` 확인). Slack은 연결 실패·429를 재시도 가능으로, `ok:false`의 인증/권한/채널 오류를 영구로 분류하고 429는 `Retry-After` 헤더를 ms로 파싱해 `SlackSendResult.Failed.retryAfterMs`에 싣는다(`SlackClientTest`로 헤더 없을 때 0 확인 — 스텁이 헤더를 안 보내 값 있는 경우는 미검증, 실제 Slack 429 응답의 헤더 형식은 운영 중 확인 필요).
+
+**1단계 후속 과제 흡수**(§2.10 MEDIUM·§2.11 LOW): `SlackClient.postMessage`·`OpenAiCompatibleLlmClient.execute`에서 (1) `sendAsync` 제출과 취소 타이머 예약을 별도 try로 분리해, 예약만 실패해도 결과 불명/재시도 가능으로 분류하도록 수정 (2) `buildRequest` 소요 시간을 남은 예산에서 뺀 뒤 취소 타이머를 그 값으로 예약하도록 수정. 두 경로 모두 실제로 예약이 실패하는 조건(예: `cancelTimer` 셧다운)을 재현하는 회귀 테스트는 만들지 않았다 — 트리거 조건 자체가 드물고(스레드풀 고갈), 기존 M6 스타일대로 수동 재현이 어려운 방어적 수정으로 남겨둔다(문서화된 위험 인지, MINOR급).
+
+**설계 판단**: `RETRY_WAIT`으로 예약할 때 재투입 입력을 DLQ·복구와 같은 `slack:preserved:{event_id}` 해시에 재사용하고 `gen` 필드만 덮어썼다 — 이벤트당 "지금 보존 중인 입력"은 항상 하나뿐이라는 M11의 불변식(보존 키가 event_id로만 채번됨)을 그대로 따른 것이다. 재시도 스케줄러는 `state.lua`와 별도 파일(`retry_scheduler.lua`)로 뒀다 — 여러 `event_id`에 걸쳐 반복하는 배치 연산이라 단건 CAS를 다루는 `state.lua`의 KEYS 규약(이벤트별 5키)과 결이 달라, 섞으면 오히려 `state.lua`의 "검증→보존→상태→ACK" 불변식 서술이 흐려진다고 판단했다.
+
+전체 재빌드 확인: `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL, 156 tests.

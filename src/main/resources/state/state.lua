@@ -7,7 +7,7 @@
 -- 사라지거나, 다른 세대의 보존본이 잘못 지워지지 않는다.
 --
 -- KEYS: 1 상태 해시 slack:evt:{id}  2 이벤트 스트림  3 보존 해시 slack:preserved:{id}
---       4 DLQ 목록(ZSET)  5 복구 목록(ZSET)
+--       4 DLQ 목록(ZSET)  5 복구 목록(ZSET)  6 재시도 목록(ZSET) slack:retry (M13)
 -- ARGV: 1 op  2 event_id  3 fail_after(테스트 전용 실패 주입, 0이면 끔)  4.. op별 인자
 --
 -- 알려진 한계(M11 codex critic 2회전, 의도적으로 남겨둠):
@@ -63,14 +63,19 @@ local function matches_event(entry)
   return id == nil or id == event_id
 end
 
--- 멱등: 같은 입력을 다시 써도 결과가 같다.
-local function preserve(entry, list_key, reason)
+-- 멱등: 같은 입력을 다시 써도 결과가 같다. score는 호출 시각(now)이 기본이지만, 재시도는
+-- 예약 시각(retry_at)으로 목록에 올려야 스케줄러가 도래한 항목만 골라낼 수 있어 score를 인자로 받는다.
+local function preserve_at(entry, list_key, reason, score)
   local args = { 'HSET', KEYS[3] }
   for i = 1, #entry do args[#args + 1] = entry[i] end
   args[#args + 1] = 'preserved_reason'
   args[#args + 1] = reason
   write(unpack(args))
-  write('ZADD', list_key, now, event_id)
+  write('ZADD', list_key, score, event_id)
+end
+
+local function preserve(entry, list_key, reason)
+  preserve_at(entry, list_key, reason, now)
 end
 
 -- 보존 해시가 지금 완료되는 세대보다 미래 것이 아닐 때만 지운다. 더 최근 세대가 남긴 보존본을
@@ -88,6 +93,7 @@ local function cleanup_preserved_if_same_or_past_gen(gen)
   write('DEL', KEYS[3])
   write('ZREM', KEYS[4], event_id)
   write('ZREM', KEYS[5], event_id)
+  write('ZREM', KEYS[6], event_id)
 end
 
 local function ack(group, stream_id)
@@ -203,7 +209,8 @@ if op == 'claim' then
     'channel', ARGV[11], 'thread_ts', ARGV[12], 'manual_run', manual and '1' or '0')
   if manual then write('HDEL', KEYS[1], 'manual_gen') end
   write('PERSIST', KEYS[1])
-  return { 'CLAIMED', tostring(gen), manual and '1' or '0' }
+  -- retries는 이 claim이 손대지 않는다 — RETRY_WAIT이 남긴 값을 그대로 물려받는다(M13). 새 이벤트는 0이다.
+  return { 'CLAIMED', tostring(gen), manual and '1' or '0', tostring(tonumber(h.retries or '0')) }
 end
 
 if op == 'mark_sending' then
@@ -265,6 +272,30 @@ if op == 'finalize' then
   else
     write('PERSIST', KEYS[1])
   end
+  ack(group, stream_id)
+  return 1
+end
+
+if op == 'retry' then
+  -- M13. 재시도 가능한 오류를 안내 없이 예약한다: 입력을 재시도 목록에 예약 시각으로 보존 →
+  -- RETRY_WAIT(gen+1, retries+1, retry_at) 기록 → XACKDEL. finalize와 같은 검증→멱등쓰기→상태→ACK 순서.
+  -- ARGV: 4 attempt_id 5 stream_id 6 group 7 next_gen 8 retry_at 9 retries 10 stage
+  local aid, stream_id, group = ARGV[4], ARGV[5], ARGV[6]
+  local h, exists = load_state()
+  if not exists or h.attempt_id ~= aid or (h.state ~= 'PROCESSING' and h.state ~= 'SENDING') then
+    return 0
+  end
+
+  local raw = stream_entry(stream_id)
+  if raw ~= nil and not matches_event(raw) then return 0 end
+  if raw == nil then return 0 end -- 재투입할 입력이 없으면 보존할 수 없다 — 아무것도 쓰지 않고 거절
+
+  preserve_at(raw, KEYS[6], 'retry_scheduled', tonumber(ARGV[8]))
+  -- preserve_at()이 옛 gen을 그대로 복사해 두므로, 스케줄러가 재투입할 새 세대로 덮어쓴다.
+  write('HSET', KEYS[3], 'gen', ARGV[7])
+  write('HSET', KEYS[1], 'state', 'RETRY_WAIT', 'gen', ARGV[7], 'retry_at', ARGV[8], 'retries', ARGV[9],
+    'stage', ARGV[10])
+  write('PERSIST', KEYS[1])
   ack(group, stream_id)
   return 1
 end

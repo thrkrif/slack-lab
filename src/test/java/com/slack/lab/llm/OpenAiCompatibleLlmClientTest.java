@@ -25,12 +25,32 @@ class OpenAiCompatibleLlmClientTest {
     }
 
     @Test
-    void 서버_오류_5xx는_명확한_실패로_분류한다() throws Exception {
+    void 서버_오류_5xx는_명확한_실패이고_재시도_가능으로_분류한다() throws Exception {
+        // M13: 5xx는 서버 쪽 일시 오류일 수 있어 같은 요청을 다시 보내볼 가치가 있다.
         try (var stub = StubOpenAiServer.chatRespondsWith("{\"error\":\"x\"}", 500)) {
             var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.chat("안녕", 5_000);
             assertThat(result).isInstanceOf(LlmResult.Failed.class);
+            assertThat(((LlmResult.Failed) result).retryable()).isTrue();
         }
+    }
+
+    @Test
+    void 상태코드_4xx는_영구_실패로_분류한다() throws Exception {
+        try (var stub = StubOpenAiServer.chatRespondsWith("{\"error\":\"bad\"}", 400)) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.chat("안녕", 5_000);
+            assertThat(result).isInstanceOf(LlmResult.Failed.class);
+            assertThat(((LlmResult.Failed) result).retryable()).isFalse();
+        }
+    }
+
+    @Test
+    void 연결_자체가_안_되면_재시도_가능한_실패로_분류한다() {
+        var client = new OpenAiCompatibleLlmClient(props("http://127.0.0.1:1/v1"), new ObjectMapper());
+        var result = client.chat("안녕", 5_000);
+        assertThat(result).isInstanceOf(LlmResult.Failed.class);
+        assertThat(((LlmResult.Failed) result).retryable()).isTrue();
     }
 
     @Test

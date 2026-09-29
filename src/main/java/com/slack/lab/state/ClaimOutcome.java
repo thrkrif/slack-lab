@@ -3,8 +3,13 @@ package com.slack.lab.state;
 /** 선점 결과표(PLAN 2단계 M11)의 판정. {@link Settled}는 스크립트가 이미 보존·ACK까지 끝낸 경우다. */
 public sealed interface ClaimOutcome {
 
-    /** 처리 권한을 얻었다. 메시지는 아직 pending이며 종료 기록 뒤에 ACK한다. */
-    record Claimed(String attemptId, long gen, boolean manualRun) implements ClaimOutcome {}
+    /**
+     * 처리 권한을 얻었다. 메시지는 아직 pending이며 종료 기록 뒤에 ACK한다.
+     *
+     * @param retries 지금까지 소진한 재시도 횟수(M13). 최초 시도는 0. {@code retries >= retry.max-retries}면
+     *     이번이 마지막 시도다(워커가 {@code finalAttempt}를 계산하는 데 쓴다).
+     */
+    record Claimed(String attemptId, long gen, boolean manualRun, int retries) implements ClaimOutcome {}
 
     /** 다른 시도가 유효한 임대로 처리 중이다. ACK하지 않고 pending에 남긴다(뒤에 XAUTOCLAIM이 재확인). */
     record Busy() implements ClaimOutcome {}

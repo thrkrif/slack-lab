@@ -561,6 +561,86 @@ class RedisProcessingStateStoreTest {
         assertThat(listed(RedisProcessingStateStore.DLQ_KEY, "E31")).isFalse();
     }
 
+    // --- M13: scheduleRetry(재시도 예약)
+
+    @Test
+    void 재시도_예약은_안내_없이_RETRY_WAIT으로_ACK하고_세대와_재시도_횟수를_올린다() {
+        Msg m = deliver("E32");
+        Claimed c = claimOk(m);
+        long retryAt = System.currentTimeMillis() + 60_000;
+
+        assertThat(store.scheduleRetry("E32", c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1, "llm_timeout"))
+                .isTrue();
+
+        assertThat(stateOf("E32")).containsEntry("state", "RETRY_WAIT").containsEntry("gen", "1")
+                .containsEntry("retries", "1").containsEntry("retry_at", String.valueOf(retryAt));
+        assertThat(pending()).isZero(); // ACK됐다 — 안내 없이 재시도만 예약
+        assertThat(inStream(m)).isFalse();
+        assertThat(preserved("E32")).isTrue(); // 재투입할 입력이 보존됐다
+        assertThat(redis.opsForZSet().score(RedisProcessingStateStore.RETRY_KEY, "E32")).isEqualTo((double) retryAt);
+    }
+
+    @Test
+    void 예약된_시각_전에는_선점되지_않고_도래하면_다음_세대로_선점되며_재시도_횟수를_물려받는다() {
+        Msg m = deliver("E33");
+        Claimed c = claimOk(m);
+        long retryAt = System.currentTimeMillis() + 300;
+        store.scheduleRetry("E33", c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1, "llm_timeout");
+
+        // 스케줄러가 재투입한 것처럼 gen=1로 다시 XADD한다.
+        Msg requeued = deliver("E33", 1, m.receivedAt());
+        assertThat(store.claim(requeued.request())).isEqualTo(new Settled(Reason.STALE)); // 아직 이르다
+
+        try {
+            sleep(400);
+        } catch (InterruptedException ignored) {
+        }
+        Msg requeuedAgain = deliver("E33", 1, m.receivedAt());
+        Claimed second = claimOk(requeuedAgain);
+        assertThat(second.gen()).isEqualTo(1);
+        assertThat(second.retries()).isEqualTo(1); // 예약 때 기록한 재시도 횟수를 그대로 물려받는다
+    }
+
+    @Test
+    void 도래한_재시도라도_최초_수신_후_24시간이_지나면_실행하지_않고_DLQ로_보낸다() {
+        Msg m = deliver("E34"); // 최초 수신은 최근 시각 — 선점 자체는 정상이어야 한다
+        Claimed c = claimOk(m);
+        store.scheduleRetry("E34", c.attemptId(), m.streamId(), c.gen() + 1, 0, 1, "llm_timeout"); // 이미 도래
+
+        // 재시도 대기 중 24시간이 흘렀다고 가정한다(최초 수신 시각을 뒤로 돌린다).
+        redis.opsForHash().put(RedisProcessingStateStore.stateKey("E34"), "first_received_at",
+                String.valueOf(System.currentTimeMillis() - DAY_MS - 60_000));
+
+        Msg requeued = deliver("E34", 1, m.receivedAt());
+        assertThat(store.claim(requeued.request())).isEqualTo(new Settled(Reason.EXPIRED));
+        assertThat(stateOf("E34")).containsEntry("state", "DEAD").containsEntry("stage", "window_expired");
+        assertThat(listed(RedisProcessingStateStore.DLQ_KEY, "E34")).isTrue();
+    }
+
+    @Test
+    void 완료되면_재시도_목록에_남아있던_항목도_정리된다() {
+        // 재시도 스케줄러의 XADD 성공/ZREM 실패로 재시도 목록에 잔여 항목이 남을 수 있다(M13) —
+        // 그 사이 다른 시도가 정상 완료되면 잔여 항목도 함께 정리돼야 한다.
+        redis.opsForZSet().add(RedisProcessingStateStore.RETRY_KEY, "E35", System.currentTimeMillis());
+        Msg m = deliver("E35", 0, System.currentTimeMillis());
+        Claimed c = claimOk(m);
+        store.markSending("E35", c.attemptId());
+
+        assertThat(store.finalizeAttempt("E35", c.attemptId(), m.streamId(), Finalization.completed("35.1", "answer")))
+                .isTrue();
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E35")).isFalse();
+    }
+
+    @Test
+    void 소유자가_아니거나_보존할_입력이_없으면_재시도_예약이_거절되고_아무것도_쓰지_않는다() {
+        Msg m = deliver("E36");
+        Claimed c = claimOk(m);
+
+        assertThat(store.scheduleRetry("E36", "someone-else", m.streamId(), c.gen() + 1, 0, 1, "x")).isFalse();
+        assertThat(stateOf("E36")).containsEntry("state", "PROCESSING");
+        assertThat(preserved("E36")).isFalse();
+    }
+
     @Test
     void 자가_재완료는_재전달_없이_finalize_재호출만으로_잔여_정리를_마친다() throws Exception {
         // 늦은 완료가 정리 전에 중단되면, 이 지점을 다시 겨냥할 큐 메시지가 없다(스트림 항목은

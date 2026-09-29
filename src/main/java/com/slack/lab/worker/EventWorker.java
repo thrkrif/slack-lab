@@ -60,6 +60,7 @@ public class EventWorker {
     private final StateProperties stateProps;
     private final ProcessingStateStore store;
     private final SlackEventHandler handler;
+    private final RetryPolicy retryPolicy;
 
     private ExecutorService pool;
     // reclaim 주기 작업과 시도별 임대 갱신 작업을 함께 돌린다(MAJOR-1) — 동시에 여러 시도가 갱신을 스케줄하므로
@@ -68,13 +69,15 @@ public class EventWorker {
     private volatile boolean running;
 
     public EventWorker(StringRedisTemplate redis, QueueProperties queueProps, WorkerProperties workerProps,
-            StateProperties stateProps, ProcessingStateStore store, SlackEventHandler handler) {
+            StateProperties stateProps, ProcessingStateStore store, SlackEventHandler handler,
+            RetryPolicy retryPolicy) {
         this.redis = redis;
         this.queueProps = queueProps;
         this.workerProps = workerProps;
         this.stateProps = stateProps;
         this.store = store;
         this.handler = handler;
+        this.retryPolicy = retryPolicy;
     }
 
     @PostConstruct
@@ -226,6 +229,7 @@ public class EventWorker {
         SlackMessageEvent event = SlackMessageEvent.fromQueueFields(fields);
         long startNanos = System.nanoTime();
         WorkerAttemptHandle handle = new WorkerAttemptHandle(eventId, claimed.attemptId(), startNanos, store);
+        boolean finalAttempt = retryPolicy.isFinalAttempt(claimed.retries(), claimed.manualRun());
 
         // MAJOR-1: 임대(state.lease-ms)를 주기적으로 갱신하지 않으면 LLM+지연 합이 임대를 넘는 처리는 전부
         // markSending()에서 거절돼 조용한 실패가 된다(ARCHITECTURE §3.2). 처리 시작부터 끝까지 갱신을 돌린다.
@@ -235,7 +239,7 @@ public class EventWorker {
 
         HandlingResult result;
         try {
-            result = handler.handle(event, handle);
+            result = handler.handle(event, handle, finalAttempt);
         } catch (Exception e) {
             // markSending 이전의 예외는 발신되지 않았음이 확실하니 Failed, 이후는 발신 여부를 알 수 없어 Unknown이다.
             String stage = "unexpected_exception:" + e.getClass().getSimpleName();
@@ -246,7 +250,7 @@ public class EventWorker {
             renewal.cancel(false);
         }
 
-        finalizeResult(streamId, eventId, claimed.attemptId(), result);
+        finalizeResult(streamId, eventId, claimed, result);
     }
 
     /** 임대 갱신 실패(소유권 상실)를 핸들에 반영해, 이후 markSending()이 저장소를 다시 부르지 않고 거절하게 한다. */
@@ -263,10 +267,12 @@ public class EventWorker {
     }
 
     /**
-     * M12 시점의 최소 정책(M13 이전): Delivered→COMPLETED, Unknown→UNKNOWN(복구 목록), Failed→DEAD(DLQ).
-     * Rejected는 이미 소유권을 잃었다는 뜻이라 상태를 건드리지 않는다 — XAUTOCLAIM이 재확인한다.
+     * M13 전이표: Delivered→COMPLETED(안내 성공도 포함), Unknown→UNKNOWN(복구 목록, 재발신 없음),
+     * Failed→DEAD(DLQ), RetryRequested→RETRY_WAIT(안내 없이 재시도 예약). Rejected는 이미 소유권을
+     * 잃었다는 뜻이라 상태를 건드리지 않는다 — XAUTOCLAIM이 재확인한다.
      */
-    private void finalizeResult(String streamId, String eventId, String attemptId, HandlingResult result) {
+    private void finalizeResult(String streamId, String eventId, ClaimOutcome.Claimed claimed, HandlingResult result) {
+        String attemptId = claimed.attemptId();
         boolean finalized = switch (result) {
             case HandlingResult.Delivered d -> store.finalizeAttempt(eventId, attemptId, streamId,
                     Finalization.completed(d.slackTs(), d.kind()));
@@ -274,13 +280,15 @@ public class EventWorker {
                     Finalization.unknown(kindFromStage(u.stage()), u.stage()));
             case HandlingResult.Failed f -> store.finalizeAttempt(eventId, attemptId, streamId,
                     Finalization.dead(kindFromStage(f.stage()), f.stage()));
+            case HandlingResult.RetryRequested r -> retryPolicy.scheduleRetry(eventId, attemptId, streamId,
+                    claimed.gen(), claimed.retries(), r.retryAfterMsOverride(), r.stage());
             case HandlingResult.Rejected r -> false;
         };
         if (result instanceof HandlingResult.Rejected r) {
             log.warn("SENDING 거절— 상태 유지, ACK 안 함 event_id={} attempt_id={} reason={}", eventId, attemptId,
                     r.reason());
         } else if (!finalized) {
-            // 저장 실패·소유권 상실 — ACK하지 않는다(B10). 재전달이 finalize를 다시 시도하게 둔다.
+            // 저장 실패·소유권 상실 — ACK하지 않는다(B10). 재전달이 finalize/retry를 다시 시도하게 둔다.
             log.warn("종료 기록 거절 또는 실패 — ACK 보류 event_id={} attempt_id={} result={}", eventId, attemptId,
                     result.getClass().getSimpleName());
         } else {

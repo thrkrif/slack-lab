@@ -60,7 +60,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     @Override
     public LlmResult chat(String prompt, long remainingMs) {
         if (remainingMs <= 0) {
-            return new LlmResult.Failed("남은 기한 없음", 0);
+            return new LlmResult.Failed("남은 기한 없음", 0, false);
         }
         long start = System.nanoTime();
         HttpRequest request;
@@ -68,11 +68,22 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             request = buildRequest(prompt, remainingMs);
         } catch (Exception e) {
             // 요청 준비 단계에서 예외가 나면 호출자(SlackEventHandler)까지 전파시키지 않는다 — LlmClient 계약은
-            // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙).
+            // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙). 입력 직렬화 실패는
+            // 같은 입력으로 재시도해도 그대로 실패하므로 영구 실패다.
             log.warn("LLM 요청 준비 실패 reason={}", e.getClass().getSimpleName());
-            return new LlmResult.Failed("request_build_failed:" + e.getClass().getSimpleName(), elapsedMs(start));
+            return new LlmResult.Failed("request_build_failed:" + e.getClass().getSimpleName(), elapsedMs(start),
+                    false);
         }
-        HttpOutcome outcome = execute(request, remainingMs);
+
+        // M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.10 LOW): 요청 준비(buildRequest)에 걸린 시간을
+        // remainingMs에서 빼지 않으면 실제 취소 예약이 원래 예산보다 늦게 잡혀 총 처리 기한(A16)을 넘길 수 있다.
+        long buildElapsedMs = elapsedMs(start);
+        long budgetMs = remainingMs - buildElapsedMs;
+        if (budgetMs <= 0) {
+            return new LlmResult.TimedOut(buildElapsedMs);
+        }
+
+        HttpOutcome outcome = execute(request, budgetMs);
         long elapsed = elapsedMs(start);
 
         if (outcome.timedOut()) {
@@ -81,13 +92,21 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         }
         if (outcome.response() == null) {
             log.warn("LLM 호출 실패 elapsed_ms={} reason={}", elapsed, outcome.failureReason());
-            return new LlmResult.Failed(outcome.failureReason(), elapsed);
+            return new LlmResult.Failed(outcome.failureReason(), elapsed, isRetryableFailure(outcome.failureReason()));
         }
         if (outcome.response().statusCode() / 100 != 2) {
-            log.warn("LLM 호출 실패 status={} elapsed_ms={}", outcome.response().statusCode(), elapsed);
-            return new LlmResult.Failed("status=" + outcome.response().statusCode(), elapsed);
+            int status = outcome.response().statusCode();
+            log.warn("LLM 호출 실패 status={} elapsed_ms={}", status, elapsed);
+            // 5xx는 서버 쪽 일시 오류일 수 있어 재시도 가능, 4xx는 같은 요청을 다시 보내도 그대로 실패한다.
+            return new LlmResult.Failed("status=" + status, elapsed, status / 100 == 5);
         }
         return parseContentSafely(outcome.response().body(), elapsed);
+    }
+
+    /** 연결 자체가 안 된 경우만 재시도 가능으로 분류한다(M13, PLAN "오류 분류는 클라이언트 경계에서"). */
+    private static boolean isRetryableFailure(String reason) {
+        return reason != null && (reason.contains("ConnectException") || reason.contains("UnknownHostException")
+                || reason.startsWith("send_submit_failed"));
     }
 
     /** 기동 시 모델 존재를 fail-fast로 확인한다 (pitfall 8, PLAN §3 M4). 예외를 던져 기동을 막는다. */
@@ -141,10 +160,20 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     /**
      * sendAsync + 호출별 cancel(true) 패턴을 한 곳에 모은다(M1.5 A2). 예외를 던지지 않고 분류된 결과를 돌려준다 —
      * 호출자마다 반복해서 예외 처리를 흩어두면 놓치기 쉽다(codex 리뷰: 파싱 예외 누출, interrupt 시 미취소).
+     *
+     * <p>M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.10 MEDIUM): {@code sendAsync} 제출과 취소 타이머
+     * 예약을 같은 try 블록에 두면, 제출이 이미 성공한 뒤 예약만 실패해도 요청이 나갔을 수 있는데 실패로
+     * 오분류된다. 여기서는 제출 자체가 실패하는 경우만 별도로 잡는다(LlmClient에는 Unknown이 없어 재시도
+     * 가능한 실패로 본다 — 응답을 못 받았다는 점은 동일하고, LLM 호출은 Slack 발신과 달리 재시도해도
+     * 사용자에게 보이는 중복 부작용이 없다).
      */
     private HttpOutcome execute(HttpRequest request, long remainingMs) {
-        CompletableFuture<HttpResponse<String>> future =
-                httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> future;
+        try {
+            future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            return new HttpOutcome(null, false, "send_submit_failed:" + e.getClass().getSimpleName());
+        }
         var cancelTask = cancelTimer.schedule(() -> future.cancel(true), remainingMs, TimeUnit.MILLISECONDS);
         try {
             HttpResponse<String> response = future.get(remainingMs + 500, TimeUnit.MILLISECONDS);
@@ -180,11 +209,11 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             content = mapper.readTree(body).path("choices").path(0).path("message").path("content");
         } catch (Exception e) {
             log.warn("LLM 응답 파싱 실패 elapsed_ms={} reason={}", elapsed, e.getClass().getSimpleName());
-            return new LlmResult.Failed("parse_failed:" + e.getClass().getSimpleName(), elapsed);
+            return new LlmResult.Failed("parse_failed:" + e.getClass().getSimpleName(), elapsed, false);
         }
         if (!content.isTextual() || content.asText().isBlank()) {
             log.warn("LLM 응답에 유효한 content 없음 elapsed_ms={}", elapsed);
-            return new LlmResult.Failed("empty_or_missing_content", elapsed);
+            return new LlmResult.Failed("empty_or_missing_content", elapsed, false);
         }
         log.info("LLM 호출 성공 elapsed_ms={}", elapsed);
         return new LlmResult.Success(content.asText(), elapsed);

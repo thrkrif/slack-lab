@@ -78,11 +78,22 @@ class SlackClientTest {
     }
 
     @Test
-    void 예외적_상태코드는_실패로_분류한다() throws Exception {
+    void rate_limit_429는_재시도_가능한_실패로_분류하고_Retry_After가_없으면_0이다() throws Exception {
+        // M13: rate limit은 미전송이 확실하고 재시도 가능하다(PLAN "429 → Retry-After 반영").
         try (var stub = StubSlackServer.respondsWith("rate limited", 429)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Failed("status=429"));
+            assertThat(result).isEqualTo(new SlackSendResult.Failed("rate_limited", true, 0));
+        }
+    }
+
+    @Test
+    void 상태코드_4xx는_영구_실패로_분류한다() throws Exception {
+        try (var stub = StubSlackServer.respondsWith("bad request", 400)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.postMessage("C1", null, "안녕", 5_000);
+            assertThat(result).isEqualTo(new SlackSendResult.Failed("status=400"));
+            assertThat(((SlackSendResult.Failed) result).retryable()).isFalse();
         }
     }
 
