@@ -33,7 +33,13 @@ public class RetryPolicy {
      */
     public boolean scheduleRetry(String eventId, String attemptId, String streamId, long currentGen,
             int currentRetries, long retryAfterMsOverride, String stage) {
-        long backoffMs = retryAfterMsOverride > 0 ? retryAfterMsOverride : props.backoffMs().get(currentRetries);
+        // StartupInvariants(M10)가 backoffMs.size() >= maxRetries를 기동 시 검사하지만, 그 검사를 거치지
+        // 않는 조합(단위 테스트가 빈을 직접 생성하는 경우 등)이면 여기서도 벗어날 수 있다(code-reviewer가
+        // retry.max-retries=4·기본 backoffMs 3개 조합으로 실제 재현). 불변식이 지켜졌어도 설정 실수가
+        // 크래시로 이어지지 않도록 방어적으로 clamp한다 — 규칙 4 "조용한 실패" 방지와는 반대 방향이지만,
+        // 여기서는 예외로 처리를 통째로 끊기보다 마지막 백오프 값으로 재시도를 이어가는 쪽이 안전하다.
+        int backoffIndex = Math.min(currentRetries, props.backoffMs().size() - 1);
+        long backoffMs = retryAfterMsOverride > 0 ? retryAfterMsOverride : props.backoffMs().get(backoffIndex);
         long retryAtMs = System.currentTimeMillis() + backoffMs;
         int retries = currentRetries + 1;
         return store.scheduleRetry(eventId, attemptId, streamId, currentGen + 1, retryAtMs, retries, stage);

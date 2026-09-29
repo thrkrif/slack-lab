@@ -707,7 +707,9 @@ class RedisProcessingStateStoreTest {
         Claimed c = claimOk(m);
         long retryAt = System.currentTimeMillis() - 1; // 이미 도래
 
-        store.injectFailureAfter(2); // preserve(HSET+ZADD) 끝, 상태 HSET 전 — ZADD로 목록엔 이미 올라감
+        // preserve_at은 이제 ZADD를 먼저 쓰고 HSET(보존)을 나중에 쓴다(hset_first=false, MAJOR-A 수정) —
+        // failAfter=2면 둘 다 끝난 뒤(순서와 무관하게 최종 상태는 같다) 상태 HSET 전에 끊긴다.
+        store.injectFailureAfter(2); // preserve(ZADD+HSET) 끝, 상태 HSET 전 — 목록·보존 모두 이미 반영됨
         assertThatThrownBy(() -> store.scheduleRetry("E41", c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1,
                 "llm_timeout")).hasStackTraceContaining("INJECTED_FAILURE");
         store.injectFailureAfter(0);
@@ -734,6 +736,56 @@ class RedisProcessingStateStoreTest {
         assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E41")).isFalse();
         assertThat(preserved("E41")).isFalse();
         assertThat(listed(RedisProcessingStateStore.DLQ_KEY, "E41")).isFalse();
+    }
+
+    @Test
+    void 재시도_보존_HSET만_남고_ZADD가_비면_원본이_정상_완료될_때_보존본도_함께_치워진다() throws InterruptedException {
+        // codex critic 2회전 MAJOR-A(code-reviewer가 대신 재현): preserve_at의 옛 순서(HSET 먼저·ZADD 나중)로
+        // 실행 중 HSET(보존, gen=next_gen) 직후·ZADD 전에 끊기면 — 이 테스트가 재현하는 지점 — 재시도
+        // 목록에는 event_id가 올라가지 않는데 보존 해시만 next_gen으로 남는다. 실제 운영에서는(E40과 달리)
+        // EventWorker가 같은 attempt로 scheduleRetry를 재호출하지 않는다(finalizeResult가 예외를 잡지 않고
+        // 그냥 로그만 남긴 채 ACK를 보류한다) — 원본 스트림 메시지는 임대 만료 뒤 재선점돼 old_gen으로
+        // 정상 완료된다. 이때 cleanup_preserved_if_same_or_past_gen(old_gen)이 "보존 gen(next_gen) > 완료
+        // gen"을 미래 세대 보호로 오판해 청소하지 않아, 어느 목록에도 없는 보존 해시가 영구히 남았다(B18
+        // 위반). preserve_at을 hset_first=false(ZADD 먼저)로 고쳐, 이 지점(첫 쓰기인 ZADD만 실행됨)에서
+        // 끊기면 보존 해시가 아예 쓰이지 않아 cleanup이 "보존 없음"으로 정상 청소하게 만들었다 — 재호출
+        // 없이 원본이 재전달→완료되는 실제 경로 전체를 거쳐 잔존물이 없는지 확인한다.
+        Msg m = deliver("E42");
+        Claimed c = claimOk(m);
+        long retryAt = System.currentTimeMillis() + 100;
+
+        store.injectFailureAfter(1); // preserve_at의 첫 쓰기(ZADD)만 실행되고 HSET(보존) 전에 끊긴다
+        assertThatThrownBy(() -> store.scheduleRetry("E42", c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1,
+                "llm_timeout")).hasStackTraceContaining("INJECTED_FAILURE");
+        store.injectFailureAfter(0);
+
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E42")).isTrue(); // ZADD는 성공했다
+        assertThat(preserved("E42")).isFalse(); // 보존 HSET은 아직 안 쓰였다 — 여기가 MAJOR-A의 실제 재현 지점
+        assertThat(stateOf("E42")).containsEntry("state", "PROCESSING").containsEntry("gen", "0"); // 상태도 그대로
+
+        // 재호출 없이 실제 운영 경로대로: 원본 메시지는 여전히 pending이고(ACK 안 됨) EventWorker도 다시
+        // scheduleRetry를 부르지 않는다 — 임대 만료 뒤 재선점이 old_gen으로 자연히 수습해야 한다.
+        assertThat(pending()).isEqualTo(1);
+        sleep(LEASE_MS + 100);
+        ClaimOutcome reclaim = store.claim(m.request());
+        assertThat(reclaim).isInstanceOf(Claimed.class);
+        assertThat(((Claimed) reclaim).gen()).isZero(); // next_gen이 아니라 원래 세대 그대로
+
+        store.markSending("E42", ((Claimed) reclaim).attemptId());
+        assertThat(store.finalizeAttempt("E42", ((Claimed) reclaim).attemptId(), m.streamId(),
+                Finalization.completed("42.1", "answer"))).isTrue();
+
+        // finalize 자체의 cleanup_preserved_if_same_or_past_gen이 곧바로 정리한다 — 스케줄러 개입이 필요 없다.
+        assertThat(stateOf("E42")).containsEntry("state", "COMPLETED");
+        assertThat(preserved("E42")).isFalse();
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E42")).isFalse();
+        assertThat(listed(RedisProcessingStateStore.DLQ_KEY, "E42")).isFalse();
+        assertThat(listed(RedisProcessingStateStore.RECOVERY_KEY, "E42")).isFalse();
+
+        // 재시도 스케줄러가 나중에 돌아도(이미 정리됐으므로) 아무 부작용이 없어야 한다.
+        runSchedulerOnce();
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E42")).isFalse();
+        assertThat(preserved("E42")).isFalse();
     }
 
     @Test

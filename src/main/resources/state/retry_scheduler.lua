@@ -62,15 +62,18 @@ for i = 1, #due do
     -- 진행 중이다 — 지금 재투입하면 gen 불변식이 깨질 수 있으니 건너뛰고 다음 주기에 다시 본다.
   else
     -- 이미 다른 경로로 끝났다(재전달로 원래 시도가 완료·소멸·CLOSED 등) — 재투입할 이유가 없다.
-    write('ZREM', KEYS[1], event_id)
     -- 보존 해시가 아직 이 재시도(우리가 방금 부분 실패로 남긴 것)의 것이면(다른 op이 그 뒤 덮어쓰지
     -- 않았으면) 함께 지운다 — 그렇지 않으면 어느 목록에도 없이(DLQ·복구·재시도 전부 아님) 해시만 영영
     -- 남는다(B18). preserved_reason으로 소유권을 확인한다: DLQ·복구용으로 이미 덮어써졌다면 그건 다른
     -- 목적의 보존이므로 건드리지 않는다.
+    -- LOW-3(code-reviewer): DEL을 ZREM보다 먼저 쓴다 — 반대 순서(ZREM 먼저)면 그 사이에 끊겼을 때 목록에서는
+    -- 이미 지워졌는데 해시만 남아, 다음 주기에도 이 event_id를 다시 보지 못해(due 목록에 없으므로) 영영
+    -- 청소되지 않는다. DEL을 먼저 쓰면 그 사이에 끊겨도 event_id가 여전히 목록에 남아 다음 주기에 다시 본다.
     local hkey = preserved_prefix .. event_id
     if redis.call('HGET', hkey, 'preserved_reason') == 'retry_scheduled' then
       write('DEL', hkey)
     end
+    write('ZREM', KEYS[1], event_id)
   end
 end
 return requeued

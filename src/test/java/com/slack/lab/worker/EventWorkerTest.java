@@ -405,11 +405,10 @@ class EventWorkerTest {
         // RetryRequested를 돌려주게 해뒀다 — 실제 SlackEventHandler는 finalAttempt일 때 RetryRequested를
         // 절대 돌려주지 않는다(계약 위반, SlackEventHandler.send()·chat()이 `&& !finalAttempt`로 막는다).
         // 이 위반을 mock으로 재현하면 RetryPolicy.scheduleRetry()가 backoffMs.get(currentRetries)를
-        // currentRetries=1(리스트 크기 1)로 호출해 IndexOutOfBoundsException을 던진다 — 아래에서 실제로
-        // 재현해 확인한다. 이 예외는 finalizeResult()가 잡지 않으므로 워커 루프 바깥의 catch(RuntimeException)
-        // 까지 전파돼 메시지가 ACK되지 않은 채 남는다(조용한 실패는 아니지만, boolean 캡처만 보던 이전
-        // 테스트는 이 실제 예외를 놓쳤다). 계약을 지키는 정상 동작(마지막 시도는 실제 종료 결과를 반환)도
-        // 함께 검증한다.
+        // currentRetries=1(리스트 크기 1)로 호출해 범위를 벗어난다 — 아래 별도 테스트에서 재현해 확인한다.
+        // **정정**: 이제 RetryPolicy에 방어적 clamp가 있어 그 호출은 더 이상 IndexOutOfBoundsException을
+        // 던지지 않는다(클램프된 백오프 값으로 계속 진행). 계약을 지키는 정상 동작(마지막 시도는 실제
+        // 종료 결과를 반환)도 함께 검증한다.
         ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
         RetryProperties oneRetry = new RetryProperties(java.util.List.of(50L), 1);
         RetryPolicy retryPolicy = new RetryPolicy(oneRetry, store);
@@ -447,21 +446,42 @@ class EventWorkerTest {
     }
 
     @Test
-    void 마지막_시도에서_계약을_어기고_재시도를_요청하면_IndexOutOfBoundsException으로_실패한다() {
-        // codex critic REVISE MINOR-4가 요구한 재현: finalAttempt=true인데도 핸들러가 RetryRequested를
-        // 돌려주면(계약 위반) RetryPolicy.scheduleRetry()의 backoffMs.get(currentRetries) 호출이
-        // currentRetries(1) >= backoffMs 크기(1)라 범위를 벗어난다. 이건 SlackEventHandler가 스스로는
-        // 절대 만들지 않는 입력이므로 프로덕션 버그는 아니다 — RetryPolicy가 이 계약을 신뢰하고 방어적으로
-        // 검사하지 않는다는 것만 기록해 둔다(mock으로만 재현 가능, 실제 핸들러 경로로는 도달 불가).
+    void 마지막_시도에서_계약을_어기고_재시도를_요청해도_방어적_clamp로_크래시하지_않는다() {
+        // codex critic REVISE MINOR-4가 요구한 재현이었던 IndexOutOfBoundsException 시나리오: finalAttempt=true인데도
+        // 핸들러가 RetryRequested를 돌려주면(계약 위반) backoffMs.get(currentRetries) 호출이 currentRetries(1)
+        // >= backoffMs 크기(1)라 범위를 벗어났었다. 이건 SlackEventHandler가 스스로는 절대 만들지 않는
+        // 입력이라 프로덕션 버그는 아니었지만, **정정**: "실제 핸들러 경로로는 도달 불가"라던 이전 서술은
+        // 부정확했다 — StartupInvariants(backoffMs.size() >= maxRetries)는 Spring 기동 경로에서만 검사되고,
+        // 이 테스트처럼 빈을 직접 생성하는 경로(단위 테스트, 또는 향후 다른 조립 경로)는 그 검사를 거치지
+        // 않는다. code-reviewer가 retry.max-retries=4·기본 backoffMs 3개 조합으로 실제 크래시를 재현해 확인했다.
+        // 그래서 RetryPolicy.scheduleRetry()에 방어적 clamp(Math.min(currentRetries, backoffMs.size()-1))를
+        // 추가했다 — 불변식이 있어도 이중 방어가 낫다. 이제 이 계약 위반 입력도 마지막 백오프 값으로 클램프돼
+        // 예외 없이 넘어간다(아래에서 확인).
         ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
         RetryProperties oneRetry = new RetryProperties(java.util.List.of(50L), 1);
         RetryPolicy retryPolicy = new RetryPolicy(oneRetry, store);
 
         assertThat(org.assertj.core.api.Assertions.catchThrowable(
                 () -> retryPolicy.scheduleRetry("W9x", "attempt", "0-1", 1, 1, 0, "llm_timeout")))
-                .as("finalAttempt에서 RetryRequested를 반환하는 건 SlackEventHandler가 지키는 계약 위반이라, "
-                        + "RetryPolicy는 이를 방어하지 않고 그대로 IndexOutOfBoundsException을 던진다")
-                .isInstanceOf(IndexOutOfBoundsException.class);
+                .as("clamp 덕에 currentRetries(1) >= backoffMs 크기(1)여도 더는 IndexOutOfBoundsException을 던지지 않는다")
+                .isNull();
+    }
+
+    @Test
+    void StartupInvariants를_우회하는_설정_조합에서도_clamp가_크래시를_막는다() {
+        // code-reviewer가 직접 재현: retry.max-retries=4인데 backoffMs가 기본값(3개) 그대로면 StartupInvariants가
+        // 기동 시점에는 막지만(retry.backoff-ms 항목 수 >= retry.max-retries), 그 검사를 거치지 않고 조립된
+        // RetryProperties(예: 이 테스트처럼 직접 생성)에서는 currentRetries=3(4번째 재시도)에서
+        // backoffMs.get(3)이 크기 3짜리 리스트의 범위를 벗어나 실제로 크래시했다. clamp는 이런 설정 실수에도
+        // 마지막 백오프 값(120000ms)으로 계속 진행하게 한다.
+        ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
+        RetryProperties misconfigured = new RetryProperties(java.util.List.of(5000L, 30000L, 120000L), 4);
+        RetryPolicy retryPolicy = new RetryPolicy(misconfigured, store);
+
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(
+                () -> retryPolicy.scheduleRetry("W9y", "attempt", "0-1", 1, 3, 0, "llm_timeout")))
+                .as("backoffMs.size()=3인데 currentRetries=3(index out of range)이어도 clamp가 마지막 값을 써 크래시하지 않는다")
+                .isNull();
     }
 
     @Test
