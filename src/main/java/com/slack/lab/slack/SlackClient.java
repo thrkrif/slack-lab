@@ -89,8 +89,11 @@ public class SlackClient {
         long buildElapsedMs = elapsedMs(start);
         long budgetMs = remainingMs - buildElapsedMs;
         if (budgetMs <= 0) {
+            // sendAsync를 아직 호출하지 않았으므로 미전송이 확실하다 — 결과 불명(Unknown)이 아니라 명확한
+            // 실패다(codex critic REVISE MINOR-3). 준비 지연은 시스템 부하 등 일시적 요인일 수 있어 재시도
+            // 가능으로 분류한다.
             log.warn("Slack 요청 준비에 예산을 모두 써서 발신하지 않음 elapsed_ms={}", buildElapsedMs);
-            return new SlackSendResult.Unknown("budget_exhausted_after_build");
+            return new SlackSendResult.Failed("budget_exhausted_after_build", true, 0);
         }
 
         CompletableFuture<HttpResponse<String>> future;
@@ -109,6 +112,9 @@ public class SlackClient {
         try {
             cancelTask = cancelTimer.schedule(() -> future.cancel(true), budgetMs, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
+            // 취소 타이머가 없으면 응답을 무기한 기다릴 위험이 있다 — 여기서 직접 취소한다(codex critic
+            // REVISE MAJOR-2). 이미 네트워크로 나갔을 수 있어 결과는 여전히 불명이다.
+            future.cancel(true);
             log.warn("Slack 발신 취소 타이머 예약 실패(결과 불명) elapsed_ms={} reason={}", elapsedMs(start),
                     e.getClass().getSimpleName());
             return new SlackSendResult.Unknown("cancel_schedule_failed:" + e.getClass().getSimpleName());

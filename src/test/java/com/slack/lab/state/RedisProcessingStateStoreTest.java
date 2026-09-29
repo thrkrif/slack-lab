@@ -125,6 +125,20 @@ class RedisProcessingStateStoreTest {
         Thread.sleep(ms);
     }
 
+    // retry_scheduler.lua를 직접 실행한다(worker.RetryScheduler는 패키지 전용이라 여기서 재사용할 수 없다).
+    private static final org.springframework.data.redis.core.script.RedisScript<Long> SCHEDULER_SCRIPT;
+    static {
+        var s = new org.springframework.data.redis.core.script.DefaultRedisScript<Long>();
+        s.setLocation(new org.springframework.core.io.ClassPathResource("state/retry_scheduler.lua"));
+        s.setResultType(Long.class);
+        SCHEDULER_SCRIPT = s;
+    }
+
+    void runSchedulerOnce() {
+        redis.execute(SCHEDULER_SCRIPT, List.of(RedisProcessingStateStore.RETRY_KEY, QUEUE.streamKey()), "0", "50",
+                "slack:preserved:", "slack:evt:");
+    }
+
     // --- 8행: 새 이벤트 선점과 정상 완료
 
     @Test
@@ -629,6 +643,97 @@ class RedisProcessingStateStoreTest {
         assertThat(store.finalizeAttempt("E35", c.attemptId(), m.streamId(), Finalization.completed("35.1", "answer")))
                 .isTrue();
         assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E35")).isFalse();
+    }
+
+    @Test
+    void 재시도_예약_부분_실패_뒤_다시_호출하면_멱등하게_완결되고_잔존물이_없다() throws InterruptedException {
+        // codex critic MAJOR-1(수정 1/2): preserve_at()이 raw를 그대로(옛 gen) 보존한 뒤 별도 HSET으로
+        // gen을 고치던 2단계 방식을, next_gen을 미리 섞은 배열을 preserve_at에 한 번에 넘기는 방식으로
+        // 바꿨다 — claim()·finalize()처럼 "처음부터 올바른 값으로 한 번에 쓴다." 각 쓰기 지점(HSET·ZADD·
+        // 상태 HSET)마다 실패를 주입한 뒤 같은 인자로 재시도(멱등)하면 next_gen으로 정상 완료되고,
+        // 보존본·DLQ·재시도 목록에 잔존물이 남지 않아야 한다(B18).
+        for (int failAfter = 1; failAfter <= 3; failAfter++) {
+            String eventId = "E40-" + failAfter;
+            Msg m = deliver(eventId);
+            Claimed c = claimOk(m);
+            long retryAt = System.currentTimeMillis() + 100;
+
+            store.injectFailureAfter(failAfter);
+            assertThatThrownBy(() -> store.scheduleRetry(eventId, c.attemptId(), m.streamId(), c.gen() + 1, retryAt,
+                    1, "llm_timeout")).hasStackTraceContaining("INJECTED_FAILURE");
+            store.injectFailureAfter(0);
+
+            // 상태 HSET(write3)까지 끝났으면(failAfter==3) 이미 RETRY_WAIT이라 같은 attempt_id로는 더 이상
+            // 재시도를 받아주지 않는다(state.lua 가드가 PROCESSING/SENDING만 허용) — 그 경우 재호출 없이도
+            // 이미 일관된 상태이므로 재확인만 한다. 그 전(failAfter<3)이면 재호출이 멱등하게 완주해야 한다.
+            if (!"RETRY_WAIT".equals(stateOf(eventId).get("state"))) {
+                assertThat(store.scheduleRetry(eventId, c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1,
+                        "llm_timeout")).as("event=%s failAfter=%d 재시도", eventId, failAfter).isTrue();
+            }
+            assertThat(stateOf(eventId)).as("event=%s failAfter=%d", eventId, failAfter)
+                    .containsEntry("state", "RETRY_WAIT").containsEntry("gen", "1");
+            assertThat(redis.opsForHash().get(RedisProcessingStateStore.preservedKey(eventId), "gen"))
+                    .as("event=%s failAfter=%d 보존본 gen", eventId, failAfter).isEqualTo("1");
+
+            // 스케줄러 개입 여부와 무관하게 gen 일관성 자체를 확인한다 — 재투입 경로는 별도 테스트가 다룬다.
+            sleep(150); // retry_at 도래
+            Msg requeued = deliver(eventId, 1, m.receivedAt());
+            Claimed second = claimOk(requeued);
+            assertThat(second.gen()).as("event=%s failAfter=%d", eventId, failAfter).isEqualTo(1);
+            store.markSending(eventId, second.attemptId());
+            assertThat(store.finalizeAttempt(eventId, second.attemptId(), requeued.streamId(),
+                    Finalization.completed("40.1", "answer"))).isTrue();
+
+            assertThat(stateOf(eventId)).as("event=%s failAfter=%d state", eventId, failAfter)
+                    .containsEntry("state", "COMPLETED");
+            assertThat(preserved(eventId)).as("event=%s failAfter=%d 보존본 잔존", eventId, failAfter).isFalse();
+            assertThat(listed(RedisProcessingStateStore.DLQ_KEY, eventId)).as("event=%s failAfter=%d DLQ 잔존",
+                    eventId, failAfter).isFalse();
+            assertThat(listed(RedisProcessingStateStore.RETRY_KEY, eventId)).as("event=%s failAfter=%d 재시도목록 잔존",
+                    eventId, failAfter).isFalse();
+        }
+    }
+
+    @Test
+    void 재시도_예약이_상태_기록_전에_끊기면_스케줄러는_재투입하지_않고_재선점이_원래_세대로_수습한다() throws InterruptedException {
+        // codex critic MAJOR-1(수정 2/2, retry_scheduler.lua): preserve(HSET+ZADD)가 상태 HSET보다 먼저
+        // 끝나는 순서(M11 "검증→보존→상태→ACK" 원칙) 자체는 유지해야 한다 — 순서를 반대로 하면 상태만
+        // RETRY_WAIT로 앞서가고 보존이 비어(또는 옛 gen인 채) 있어 영영 재투입되지 않는 정지(stall) 위험이
+        // 더 크다. 대신 스케줄러가 XADD 전에 상태 해시를 확인해, RETRY_WAIT으로 확정되기 전에는(원래 시도가
+        // 아직 PROCESSING/SENDING) 재투입을 건너뛴다 — 그렇지 않으면 아직 old_gen인 상태 해시에 next_gen
+        // 메시지가 들어가 claim()이 ANOMALY로 오판하고, 원래 시도가 old_gen으로 정상 완료된 뒤에도
+        // (완료 gen < 보존 gen이라) 청소되지 않는 고아를 남긴다.
+        Msg m = deliver("E41");
+        Claimed c = claimOk(m);
+        long retryAt = System.currentTimeMillis() - 1; // 이미 도래
+
+        store.injectFailureAfter(2); // preserve(HSET+ZADD) 끝, 상태 HSET 전 — ZADD로 목록엔 이미 올라감
+        assertThatThrownBy(() -> store.scheduleRetry("E41", c.attemptId(), m.streamId(), c.gen() + 1, retryAt, 1,
+                "llm_timeout")).hasStackTraceContaining("INJECTED_FAILURE");
+        store.injectFailureAfter(0);
+
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E41")).isTrue(); // ZADD는 이미 성공했다
+        assertThat(stateOf("E41")).containsEntry("state", "PROCESSING").containsEntry("gen", "0"); // 상태는 아직 안 바뀜
+
+        runSchedulerOnce(); // 상태가 RETRY_WAIT이 아니므로 재투입하지 않고 건너뛴다
+        assertThat(pending()).isEqualTo(1); // 원본 메시지 하나만 있다 — 잘못된 next_gen 메시지가 추가되지 않았다
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E41")).isTrue(); // 목록에서도 지우지 않고 다음 주기를 기다린다
+
+        // 원래 시도의 임대가 만료되면 재선점이 같은(old) 세대로 자연히 수습한다.
+        sleep(LEASE_MS + 100);
+        ClaimOutcome reclaim = store.claim(m.request());
+        assertThat(reclaim).isInstanceOf(Claimed.class);
+        assertThat(((Claimed) reclaim).gen()).isZero(); // next_gen이 아니라 원래 세대 그대로
+
+        store.markSending("E41", ((Claimed) reclaim).attemptId());
+        assertThat(store.finalizeAttempt("E41", ((Claimed) reclaim).attemptId(), m.streamId(),
+                Finalization.completed("41.1", "answer"))).isTrue();
+        assertThat(stateOf("E41")).containsEntry("state", "COMPLETED");
+
+        runSchedulerOnce(); // 이제 상태가 COMPLETED이니 남아있던 재시도 목록 항목을 정리(GC)한다
+        assertThat(listed(RedisProcessingStateStore.RETRY_KEY, "E41")).isFalse();
+        assertThat(preserved("E41")).isFalse();
+        assertThat(listed(RedisProcessingStateStore.DLQ_KEY, "E41")).isFalse();
     }
 
     @Test

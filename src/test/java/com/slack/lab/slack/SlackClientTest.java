@@ -57,6 +57,33 @@ class SlackClientTest {
     }
 
     @Test
+    void 취소_타이머_예약이_실패하면_이미_제출된_요청을_취소하고_결과_불명을_돌려준다() throws Exception {
+        // codex critic REVISE MAJOR-2: cancelTimer.schedule()이 try/catch 밖에 있으면, sendAsync는 이미
+        // 제출된 상태에서 예약만 실패해도 예외가 그대로 전파돼 워커가 영구 실패(DEAD+DLQ)로 오분류한다.
+        // 여기서는 취소 타이머를 강제로 종료시켜 schedule()이 RejectedExecutionException을 던지게 한다.
+        try (var stub = StubSlackServer.hangs()) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            shutdownCancelTimer(client);
+
+            long start = System.nanoTime();
+            var result = client.postMessage("C1", null, "안녕", 5_000);
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+            assertThat(result).isInstanceOf(SlackSendResult.Unknown.class);
+            assertThat(((SlackSendResult.Unknown) result).reason()).startsWith("cancel_schedule_failed");
+            // 스텁이 응답하지 않는 서버라도, 타이머가 없어 무기한 기다리지 않고 즉시 반환해야 한다 —
+            // future를 취소했다는 방증이다.
+            assertThat(elapsedMs).isLessThan(3_000);
+        }
+    }
+
+    private static void shutdownCancelTimer(SlackClient client) throws Exception {
+        var field = SlackClient.class.getDeclaredField("cancelTimer");
+        field.setAccessible(true);
+        ((java.util.concurrent.ScheduledExecutorService) field.get(client)).shutdownNow();
+    }
+
+    @Test
     void 호출_스레드가_인터럽트되면_진행중_요청도_취소되고_소켓이_닫힌다() throws Exception {
         // M4 codex 리뷰와 같은 결함: InterruptedException에서 future를 취소하지 않으면 본문 정체 요청이 남는다.
         // 스레드 종료만으로는 수정 전 구현도 통과하므로, 헤더 수신 후 인터럽트하고 서버가 소켓 종료를 감지하는지까지 본다.

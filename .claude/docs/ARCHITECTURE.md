@@ -270,13 +270,17 @@ P1의 자동 재시도·재전달 허용 기간은 최초 수신부터 24시간�
 | 최종 안내 성공 | — | `COMPLETED(kind=failure_notice)`, 정상 답변 지표에서 제외 |
 | 최종 안내 실패(재시도 가능 여부 무관) | — | `DEAD`+DLQ |
 
-**`RetryPolicy.scheduleRetry`**는 `backoff = retryAfterMsOverride > 0 ? retryAfterMsOverride : retry.backoff-ms[retries]`로 대기를 계산하고 `ProcessingStateStore.scheduleRetry(eventId, attemptId, streamId, gen+1, retryAt, retries+1, stage)`를 호출한다. 이 저장소 메서드는 `state.lua`의 새 `retry` 연산으로 구현된다 — `finalize`와 같은 **검증 → 멱등 보존(재시도 목록에 `retry_at`을 점수로) → 상태 기록(`RETRY_WAIT`) → `XACKDEL`** 순서를 지킨다. 재투입될 입력은 재시도 목록과 짝을 이루는 보존 해시(`slack:preserved:{event_id}`, DLQ·복구와 같은 해시를 재사용하고 `gen` 필드만 다음 세대로 덮어쓴다)에 그대로 실린다 — 재투입 메시지는 원래 `received_at`을 유지한다.
+**`RetryPolicy.scheduleRetry`**는 `backoff = retryAfterMsOverride > 0 ? retryAfterMsOverride : retry.backoff-ms[retries]`로 대기를 계산하고 `ProcessingStateStore.scheduleRetry(eventId, attemptId, streamId, gen+1, retryAt, retries+1, stage)`를 호출한다. 이 저장소 메서드는 `state.lua`의 새 `retry` 연산으로 구현된다 — `finalize`와 같은 **검증 → 멱등 보존(재시도 목록에 `retry_at`을 점수로) → 상태 기록(`RETRY_WAIT`) → `XACKDEL`** 순서를 지킨다. 재투입될 입력은 재시도 목록과 짝을 이루는 보존 해시(`slack:preserved:{event_id}`, DLQ·복구와 같은 해시를 재사용한다)에 그대로 실린다 — 재투입 메시지는 원래 `received_at`을 유지한다. `gen` 필드는 원본 입력을 그대로 보존하기 전에 `next_gen`으로 먼저 치환한 배열을 만들어 **한 번의 `HSET`으로** 쓴다(claim·finalize와 같은 스타일) — 옛 `gen`으로 먼저 쓰고 별도 `HSET`으로 나중에 고치던 2단계 방식은 그 사이(보존은 갱신됐는데 상태 해시는 아직 옛 `gen`인 순간)에 스케줄러가 끼어들면 `claim()`이 gen 불변식 위반으로 오판(`ANOMALY`)하는 원인이었다(codex critic REVISE MAJOR-1, 2026-09-29).
 
 **재시도 스케줄러**(`RetryScheduler`, `state/retry_scheduler.lua`)는 5초 주기로 도래한(`retry_at <= now`) 항목을 골라 **`XADD` 성공 → `ZREM`** 순서로 재투입한다. 반대 순서라면 `ZREM` 뒤 `XADD` 실패 시 입력이 재시도 목록에서도 스트림에서도 사라져 유실된다. 두 명령 사이에 실패하면 다음 주기가 같은 `event_id`를 다시 `XADD`해 스트림에 중복이 생길 수 있지만, `claim()`의 선점 결과표가 같은 세대의 재확인을 `BUSY`(처리 중)·`STALE`(이미 지난 세대)·`DONE`(이미 종료)으로 가로막아 중복 실행 자체는 발생하지 않는다.
 
+`retry` 연산 자체가 "보존 완료(ZADD로 목록에 등재) → 상태 기록(`RETRY_WAIT`)" 사이에서 중단될 수 있다(M11 원칙상 보존이 상태보다 먼저다 — 입력을 먼저 잃지 않는 게 최우선이라, 순서를 반대로 하면 상태만 `RETRY_WAIT`으로 앞서가고 보존이 비어 있어 영영 재투입되지 않는 정지 위험이 더 크다). 그래서 스케줄러는 `XADD` 전에 상태 해시를 확인한다: `RETRY_WAIT`로 확정된 것만 재투입하고, 원래 시도가 아직 `PROCESSING`/`SENDING` 중(재시도 기록이 아직 끝나지 않음)이면 이번 주기는 건너뛰어 다음 주기에 다시 본다 — 그렇지 않으면 아직 옛 `gen`인 상태 해시에 `next_gen` 메시지가 들어가 `claim()`이 `ANOMALY`로 오판한다. 이미 다른 경로로 끝난(재전달로 원래 시도가 그대로 완료·소멸한) 항목은 재투입 없이 목록에서만 지우고, 보존 해시의 `preserved_reason`이 여전히 `retry_scheduled`(다른 목적으로 덮어써지지 않음)면 함께 지워 잔존물을 남기지 않는다(codex critic REVISE MAJOR-1).
+
 **24시간 창과의 상호작용**: `claim()`의 실행 가능 판정(도래한 `RETRY_WAIT` 포함)은 24시간 초과 판정(결과표 7행)보다 뒤에 온다 — 재시도가 도래했더라도 최초 수신부터 24시간이 지났으면 실행하지 않고 `EXPIRED` → `DEAD`+DLQ로 보낸다.
 
-**1단계 후속 과제 흡수**(`docs/EXPERIMENT-LOG.md` §2.10~§2.11): `SlackClient`·`OpenAiCompatibleLlmClient` 모두 (1) `sendAsync` 제출과 취소 타이머 예약을 분리해, 제출 성공 뒤 예약만 실패해도 명확한 실패가 아니라 결과 불명/재시도 가능으로 분류하고 (2) 요청 준비(`buildRequest`)에 걸린 시간을 남은 예산에서 뺀 뒤 취소 타이머를 예약한다.
+**1단계 후속 과제 흡수**(`docs/EXPERIMENT-LOG.md` §2.10~§2.11, §10 REVISE 대응): `SlackClient`·`OpenAiCompatibleLlmClient` 모두 (1) `sendAsync` 제출과 취소 타이머 예약을 분리해, 제출 성공 뒤 예약만 실패해도 명확한 실패가 아니라 결과 불명/재시도 가능으로 분류하고 (2) 요청 준비(`buildRequest`)에 걸린 시간을 남은 예산에서 뺀 뒤 취소 타이머를 예약한다.
+
+(1)의 "제출 성공 뒤 예약만 실패" 경로는 M13 1차 구현에서는 완결되지 않았다 — codex critic REVISE(MAJOR-2)가 지적: `OpenAiCompatibleLlmClient.execute()`는 취소 타이머 예약(`schedule(...)`)이 아예 try/catch 밖에 있어 `RejectedExecutionException`이 `chat()`까지 그대로 전파돼 워커가 이를 영구 실패(`DEAD`+DLQ)로 오분류했고, `SlackClient.postMessage()`는 예약 실패를 잡아 `Unknown`은 반환했지만 이미 제출된 `future`를 취소하지 않아 타이머 없이 응답을 무기한 기다릴 위험이 남아 있었다. 두 곳 모두 고쳤다: 예약이 실패하면 즉시 `future.cancel(true)`로 취소한 뒤, LLM 쪽은 재시도 가능한 `Failed`(`cancel_schedule_failed:...`, `isRetryableFailure`에 포함)를, Slack 쪽은 `Unknown`(`cancel_schedule_failed:...`)을 돌려준다. 회귀 테스트(`OpenAiCompatibleLlmClientTest`·`SlackClientTest`)는 `cancelTimer`를 리플렉션으로 셧다운시켜 `schedule()`이 실제로 `RejectedExecutionException`을 던지게 만든 뒤 분류·소요 시간을 확인한다. 같은 라운드에서 `SlackClient`가 `sendAsync` 호출 전(요청 준비 중 예산 소진) 반환하던 `Unknown`도 `Failed(retryable=true)`로 바꿨다 — 그 시점엔 아직 발신을 시작하지 않아 미전송이 확실하기 때문이다.
 
 ---
 

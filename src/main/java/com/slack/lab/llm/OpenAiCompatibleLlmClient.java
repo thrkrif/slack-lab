@@ -106,7 +106,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     /** 연결 자체가 안 된 경우만 재시도 가능으로 분류한다(M13, PLAN "오류 분류는 클라이언트 경계에서"). */
     private static boolean isRetryableFailure(String reason) {
         return reason != null && (reason.contains("ConnectException") || reason.contains("UnknownHostException")
-                || reason.startsWith("send_submit_failed"));
+                || reason.startsWith("send_submit_failed") || reason.startsWith("cancel_schedule_failed"));
     }
 
     /** 기동 시 모델 존재를 fail-fast로 확인한다 (pitfall 8, PLAN §3 M4). 예외를 던져 기동을 막는다. */
@@ -161,11 +161,13 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
      * sendAsync + 호출별 cancel(true) 패턴을 한 곳에 모은다(M1.5 A2). 예외를 던지지 않고 분류된 결과를 돌려준다 —
      * 호출자마다 반복해서 예외 처리를 흩어두면 놓치기 쉽다(codex 리뷰: 파싱 예외 누출, interrupt 시 미취소).
      *
-     * <p>M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.10 MEDIUM): {@code sendAsync} 제출과 취소 타이머
-     * 예약을 같은 try 블록에 두면, 제출이 이미 성공한 뒤 예약만 실패해도 요청이 나갔을 수 있는데 실패로
-     * 오분류된다. 여기서는 제출 자체가 실패하는 경우만 별도로 잡는다(LlmClient에는 Unknown이 없어 재시도
-     * 가능한 실패로 본다 — 응답을 못 받았다는 점은 동일하고, LLM 호출은 Slack 발신과 달리 재시도해도
-     * 사용자에게 보이는 중복 부작용이 없다).
+     * <p>M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.10 MEDIUM, codex critic REVISE MAJOR-2로 실제
+     * 수정): {@code sendAsync} 제출과 취소 타이머 예약을 같은 try 블록에 두면, 제출이 이미 성공한 뒤 예약만
+     * 실패해도 요청이 나갔을 수 있는데 실패로 오분류된다. 제출 자체가 실패하는 경우와 취소 타이머 예약이
+     * 실패하는 경우를 각각 별도로 잡는다. 타이머 예약이 실패하면(예: cancelTimer가 종료됨) 이미 제출된
+     * future를 응답을 기다리지 않고 즉시 취소한다 — 취소 타이머가 없어 무기한 대기할 위험이 있기 때문이다.
+     * 두 경우 모두 LlmClient에는 Unknown이 없어 재시도 가능한 실패로 본다 — 응답을 못 받았다는 점은
+     * 동일하고, LLM 호출은 Slack 발신과 달리 재시도해도 사용자에게 보이는 중복 부작용이 없다.
      */
     private HttpOutcome execute(HttpRequest request, long remainingMs) {
         CompletableFuture<HttpResponse<String>> future;
@@ -174,7 +176,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         } catch (Exception e) {
             return new HttpOutcome(null, false, "send_submit_failed:" + e.getClass().getSimpleName());
         }
-        var cancelTask = cancelTimer.schedule(() -> future.cancel(true), remainingMs, TimeUnit.MILLISECONDS);
+        java.util.concurrent.ScheduledFuture<?> cancelTask;
+        try {
+            cancelTask = cancelTimer.schedule(() -> future.cancel(true), remainingMs, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            future.cancel(true);
+            log.warn("LLM 취소 타이머 예약 실패(재시도 가능) reason={}", e.getClass().getSimpleName());
+            return new HttpOutcome(null, false, "cancel_schedule_failed:" + e.getClass().getSimpleName());
+        }
         try {
             HttpResponse<String> response = future.get(remainingMs + 500, TimeUnit.MILLISECONDS);
             return new HttpOutcome(response, false, null);

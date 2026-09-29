@@ -566,8 +566,27 @@ MINOR 12건(동시성 상한을 깨는 reclaim 처리, `experiment.dedup-enabled
 
 **오류 분류 구현**: `LlmResult.Failed`·`SlackSendResult.Failed`에 `retryable` 필드를 추가했다. LLM은 연결 실패(`ConnectException`/`UnknownHostException`)·5xx·`TimedOut`을 재시도 가능으로, 4xx·직렬화/파싱 실패를 영구로 분류한다(`OpenAiCompatibleLlmClientTest`로 5xx→`true`, 4xx→`false`, 연결 실패→`true` 확인). Slack은 연결 실패·429를 재시도 가능으로, `ok:false`의 인증/권한/채널 오류를 영구로 분류하고 429는 `Retry-After` 헤더를 ms로 파싱해 `SlackSendResult.Failed.retryAfterMs`에 싣는다(`SlackClientTest`로 헤더 없을 때 0 확인 — 스텁이 헤더를 안 보내 값 있는 경우는 미검증, 실제 Slack 429 응답의 헤더 형식은 운영 중 확인 필요).
 
-**1단계 후속 과제 흡수**(§2.10 MEDIUM·§2.11 LOW): `SlackClient.postMessage`·`OpenAiCompatibleLlmClient.execute`에서 (1) `sendAsync` 제출과 취소 타이머 예약을 별도 try로 분리해, 예약만 실패해도 결과 불명/재시도 가능으로 분류하도록 수정 (2) `buildRequest` 소요 시간을 남은 예산에서 뺀 뒤 취소 타이머를 그 값으로 예약하도록 수정. 두 경로 모두 실제로 예약이 실패하는 조건(예: `cancelTimer` 셧다운)을 재현하는 회귀 테스트는 만들지 않았다 — 트리거 조건 자체가 드물고(스레드풀 고갈), 기존 M6 스타일대로 수동 재현이 어려운 방어적 수정으로 남겨둔다(문서화된 위험 인지, MINOR급).
+**1단계 후속 과제 흡수**(§2.10 MEDIUM·§2.11 LOW): `SlackClient.postMessage`·`OpenAiCompatibleLlmClient.execute`에서 (1) `sendAsync` 제출과 취소 타이머 예약을 별도 try로 분리해, 예약만 실패해도 결과 불명/재시도 가능으로 분류하도록 수정 (2) `buildRequest` 소요 시간을 남은 예산에서 뺀 뒤 취소 타이머를 그 값으로 예약하도록 수정. ~~두 경로 모두 실제로 예약이 실패하는 조건(예: `cancelTimer` 셧다운)을 재현하는 회귀 테스트는 만들지 않았다 — 트리거 조건 자체가 드물고(스레드풀 고갈), 기존 M6 스타일대로 수동 재현이 어려운 방어적 수정으로 남겨둔다(문서화된 위험 인지, MINOR급).~~ **정정(§10.1)**: 이 문단의 "수정" 주장이 실제와 달랐다 — `OpenAiCompatibleLlmClient.execute()`는 `schedule()` 호출이 애초에 try/catch 밖에 있어 예약 실패 시 예외가 그대로 전파됐고, `SlackClient.postMessage()`는 예약 실패를 잡긴 했지만 `future.cancel(true)`를 부르지 않았다. codex critic REVISE(MAJOR-2, 2026-09-29)가 지적해 실제로 고쳤다. 아래 §10.1 참고.
 
-**설계 판단**: `RETRY_WAIT`으로 예약할 때 재투입 입력을 DLQ·복구와 같은 `slack:preserved:{event_id}` 해시에 재사용하고 `gen` 필드만 덮어썼다 — 이벤트당 "지금 보존 중인 입력"은 항상 하나뿐이라는 M11의 불변식(보존 키가 event_id로만 채번됨)을 그대로 따른 것이다. 재시도 스케줄러는 `state.lua`와 별도 파일(`retry_scheduler.lua`)로 뒀다 — 여러 `event_id`에 걸쳐 반복하는 배치 연산이라 단건 CAS를 다루는 `state.lua`의 KEYS 규약(이벤트별 5키)과 결이 달라, 섞으면 오히려 `state.lua`의 "검증→보존→상태→ACK" 불변식 서술이 흐려진다고 판단했다.
+**설계 판단**: `RETRY_WAIT`으로 예약할 때 재투입 입력을 DLQ·복구와 같은 `slack:preserved:{event_id}` 해시에 재사용하고 `gen` 필드만 덮어썼다 — 이벤트당 "지금 보존 중인 입력"은 항상 하나뿐이라는 M11의 불변식(보존 키가 event_id로만 채번됨)을 그대로 따른 것이다. 재시도 스케줄러는 `state.lua`와 별도 파일(`retry_scheduler.lua`)로 뒀다 — 여러 `event_id`에 걸쳐 반복하는 배치 연산이라 단건 CAS를 다루는 `state.lua`의 KEYS 규약(이벤트별 5키)과 결이 달라, 섞으면 오히려 `state.lua`의 "검증→보존→상태→ACK" 불변식 서술이 흐려진다고 판단했다. **정정(§10.1)**: 이 "gen 필드만 덮어썼다"는 별도의 후속 `HSET`으로 이뤄져, 그 직후 실패하면 보존본과 상태 해시의 gen이 어긋나는 창(MAJOR-1)이 있었다.
 
-전체 재빌드 확인: `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL, 156 tests.
+전체 재빌드 확인(1차, REVISE 전): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL, 156 tests.
+
+### 10.1 codex critic REVISE 대응 (2026-09-29, `omc ask codex --agent-prompt critic`, MAJOR 2건·MINOR 2건)
+
+PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medium) 검토가 REVISE 판정을 내며 재현 방법까지 제시했다. 네 건 모두 확인 후 수정했다.
+
+| 판정 | 위치 | 문제 | 수정 |
+|---|---|---|---|
+| MAJOR-1 | `state/state.lua` `retry` op | `preserve_at()`이 옛 `gen`으로 먼저 보존한 뒤 별도 `HSET`으로 `gen`만 고쳐, 그 사이 실패하면 보존본(next_gen)·상태 해시(old_gen)가 어긋난다. 스케줄러가 그 보존본을 그대로 재투입하면 `claim()`이 `ANOMALY`(DLQ)로 오판하고, 원래 시도가 old_gen으로 정상 완료돼도(완료 gen < 보존 gen이라) 청소되지 않는 고아가 남는다 | `preserve_at()`에 넘기기 전에 `raw`의 `gen` 필드를 `next_gen`으로 치환한 배열을 만들어 **한 번의 `HSET`**으로 끝낸다(claim·finalize 스타일). 그래도 "보존 완료 → 상태 기록" 사이의 창 자체는 원칙상(입력 유실 방지 우선) 남으므로, `retry_scheduler.lua`가 `XADD` 전에 상태 해시를 확인해 `RETRY_WAIT`로 확정된 것만 재투입하도록 방어선을 추가했다. 이미 다른 경로로 끝난 항목은 재투입 없이 목록·보존 해시(소유권 확인 후)를 정리한다 |
+| MAJOR-2 | `OpenAiCompatibleLlmClient.execute()`·`SlackClient.postMessage()` | 취소 타이머 예약(`cancelTimer.schedule(...)`)이 실패하면(`RejectedExecutionException`) LLM 쪽은 예외가 `chat()`까지 전파돼 워커가 영구 실패(DEAD+DLQ)로 오분류했고, Slack 쪽은 `Unknown`은 반환했지만 이미 제출된 `future`를 취소하지 않았다 | `schedule()` 호출을 try/catch로 감싸고, 실패하면 `future.cancel(true)`로 즉시 취소한 뒤 LLM은 재시도 가능한 `Failed`(`cancel_schedule_failed:...`)를, Slack은 `Unknown`(`cancel_schedule_failed:...`)을 반환한다 |
+| MINOR-3 | `SlackClient.postMessage()` | 요청 준비(`buildRequest`) 뒤 예산이 소진되면(`sendAsync` 호출 전) `Unknown`을 반환했다 — 아직 발신을 시작하지 않아 미전송이 확실한데도 복구 대상(`Unknown`)으로 분류됨 | `Failed("budget_exhausted_after_build", retryable=true, 0)`으로 변경 |
+| MINOR-4 | `EventWorkerTest.finalAttempt는_...` | 마지막 시도(`finalAttempt=true`)에서도 mock이 `RetryRequested`를 반환하게 둬, boolean 캡처만 검사하고 지나갔다. 실제로는 `RetryPolicy.scheduleRetry()`의 `backoffMs.get(currentRetries)`가 `currentRetries(1) >= size(1)`라 `IndexOutOfBoundsException`을 던진다(별도 재현 테스트로 확인) — 다만 `SlackEventHandler`는 `finalAttempt`일 때 `RetryRequested`를 절대 반환하지 않으므로(`send()`·`chat()`이 `&& !finalAttempt`로 막음) 실제 핸들러 경로로는 도달하지 않는 mock 전용 계약 위반이다. 프로덕션 결함은 아니다 — `RetryPolicy`가 이 계약을 방어적으로 검사하지 않는다는 점만 기록해 둔다 | 마지막 시도는 실제 종료 결과(`Delivered`)를 반환하도록 mock을 고치고 `COMPLETED`·ACK까지 확인하도록 보강. 계약 위반을 재현하는 별도 테스트(`마지막_시도에서_계약을_어기고_...`)를 추가해 `IndexOutOfBoundsException`을 직접 확인 |
+
+새 회귀 테스트: `RedisProcessingStateStoreTest`에 2건(`재시도_예약_부분_실패_뒤_다시_호출하면_멱등하게_완결되고_잔존물이_없다` — `retry` op의 각 쓰기 지점마다 `fail_after` 주입 후 재호출/재선점을 거쳐도 gen 일치·잔존 0 확인, `재시도_예약이_상태_기록_전에_끊기면_스케줄러는_재투입하지_않고_재선점이_원래_세대로_수습한다` — 보존은 끝났는데 상태 기록 전인 상태에서 스케줄러가 돌아도 재투입하지 않음을 확인), `OpenAiCompatibleLlmClientTest`·`SlackClientTest`에 각 1건(`cancelTimer`를 리플렉션으로 셧다운시켜 `schedule()`이 `RejectedExecutionException`을 던지게 만든 뒤 분류·응답 시간 확인), `EventWorkerTest`에 1건 추가(계약 위반 시 `IndexOutOfBoundsException` 재현).
+
+**설계 판단(MAJOR-1 관련)**: 보존(HSET+ZADD)이 상태 기록보다 먼저 끝나는 순서 자체는 그대로 뒀다 — 반대로 하면(상태 먼저) 상태만 `RETRY_WAIT`으로 앞서가고 보존이 비어(또는 옛 gen인 채) 있어 영영 재투입되지 않는 정지(stall) 위험이 더 크다고 판단했다(순서를 뒤집는 대신 스케줄러 쪽에 상태 확인을 추가). `retry_scheduler.lua`의 "이미 끝난 항목 정리" 분기가 보존 해시까지 지우는 조건은 `preserved_reason == 'retry_scheduled'`로 좁혔다 — DLQ·복구용으로 이미 덮어써진 해시를 실수로 지우지 않기 위해서다.
+
+**알려진 한계(수정하지 않음, MINOR로 남김)**: `SlackClient`의 "요청 준비 중 예산 소진" 경로(`budget_exhausted_after_build`)는 타이밍 의존적이라 회귀 테스트를 만들지 않았다(스텁으로 `buildRequest` 지연을 안정적으로 재현하기 어렵다). 분류 변경(Unknown→Failed) 자체는 기존 스위치문이 `retryable` 플래그를 그대로 소비하므로 코드 경로는 검증됐다.
+
+전체 재빌드 확인(REVISE 후): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL. `./gradlew test --rerun`도 별도로 통과 확인.

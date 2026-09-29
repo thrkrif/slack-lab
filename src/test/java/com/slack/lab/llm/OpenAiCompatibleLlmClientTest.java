@@ -161,6 +161,35 @@ class OpenAiCompatibleLlmClientTest {
     }
 
     @Test
+    void 취소_타이머_예약이_실패하면_이미_제출된_요청을_취소하고_재시도_가능한_실패를_돌려준다() throws Exception {
+        // codex critic REVISE MAJOR-2: cancelTimer.schedule()이 try/catch 밖에 있으면, sendAsync는 이미
+        // 제출된 상태에서 예약만 실패해도 예외가 chat()까지 그대로 전파돼 워커가 영구 실패(DEAD+DLQ)로
+        // 오분류한다(M13이 막으려던 바로 그 상황). 취소 타이머를 강제로 종료시켜 schedule()이
+        // RejectedExecutionException을 던지게 한다.
+        try (var stub = StubOpenAiServer.chatHangs()) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            shutdownCancelTimer(client);
+
+            long start = System.nanoTime();
+            var result = client.chat("안녕", 5_000);
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+            assertThat(result).isInstanceOf(LlmResult.Failed.class);
+            assertThat(((LlmResult.Failed) result).retryable()).isTrue();
+            assertThat(((LlmResult.Failed) result).reason()).startsWith("cancel_schedule_failed");
+            // 스텁이 응답하지 않는(수 초 sleep) 서버라도, 타이머가 없어 무기한 기다리지 않고 즉시 반환해야
+            // 한다 — future를 취소했다는 방증이다.
+            assertThat(elapsedMs).isLessThan(3_000);
+        }
+    }
+
+    private static void shutdownCancelTimer(OpenAiCompatibleLlmClient client) throws Exception {
+        var field = OpenAiCompatibleLlmClient.class.getDeclaredField("cancelTimer");
+        field.setAccessible(true);
+        ((java.util.concurrent.ScheduledExecutorService) field.get(client)).shutdownNow();
+    }
+
+    @Test
     void content가_빈_문자열이면_실패로_분류한다() throws Exception {
         String body = """
                 {"choices":[{"message":{"content":""}}]}""";

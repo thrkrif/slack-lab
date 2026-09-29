@@ -397,9 +397,19 @@ class EventWorkerTest {
     }
 
     @Test
-    void finalAttempt는_retries가_max_retries에_도달했을_때_true로_전달된다() {
+    void finalAttempt는_retries가_max_retries에_도달했을_때_true로_전달되고_마지막_시도는_종료로_이어진다() {
         // maxRetries=1인 정책으로, 최초 시도(retries=0)에는 false를, 재시도 뒤(retries=1)에는 true를
         // 핸들러에 넘겨야 한다 — 재시도를 계속할지는 핸들러(SlackEventHandler)가 이 값으로 판단한다(M13).
+        //
+        // codex critic REVISE MINOR-4: 이전에는 마지막 시도(finalAttempt=true)에서도 mock이 계속
+        // RetryRequested를 돌려주게 해뒀다 — 실제 SlackEventHandler는 finalAttempt일 때 RetryRequested를
+        // 절대 돌려주지 않는다(계약 위반, SlackEventHandler.send()·chat()이 `&& !finalAttempt`로 막는다).
+        // 이 위반을 mock으로 재현하면 RetryPolicy.scheduleRetry()가 backoffMs.get(currentRetries)를
+        // currentRetries=1(리스트 크기 1)로 호출해 IndexOutOfBoundsException을 던진다 — 아래에서 실제로
+        // 재현해 확인한다. 이 예외는 finalizeResult()가 잡지 않으므로 워커 루프 바깥의 catch(RuntimeException)
+        // 까지 전파돼 메시지가 ACK되지 않은 채 남는다(조용한 실패는 아니지만, boolean 캡처만 보던 이전
+        // 테스트는 이 실제 예외를 놓쳤다). 계약을 지키는 정상 동작(마지막 시도는 실제 종료 결과를 반환)도
+        // 함께 검증한다.
         ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
         RetryProperties oneRetry = new RetryProperties(java.util.List.of(50L), 1);
         RetryPolicy retryPolicy = new RetryPolicy(oneRetry, store);
@@ -408,7 +418,13 @@ class EventWorkerTest {
         SlackEventHandler handler = mock(SlackEventHandler.class);
         org.mockito.ArgumentCaptor<Boolean> finalAttemptCaptor = org.mockito.ArgumentCaptor.forClass(Boolean.class);
         when(handler.handle(any(SlackMessageEvent.class), any(AttemptHandle.class), finalAttemptCaptor.capture()))
-                .thenReturn(new HandlingResult.RetryRequested("llm_timeout", 0));
+                .thenReturn(new HandlingResult.RetryRequested("llm_timeout", 0))
+                .thenAnswer(inv -> {
+                    // 계약대로: 마지막 시도는 재시도를 요청하지 않고 실제 종료 결과를 돌려준다.
+                    AttemptHandle attempt = inv.getArgument(1);
+                    attempt.markSending();
+                    return new HandlingResult.Delivered("answer", "500.1");
+                });
 
         EventWorker w = new EventWorker(redis, QUEUE, WORKER_PROPS, STATE, store, handler, retryPolicy);
         w.start();
@@ -417,11 +433,35 @@ class EventWorkerTest {
 
         awaitTrue(() -> "RETRY_WAIT".equals(stateOf("W9").get("state")) && "1".equals(stateOf("W9").get("retries")));
         sleep(120); // 예약된 재시도(50ms)가 도래할 시간을 준다
-        scheduler.runOnce(); // 재투입 — 워커가 두 번째 시도를 집는다
+        scheduler.runOnce(); // 재투입 — 워커가 두 번째(마지막) 시도를 집는다
 
         awaitTrue(() -> finalAttemptCaptor.getAllValues().size() >= 2);
         assertThat(finalAttemptCaptor.getAllValues().get(0)).isFalse(); // retries=0
         assertThat(finalAttemptCaptor.getAllValues().get(1)).isTrue(); // retries=1 == maxRetries
+
+        // 계약을 지키는 마지막 시도는 정상 종료(COMPLETED)로 이어지고 ACK된다 — 재시도로 되돌아가지 않는다.
+        awaitTrue(() -> "COMPLETED".equals(stateOf("W9").get("state")));
+        awaitTrue(() -> pending() == 0);
+        assertThat(stateOf("W9")).containsEntry("slack_ts", "500.1");
+        verify(handler, times(2)).handle(any(SlackMessageEvent.class), any(AttemptHandle.class), anyBoolean());
+    }
+
+    @Test
+    void 마지막_시도에서_계약을_어기고_재시도를_요청하면_IndexOutOfBoundsException으로_실패한다() {
+        // codex critic REVISE MINOR-4가 요구한 재현: finalAttempt=true인데도 핸들러가 RetryRequested를
+        // 돌려주면(계약 위반) RetryPolicy.scheduleRetry()의 backoffMs.get(currentRetries) 호출이
+        // currentRetries(1) >= backoffMs 크기(1)라 범위를 벗어난다. 이건 SlackEventHandler가 스스로는
+        // 절대 만들지 않는 입력이므로 프로덕션 버그는 아니다 — RetryPolicy가 이 계약을 신뢰하고 방어적으로
+        // 검사하지 않는다는 것만 기록해 둔다(mock으로만 재현 가능, 실제 핸들러 경로로는 도달 불가).
+        ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
+        RetryProperties oneRetry = new RetryProperties(java.util.List.of(50L), 1);
+        RetryPolicy retryPolicy = new RetryPolicy(oneRetry, store);
+
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(
+                () -> retryPolicy.scheduleRetry("W9x", "attempt", "0-1", 1, 1, 0, "llm_timeout")))
+                .as("finalAttempt에서 RetryRequested를 반환하는 건 SlackEventHandler가 지키는 계약 위반이라, "
+                        + "RetryPolicy는 이를 방어하지 않고 그대로 IndexOutOfBoundsException을 던진다")
+                .isInstanceOf(IndexOutOfBoundsException.class);
     }
 
     @Test

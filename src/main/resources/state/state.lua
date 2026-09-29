@@ -290,9 +290,29 @@ if op == 'retry' then
   if raw ~= nil and not matches_event(raw) then return 0 end
   if raw == nil then return 0 end -- 재투입할 입력이 없으면 보존할 수 없다 — 아무것도 쓰지 않고 거절
 
-  preserve_at(raw, KEYS[6], 'retry_scheduled', tonumber(ARGV[8]))
-  -- preserve_at()이 옛 gen을 그대로 복사해 두므로, 스케줄러가 재투입할 새 세대로 덮어쓴다.
-  write('HSET', KEYS[3], 'gen', ARGV[7])
+  -- raw는 옛 세대(gen)를 담고 있다. "옛 gen으로 먼저 보존한 뒤 별도 HSET으로 고쳐 쓰는" 2단계 방식은
+  -- 그 사이(보존은 next_gen으로 갱신됐는데 상태 해시는 아직 old_gen인 순간)에 실패하면 보존본·상태
+  -- 해시의 gen이 서로 어긋난 채 남는다 — 스케줄러가 이 보존본을 그대로 재투입해 claim()이 ANOMALY로
+  -- 오판하고, 완료 후에도 cleanup이 "완료 gen < 보존 gen"이라 청소하지 못해 고아가 남는다(codex REVISE
+  -- MAJOR-1). claim·finalize처럼 처음부터 올바른 값으로 한 번에 쓴다: raw를 순회해 gen 필드만
+  -- next_gen으로 치환한 배열을 만들어 preserve_at에 넘긴다(단일 HSET).
+  local overridden = {}
+  local gen_written = false
+  for i = 1, #raw, 2 do
+    overridden[#overridden + 1] = raw[i]
+    if raw[i] == 'gen' then
+      overridden[#overridden + 1] = ARGV[7]
+      gen_written = true
+    else
+      overridden[#overridden + 1] = raw[i + 1]
+    end
+  end
+  if not gen_written then
+    overridden[#overridden + 1] = 'gen'
+    overridden[#overridden + 1] = ARGV[7]
+  end
+
+  preserve_at(overridden, KEYS[6], 'retry_scheduled', tonumber(ARGV[8]))
   write('HSET', KEYS[1], 'state', 'RETRY_WAIT', 'gen', ARGV[7], 'retry_at', ARGV[8], 'retries', ARGV[9],
     'stage', ARGV[10])
   write('PERSIST', KEYS[1])

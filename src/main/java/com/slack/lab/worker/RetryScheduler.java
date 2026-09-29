@@ -79,7 +79,7 @@ public class RetryScheduler {
     void runOnce() {
         try {
             Long requeued = redis.execute(SCRIPT, keys(), String.valueOf(failAfter), String.valueOf(BATCH_LIMIT),
-                    "slack:preserved:");
+                    "slack:preserved:", "slack:evt:");
             if (requeued != null && requeued > 0) {
                 log.info("재시도 재투입 count={}", requeued);
             }
