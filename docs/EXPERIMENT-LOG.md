@@ -505,3 +505,45 @@ Slack API 실제 발신(네트워크 왕복 300~500ms)·ngrok 왕복 지연이 �
 | code-reviewer(대체) | REVISE(MAJOR 1건: `cleanup_preserved_if_same_gen`이 "다르면 보존"이라 M14 reprocess(gen+1) 정상 완료 때 옛 세대(gen) 보존본을 못 지움 — B18 위반. MINOR 6건은 문서화 후 보류) → MAJOR 1건 반영: 비교를 "미래 세대만 보존"(`pg > gen`)으로 바꾸고 회귀 테스트 추가(총 131건) |
 
 **핵심 교훈**: Lua 스크립트는 원자적이지만 롤백하지 않는다. "검증 없이 쓰기부터" 순서로 짜면 중간 실패가 데이터를 조용히 잃는다 — 이 프로젝트에서 3회 연속 발견된 패턴(부분 보존 유실 2건, 정리 유실 1건)이었다. 보존 키를 event_id로만 채번한 것도 문제였다 — 같은 이벤트의 다른 세대가 남긴 데이터를 서로 지울 수 있었다. gen 필드로 소유권을 재확인하고 나서야 안전해졌다.
+
+## 9. 2단계 M12 수신–큐–워커 분리 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 132건, 실패 0 (`EventPublisherTest`·`EventWorkerTest` 신규, `EventDeduplicatorTest` 제거) |
+| 큐 경유 왕복 (**정정**: 실제 멘션 아님) | 호스트 `bootRun`(`app.role` 기본값 `all`) + `docker start slack-lab-redis-1`, 기존 ngrok 터널(`http://localhost:8080` 대상, 이미 Slack Request URL로 등록됨) 그대로 사용. **서명은 진짜이지만 Slack이 아니라 이 세션이 직접 만든 `event_callback`을** `SLACK_TEST_CHANNEL`로 POST → **200(큐 발행 확인, `enqueue_ms=38`)** → 워커가 즉시 소비 → LLM 성공(`elapsed_ms=1251`) → **Slack 발신 성공** → `Delivered` 기록. 발행→소비→발신 경로 자체는 검증됐으나 **Slack→ngrok→수신 구간(사람이 실제로 멘션하는 경로)은 아직 검증되지 않았다** — 사람 조작이 필요해 멈추는 지점이다(AGENTS.md Git 규칙). 로그 전 구간 확인, 응답 텍스트 원본은 마스킹 |
+| B1(503 유도) | `SlackEventControllerTest`: `EventPublisher`가 `Failed`/`Unconfirmed`를 반환하면 503(컨트롤러 단위 검증). **Redis를 실제로 끊어 3초 안에 503이 오는지는 별도 실측 필요**(MAJOR-2, 아래 참고) |
+| B3(수신 kill 후 워커 처리)·B4(워커 kill 후 재처리) | **미검증.** PLAN M12 완료 조건에 있으나 이번 세션에서 실측하지 못했다 |
+| B2(역할별 빈) | `AppRoleContextTest`: `receiver`엔 핸들러·워커 없음, `worker`엔 컨트롤러·발행자 없음 (M12 전엔 `RedisBusyException`으로 실패하던 버그를 여기서 발견·수정, 아래 참고) |
+| B10(ACK 보류) | `EventWorkerTest`: `Rejected`·`finalizeAttempt` 예외 시나리오 모두 ACK 없이 pending에 메시지가 남음을 실측(Testcontainers Redis) |
+| Unknown/Rejected 재발신 0회 | `EventWorkerTest`: 각각 핸들러 재호출 0회(300~500ms 대기 후 `verify(times(1))`)로 확인 |
+| finalize 경계 kill | `EventWorkerTest`: `ProcessingStateStore.finalizeAttempt`가 예외를 던지는 래퍼로 시뮬레이션 → ACK 안 함, 스트림에 메시지 그대로 존재(입력 유실 없음) |
+
+**버그 2건 발견·수정**:
+1. `EventWorker.ensureGroupExists()`가 `BUSYGROUP` 재생성 예외를 `e.getMessage()`로만 검사했는데, Spring이 Lettuce 예외를 `RedisSystemException("Error in execution")`으로 감싸 원본 메시지가 `getCause()`에만 남는다 — `AppRoleContextTest`의 `worker`/`all` 역할 테스트가 매번 실패했다. cause 체인을 순회하도록 수정.
+2. `EventPublisher.confirmDurable()`이 `StringRedisTemplate.execute(RedisCallback)`의 기본 `ByteArrayOutput`으로 `WAITAOF`의 정수 배열 응답을 디코딩하려다 `UnsupportedOperationException`을 던졌다 — **실서비스에서 발행이 항상 `Unconfirmed`(503)로만 끝나고 `Enqueued`(200)에 도달할 수 없는 B1 위반**이었다(테스트가 없어 그동안 발견되지 못함). `LettuceConnection.execute(String, CommandOutput, byte[]...)`에 `IntegerListOutput`을 명시해 우회.
+
+**교훈**: 두 버그 모두 "빌드가 통과하니 됐다"로는 안 잡혔다 — 하나는 실제 Redis 없이는 재현되지 않는 예외 래핑 차이였고, 다른 하나는 성공 경로를 Testcontainers 실제 Redis로 한 번도 검증하지 않아서 숨어 있었다. 규칙 5(외부 왕복 성공 기준)가 M11까지는 상태 저장소 자체를, M12부터는 발행·소비 경로까지 요구하는 이유다.
+
+**codex critic 시도**: PR #22에 codex critic(`model=gpt-6-sol`, `effort=medium`)을 요청했으나 **usage limit으로 실패**(오전 7:30 재시도 가능). M11 §8 선례대로 code-reviewer 에이전트로 대체.
+
+**code-reviewer(대체) 1회전 — REVISE**: MAJOR 3건.
+1. `renew()`(임대 갱신)를 프로덕션 코드 어디서도 호출하지 않음 — `grep -rn "\.renew(" src/main/java` 0건으로 직접 재확인. 임대 30초, LLM 기한 50초라 30초 넘는 처리는 전부 `Rejected`가 되고 약 100초마다 reclaimer가 재선점해 무한 반복(조용한 실패). ARCHITECTURE §3.2가 설계한 "10초마다 갱신"이 구현되지 않은 상태였다.
+2. Redis 명령에 타임아웃이 없음(`spring.data.redis.timeout` 미설정) — Redis가 멎으면 Lettuce 기본 60초 동안 응답이 없어 B1(3초 안에 503)을 만족하지 못함.
+3. 위 §9 "실제 멘션 왕복" 표현이 과장됨(합성 서명 요청이었다) + PLAN M12 완료 조건의 B3·B4 미검증. 정정은 위 표에 반영했다.
+MINOR 12건(동시성 상한을 깨는 reclaim 처리, `experiment.dedup-enabled` 잔재, WAITAOF와 XADD의 연결 공유 암묵 의존 등)은 문서화 후 M13·M17로 이월하거나 이번에 함께 처리.
+
+**반영**:
+- **MAJOR-1(임대 갱신)**: `EventWorker`가 처리 시작 직후부터 `state.renew-ms`(100~10000ms) 주기로 별도 스케줄러에서 `store.renew()`를 호출하고, 핸들러 종료 시 취소하도록 구현. 갱신 실패(소유권 상실) 시 `WorkerAttemptHandle`이 플래그를 기억해 이후 `markSending()`을 저장소 호출 없이 즉시 거절. 회귀 테스트(`EventWorkerTest`, `lease=400ms·renew=100ms`, 핸들러가 `markSending()` 전 600ms 대기): **수정 전엔 생성자 시그니처 자체가 달라 컴파일조차 안 됨**(갱신 훅이 없었다는 구조적 증거) → 수정 후 `COMPLETED`로 정상 종료, 테스트 8/8 통과(`time=0.676s`로 600ms 대기 실제 확인).
+- **MAJOR-2(Redis 타임아웃)**: `spring.data.redis.timeout=1s` 추가, `EventWorker`의 블로킹 `XREADGROUP` `block`을 900ms로 조정(1s 커맨드 타임아웃과 충돌 방지). 실측(`docker stop/start slack-lab-redis-1`, 서명 유효한 curl):
+
+  | 상태 | HTTP | 소요 |
+  |---|---|---|
+  | Redis 정상 | 200 | 0.142s |
+  | Redis 정지 직후 | **503** | **0.0196s** |
+  | Redis 재기동 후 | 200 | 0.0235s |
+
+  Redis가 멎으면 기존 TCP 연결이 즉시 끊겨 Lettuce가 명령 버퍼링 없이 바로 에러를 내, 실제로는 1초 타임아웃보다 훨씬 빠르게(약 20ms) 503이 나왔다(타임아웃 설정은 이 경로가 아닌 "연결은 살아있는데 응답이 없는" 경우의 안전망).
+- **MAJOR-3(문서 정정)**: 위 표에 반영(합성 서명 요청으로 정정). 사용자가 실제로 Slack에서 봇을 멘션했으나 그 시점엔 호스트 `bootRun`이 꺼져 있어(이전 세션 검증 후 종료한 채로 둠) 응답이 없었다 — 재전송 창이 지난 뒤 발견해 재현이 안 되므로, 서버를 다시 켜고 동일한 방식(서명 유효한 합성 요청)으로 왕복을 재확인했다: 200(`enqueue_ms=27`) → 워커 소비 → LLM 성공(`elapsed_ms=594`) → **Slack 발신 성공** → `Delivered`(총 소요 1108ms). **B3(수신 kill)·B4(워커 kill)는 `app.role=all` 한 프로세스로는 재현할 수 없고(수신·워커가 분리된 프로세스여야 함) 별도 역할 분리 기동이 필요해, M17(다중 워커) 검증으로 미룬다.**
+- **MINOR-9**(`experiment.dedup-enabled` 잔재 제거)도 함께 반영.
+- 전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.

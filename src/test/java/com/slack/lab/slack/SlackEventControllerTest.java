@@ -1,7 +1,7 @@
 package com.slack.lab.slack;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -10,12 +10,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import com.slack.lab.event.AttemptHandle;
-import com.slack.lab.event.ClaimResult;
-import com.slack.lab.event.EventDeduplicator;
-import com.slack.lab.event.HandlingResult;
-import com.slack.lab.event.ProcessingState;
-import com.slack.lab.event.SlackEventHandler;
+import com.slack.lab.queue.EventPublisher;
+import com.slack.lab.queue.PublishResult;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -25,15 +21,19 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
+/**
+ * M12부터 컨트롤러는 발행만 한다 — 핸들러·저장소는 워커 쪽이라 여기서 목킹하지 않는다(B2).
+ * {@link EventPublisher}만 목으로 두고, 발행 결과별 HTTP 응답(200/503)을 확인한다.
+ */
 @WebMvcTest(SlackEventController.class)
-@Import(SlackSignatureVerifier.class)
+@Import({SlackSignatureVerifier.class, AckLoggingFilter.class})
 @EnableConfigurationProperties(SlackProperties.class)
 @TestPropertySource(properties = {"slack.signing-secret=ctrl-secret", "slack.bot-token=xoxb-test", "llm.model=m"})
 class SlackEventControllerTest {
@@ -42,10 +42,7 @@ class SlackEventControllerTest {
     MockMvc mvc;
 
     @MockitoBean
-    EventDeduplicator deduplicator;
-
-    @MockitoBean
-    SlackEventHandler handler;
+    EventPublisher publisher;
 
     static MockHttpServletRequestBuilder signed(String body) throws Exception {
         String ts = String.valueOf(Instant.now().getEpochSecond());
@@ -90,12 +87,11 @@ class SlackEventControllerTest {
     }
 
     @Test
-    void event_callback이_아닌_다른_type은_200으로_무시하고_핸들러를_호출하지_않는다() throws Exception {
+    void event_callback이_아닌_다른_type은_200으로_무시하고_발행하지_않는다() throws Exception {
         // app_uninstalled 등 처리 대상이 아닌 콜백까지 400으로 거절하면 Slack 재전송만 늘어난다.
         mvc.perform(signed("{\"type\":\"app_uninstalled\"}")).andExpect(status().isOk())
                 .andExpect(content().string(""));
-        verify(deduplicator, never()).claim(any());
-        verify(handler, never()).handle(any(), any());
+        verify(publisher, never()).publish(any(), anyLong(), any());
     }
 
     @Test
@@ -106,41 +102,52 @@ class SlackEventControllerTest {
     }
 
     @Test
-    void bot_id가_있으면_무시하고_핸들러를_호출하지_않는다() throws Exception {
-        // A5: bot_id·subtype 있는 이벤트는 200, LLM·발신 호출 0회(=핸들러 미호출로 보장)
+    void bot_id가_있으면_무시하고_발행하지_않는다() throws Exception {
+        // A5: bot_id·subtype 있는 이벤트는 200, LLM·발신 호출 0회(발행하지 않으므로 워커도 못 본다)
         String body = """
                 {"type":"event_callback","event_id":"Ev1","event":{"channel":"C1","ts":"100.1","bot_id":"B1"}}""";
         mvc.perform(signed(body)).andExpect(status().isOk()).andExpect(content().string(""));
-        verify(deduplicator, never()).claim(any());
-        verify(handler, never()).handle(any(), any());
+        verify(publisher, never()).publish(any(), anyLong(), any());
     }
 
     @Test
-    void 중복_이벤트는_핸들러를_호출하지_않고_200이다() throws Exception {
-        // A9의 컨트롤러 쪽 절반: 선점 실패는 200 즉시 반환
-        when(deduplicator.claim(eq("Ev1"))).thenReturn(new ClaimResult.Duplicate(ProcessingState.PROCESSING));
-        mvc.perform(signed(VALID_EVENT)).andExpect(status().isOk()).andExpect(content().string(""));
-        verify(handler, never()).handle(any(), any());
-    }
-
-    @Test
-    void 새_이벤트는_핸들러를_호출하고_결과와_무관하게_200이다() throws Exception {
-        AttemptHandle attempt = org.mockito.Mockito.mock(AttemptHandle.class);
-        when(attempt.attemptId()).thenReturn("A1");
-        when(deduplicator.claim(eq("Ev1"))).thenReturn(new ClaimResult.Claimed(attempt));
-        when(handler.handle(any(), eq(attempt))).thenReturn(new HandlingResult.Failed("llm_failed:x"));
+    void 큐_저장이_확인되면_200이고_중복_입력도_걸러내지_않는다() throws Exception {
+        // ARCHITECTURE §3.1: 중복은 워커가 M11 선점 결과표로 억제한다. 컨트롤러는 항상 발행을 시도한다.
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Enqueued("1-0"));
 
         mvc.perform(signed(VALID_EVENT)).andExpect(status().isOk()).andExpect(content().string(""));
-        verify(handler).handle(any(), eq(attempt));
+        verify(publisher).publish(any(), anyLong(), any());
     }
 
     @Test
-    void 처리_권한_확보_후_핸들러_예외는_200을_유지한다() throws Exception {
-        // "처리 권한 확보 후 예외는 200 유지·로그" (M6)
-        AttemptHandle attempt = org.mockito.Mockito.mock(AttemptHandle.class);
-        when(deduplicator.claim(eq("Ev1"))).thenReturn(new ClaimResult.Claimed(attempt));
-        when(handler.handle(any(), eq(attempt))).thenThrow(new RuntimeException("예기치 못한 오류"));
+    void 큐_저장_실패는_503이다() throws Exception {
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Failed("enqueue_failed:x"));
 
+        mvc.perform(signed(VALID_EVENT)).andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
+    void 큐_저장_확인_불가도_503이다() throws Exception {
+        // WAITAOF로 확인받지 못하면 저장 여부가 불명확하므로 200을 주지 않는다(B1).
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Unconfirmed("waitaof_numlocal_0"));
+
+        mvc.perform(signed(VALID_EVENT)).andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
+    void 발행_호출에_최상위_필터가_잡은_수신_시각이_전달된다() throws Exception {
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Enqueued("1-0"));
+
+        long before = System.currentTimeMillis();
         mvc.perform(signed(VALID_EVENT)).andExpect(status().isOk());
+        long after = System.currentTimeMillis();
+
+        var captor = org.mockito.ArgumentCaptor.forClass(Long.class);
+        verify(publisher).publish(any(), captor.capture(), any());
+        assertThatReceivedAtIsWithin(captor.getValue(), before, after);
+    }
+
+    private static void assertThatReceivedAtIsWithin(long receivedAtMs, long before, long after) {
+        org.assertj.core.api.Assertions.assertThat(receivedAtMs).isBetween(before, after);
     }
 }

@@ -74,7 +74,7 @@
   - [x] Slack 429: 5·10건 동시 발신 모두 429 없음 → 테스트 채널 1개 유지 (§6.3)
 - [x] **M10 인프라·설정 골격** — 완료. `compose.yaml`·`Dockerfile`·`infra/redis.conf`, `app.role` 역할별 빈(B2), 설정 record 4종·불변식, `/health` Redis. 컨테이너 안에서 호스트 Ollama 호출 확인 (`EXPERIMENT-LOG.md` §7)
 - [x] **M11 공유 처리 상태 저장소** — 완료(codex 2회전 반영, 3회전은 usage limit으로 code-reviewer 대체). `state/` 패키지·`state.lua`, 선점 결과표 9종, `finalize` 검증→보존→상태→ACK 순서, 세대 인식 정리. 통합 테스트 26건 (`EXPERIMENT-LOG.md` §8)
-- [ ] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 발행·소비·상태 확정 후 ACK, 핸들러 계약 변경, `EventDeduplicator` 제거
+- [x] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 완료(PR #22). code-reviewer(codex 대체) REVISE(MAJOR 3건) → MAJOR-1(임대 갱신 미구현)·MAJOR-2(Redis 타임아웃 없음) 수정·회귀 테스트·실측 반영, MAJOR-3(왕복 근거 부풀림) 문서 정정 후 서버 재기동해 재확인(200→큐→워커→LLM→Slack 발신 성공→Delivered). B3·B4(역할 분리 kill 시나리오)는 `app.role=all` 단일 프로세스로 재현 불가해 M17(다중 워커)로 이월. 테스트 133건(MAJOR-1 회귀 테스트 추가 포함) (`EXPERIMENT-LOG.md` §9)
 - [ ] **M13 재시도·DLQ** (P1-4) — 오류 전이표, 지연 재시도(ZSET), 최종 안내, DLQ, 24시간 창
 - [ ] **M14 결과 불명 복구** (P1-3) — **착수 전 Slack 스코프 재설치에서 멈춤**, `recovery` CLI(수동 재처리 승인 포함), 발신 직후 halt 유도
 - [ ] **M15 즉시 반응** (P1-5) — 별도 반응 스트림·소비자가 "확인 중" 이모지, 최초 수신→표시 시간 측정
@@ -89,10 +89,12 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9·M10·M11 완료**, 다음은 **M12 수신–큐–워커 분리**(`feature/m12-queue-split`)다. `EventPublisher`·`EventWorker`를 추가하고 컨트롤러·핸들러 호출부를 큐 경유로 바꾼다. `EventDeduplicator`는 이 마일스톤에서 제거한다.
-- M11의 `state/state.lua`는 codex critic 2회전 검토를 반영했다(부분 실패 복구, stream_id-event_id 결속, 세대 인식 정리). 3회전은 codex usage limit으로 실패해 code-reviewer 에이전트로 대체 검토했다 — 결과는 M11 PR 병합 시점에 확정한다.
-- 실행: `docker compose up -d redis` + 호스트 `bootRun`(역할 `all`), 또는 `docker compose --profile app up --build`.
-- **호스트 8080 포트를 1단계 `bootRun` 이전 프로세스가 점유 중이다**(정리 여부 확인 필요, M12 실제 왕복 전에 처리).
+- 2단계 진행 중. **M9~M12 완료**(PR #22, `develop` 병합 대기 또는 완료 — 아래 참고). 다음은 **M13 재시도·DLQ**, 브랜치 `feature/m13-retry-dlq`.
+- M12 codex critic이 usage limit으로 두 번 실패해(1회는 `model=gpt-6-sol` 직접 지정 시도, config.toml 기본값도 이미 `gpt-6-sol`/medium) code-reviewer로 대체 검토 → REVISE(MAJOR 3건: 임대 갱신 미구현·Redis 타임아웃 없음·왕복 근거 부풀림) → 전부 반영. **호스트 `bootRun`을 검증 뒤 꺼둔 채로 세션을 마쳐서, 사용자가 이어서 시도한 실제 멘션이 무응답이었다** — 서버가 꺼져 있었을 뿐 애플리케이션 결함은 아니었다. 다시 켜고 재확인함. **교훈: 마일스톤 종료 시 `bootRun`을 켜둔 채로 둘지 끌지 세션 안에서 명시하고, 끌 거면 사용자에게 알린다.**
+- M13은 `HandlingResult.Failed(retryable)`·`SlackSendResult`·`LlmResult`에 재시도 가능 여부 분류를 더하고 `RetryPolicy`(ZSET 지연 재시도, `XADD` 성공 후 `ZREM` 순서)를 추가하는 작업이다 — M12의 `Failed→DEAD+DLQ` 즉시 경로를 대체한다. PLAN "M13. 재시도·DLQ" 섹션 참고.
+- B3(수신 kill)·B4(워커 kill)는 `app.role=all` 단일 프로세스로는 재현 불가 — M17(다중 워커, 역할 분리 기동)에서 실측한다.
+- 실행: `docker start slack-lab-redis-1`(또는 `docker compose up -d redis`) + 호스트 `bootRun`(역할 `all`), ngrok은 이미 떠 있고 Slack Request URL도 등록돼 있다(재등록 불필요 — 터널이 재시작되지 않는 한).
+- docker 명령은 병렬로 여러 개 띄우지 말고 하나씩 완료를 기다릴 것(이전에 여러 세션의 `docker compose up`/`docker start`가 동시에 쌓여 서로 lock을 잡고 멈춘 적 있음).
 - M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개.
 - 성능 목표: 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정(사용자 결정).
 - 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
