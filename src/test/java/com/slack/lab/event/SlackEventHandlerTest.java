@@ -67,6 +67,13 @@ class SlackEventHandlerTest {
             return sendingAllowed;
         }
 
+        final java.util.Map<String, Long> phases = new java.util.HashMap<>();
+
+        @Override
+        public void recordPhase(String name, long millis) {
+            phases.put(name, millis);
+        }
+
         void rejectSending() {
             sendingAllowed = false;
         }
@@ -440,5 +447,31 @@ class SlackEventHandlerTest {
         var result = f.handler(50_000, 60_000, 0).handle(threadEvent(), f.attempt(), false);
 
         assertThat(result).isInstanceOf(HandlingResult.Delivered.class);
+    }
+
+    @Test
+    void 단계별_소요를_시도_핸들에_알린다() {
+        var f = fixture();
+        when(f.llm().chat(anyList(), anyLong())).thenReturn(new LlmResult.Success("답변", 100));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong(), any(ReplyMetadata.class)))
+                .thenReturn(new SlackSendResult.Success("200.1"));
+
+        f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), false);
+
+        assertThat(f.attempt().phases).containsKeys("llm_ms", "send_ms");
+        assertThat(f.attempt().phases.values()).allMatch(ms -> ms >= 0);
+    }
+
+    @Test
+    void LLM이_실패해_발신하지_않으면_send_ms는_기록하지_않는다() {
+        var f = fixture();
+        when(f.llm().chat(anyList(), anyLong())).thenReturn(new LlmResult.Failed("bad", 5, false));
+        when(f.slack().postMessage(anyString(), anyString(), anyString(), anyLong(), any(ReplyMetadata.class)))
+                .thenReturn(new SlackSendResult.Success("200.1"));
+        f.attempt().rejectSending(); // 발신 게이트에서 막혀 send_ms 단계에 이르지 못한다
+
+        f.handler(50_000, 60_000, 0).handle(event(), f.attempt(), true);
+
+        assertThat(f.attempt().phases).containsKey("llm_ms").doesNotContainKey("send_ms");
     }
 }

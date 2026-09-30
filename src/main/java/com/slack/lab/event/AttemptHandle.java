@@ -18,4 +18,10 @@ public interface AttemptHandle {
     long startNanos();
 
     boolean markSending();
+
+    /**
+     * 단계별 소요(ms)를 워커에 알린다(M17 관측: {@code llm_ms}·{@code send_ms} 등). 워커가 시도 하나의 지표를 한 줄로
+     * 묶어 남기므로 핸들러는 값을 로그에 흩뿌리지 않는다. 기본 구현은 아무것도 하지 않는다.
+     */
+    default void recordPhase(String name, long millis) {}
 }

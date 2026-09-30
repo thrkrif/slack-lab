@@ -17,8 +17,8 @@ import org.springframework.stereotype.Component;
 @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
 public class RedisProcessingStateStore implements ProcessingStateStore {
 
-    static final String DLQ_KEY = "slack:dlq";
-    static final String RECOVERY_KEY = "slack:recovery";
+    public static final String DLQ_KEY = "slack:dlq";
+    public static final String RECOVERY_KEY = "slack:recovery";
     // RetryScheduler(worker 패키지)가 재시도 목록 키를 공유해야 해서 public이다 — DLQ_KEY·RECOVERY_KEY와
     // 달리 이 상수는 패키지 경계를 넘는 계약의 일부다.
     public static final String RETRY_KEY = "slack:retry";

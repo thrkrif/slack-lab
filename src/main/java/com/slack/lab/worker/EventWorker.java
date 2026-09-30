@@ -137,6 +137,8 @@ public class EventWorker {
     }
 
     private void loop(String consumer) {
+        // 여러 워커가 같은 그룹을 소비할 때 XPENDING의 소비자 이름과 컨테이너를 연결하는 유일한 단서다(M17 kill 실험).
+        log.info("워커 소비자 시작 consumer={}", consumer);
         while (running) {
             try {
                 // block 값은 spring.data.redis.timeout(1s, MAJOR-2)보다 짧아야 한다 — 아니면 서버의 BLOCK이
@@ -227,6 +229,13 @@ public class EventWorker {
     private void handleClaimed(MapRecord<String, Object, Object> record, Map<Object, Object> fields, String eventId,
             String streamId, ClaimOutcome.Claimed claimed) {
         SlackMessageEvent event = SlackMessageEvent.fromQueueFields(fields);
+        // 프로세스 간 구간(수신→선점)은 UTC epoch ms로 잰다. 시계가 어긋나면 음수가 나오고, 그 배치의 성능 측정은
+        // 무효다(PLAN M17) — 지표 줄에 표시한다.
+        // received_at이 없거나 깨졌으면 지금으로 대체해 구간이 0이 되는데, 이를 정상 값으로 두면 측정이 조용히
+        // 틀어진다 — 지표 줄에 received_at_missing으로 표시하고 무효(negative_interval)로 취급한다.
+        boolean receivedAtMissing = parseLongOr(str(fields, "received_at"), -1) < 0;
+        long receivedAt = parseLongOr(str(fields, "received_at"), System.currentTimeMillis());
+        long queueWaitMs = System.currentTimeMillis() - receivedAt;
         long startNanos = System.nanoTime();
         WorkerAttemptHandle handle = new WorkerAttemptHandle(eventId, claimed.attemptId(), startNanos, store);
         boolean finalAttempt = retryPolicy.isFinalAttempt(claimed.retries(), claimed.manualRun());
@@ -250,7 +259,24 @@ public class EventWorker {
             renewal.cancel(false);
         }
 
-        finalizeResult(streamId, eventId, claimed, result);
+        boolean finalized = finalizeResult(streamId, eventId, claimed, result);
+        logMetrics(eventId, claimed, result, finalized, handle, receivedAt, queueWaitMs, receivedAtMissing);
+    }
+
+    /**
+     * 시도 하나의 지표를 한 줄로 남긴다(M17). 집계는 이 줄을 grep한다(scripts/p1-metrics).
+     * {@code answer_ms}는 최초 수신부터 이 시도의 종료 기록까지이며 재시도·재처리 시도에서는 그 앞의 시도 시간까지 포함한다.
+     */
+    private void logMetrics(String eventId, ClaimOutcome.Claimed claimed, HandlingResult result, boolean finalized,
+            WorkerAttemptHandle handle, long receivedAt, long queueWaitMs, boolean receivedAtMissing) {
+        long answerMs = System.currentTimeMillis() - receivedAt;
+        String kind = result instanceof HandlingResult.Delivered d ? d.kind() : "-";
+        // gen>0·retries>0·manual_run은 앞선 시도와 재시도 대기가 구간에 섞인 시도다 — 집계는 첫 시도만 성능 표본으로 쓴다.
+        log.info("처리 지표 event_id={} attempt_id={} gen={} retries={} manual_run={} result={} kind={} finalized={} "
+                        + "queue_wait_ms={} llm_ms={} send_ms={} answer_ms={} received_at_missing={} negative_interval={}",
+                eventId, claimed.attemptId(), claimed.gen(), claimed.retries(), claimed.manualRun(),
+                result.getClass().getSimpleName(), kind, finalized, queueWaitMs, handle.phase("llm_ms"),
+                handle.phase("send_ms"), answerMs, receivedAtMissing, queueWaitMs < 0 || answerMs < 0 || receivedAtMissing);
     }
 
     /** 임대 갱신 실패(소유권 상실)를 핸들에 반영해, 이후 markSending()이 저장소를 다시 부르지 않고 거절하게 한다. */
@@ -271,7 +297,7 @@ public class EventWorker {
      * Failed→DEAD(DLQ), RetryRequested→RETRY_WAIT(안내 없이 재시도 예약). Rejected는 이미 소유권을
      * 잃었다는 뜻이라 상태를 건드리지 않는다 — XAUTOCLAIM이 재확인한다.
      */
-    private void finalizeResult(String streamId, String eventId, ClaimOutcome.Claimed claimed, HandlingResult result) {
+    private boolean finalizeResult(String streamId, String eventId, ClaimOutcome.Claimed claimed, HandlingResult result) {
         String attemptId = claimed.attemptId();
         boolean finalized = switch (result) {
             case HandlingResult.Delivered d -> store.finalizeAttempt(eventId, attemptId, streamId,
@@ -295,6 +321,7 @@ public class EventWorker {
             log.info("이벤트 처리 완료 event_id={} attempt_id={} result={}", eventId, attemptId,
                     result.getClass().getSimpleName());
         }
+        return finalized;
     }
 
     private static String kindFromStage(String stage) {

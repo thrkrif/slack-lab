@@ -678,3 +678,39 @@ PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medi
 - MINOR-4(`llmBudgetMs` 이중 계산)·MINOR-5(옛 Javadoc)도 반영.
 - **알려진 한계(수정하지 않음)**: 재시도할 때마다 스레드를 다시 조회한다(시도마다 최대 3초·Slack 호출 1회, 예산은 시도별 `t0`로 초기화되어 상한은 안전), 실패 안내(`FAILURE_NOTICE`)가 assistant 문맥으로 들어가 말투를 따라 할 수 있다(`ReplyMetadata`로 거르는 개선 여지), Slack이 Marketplace 밖 상용 앱에 `conversations.replies`를 분당 1회·15건으로 제한한 정책이 있다(내부용 앱이라 해당 없음, 배포 형태가 바뀌면 재확인), 글자 자르기는 UTF-16 단위라 이모지 서로게이트 쌍이 갈라질 수 있다, `fetchMessages`의 다중 페이지 경계(`missing_cursor`·`too_many_pages`) 전용 테스트는 없다.
 
+## 14. 2단계 M17 관측 + 다중 워커 검증 (2026-09-30)
+
+조건: `docker compose --profile app up --scale worker=2`(수신 1·워커 2·반응 1 컨테이너 + Redis 컨테이너), 호스트 Ollama `qwen2.5:7b`, 합성 서명 요청 + 실제 스레드(§11~13과 같은 방식). 워커는 `worker.concurrency=1`이다. 검증 환경은 PRD §5의 성능 판정 조건이 아니라 정확성 확인용이다.
+
+### 14.1 집계 명령 (B14)
+
+`scripts/p1-metrics <로그...>` 또는 `docker compose logs --no-log-prefix receiver worker reactor | scripts/p1-metrics`. 구간별 건수·p50·p95(정렬한 표본의 `ceil(0.95×N)`번째)·max, 결과별 건수, 발행·반응 실패 건수, 음수 구간 건수, 적체(스냅샷 횟수·최대 `stream_len`·최대 `pending`·마지막 `retry`/`dlq`/`recovery`)를 낸다. 답변 지표는 정상 답변(`Delivered`·`kind=answer`)만 센다. 실행 예(버스트 5건, 컨테이너 로그): `recv_ms` p50 464·p95 498, `enqueue_ms` p50 200·p95 207, `queue_wait_ms` p50 3106·p95 5331, `llm_ms` p50 2429·p95 3167, `send_ms` p50 296·p95 664, `answer_ms` p50 5318·p95 8404, `reaction_ms` p50 3132·p95 3356, 정상 답변 5/5, 발행·반응 실패 0, 음수 구간 0, 적체 스냅샷 14회(`stream_len`·`pending` 최대 1).
+
+### 14.2 다중 워커 (B15)와 kill (B3·B4)
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **D1** 동일 event_id 10회 동시 전달 | 워커 2개 | 10건 모두 200·큐 저장, 실행 1회, 나머지 9건 `BUSY`(ACK 안 함 → 이후 회수에서 정리, 최종 `pending 0`·`stream_len 0`), **답글 1개** |
+| **D3** 서로 다른 10건 | 워커 2개, 10건 동시 투입 | **답글 정확히 10개**, 시도 10건 각각 별개의 `attempt_id` |
+| **B3** 큐 저장 후 수신 kill | 200(큐 저장 확인)을 받은 직후 `docker kill -s KILL`로 수신 컨테이너 종료 | 이벤트는 큐에 남아 워커가 처리 |
+| **B4** 처리 중 워커 kill | `EXPERIMENT_SLOW_MODE_MS=30000` 오버라이드로 처리를 느리게 → `XPENDING`으로 소유 소비자를 찾아 그 워커 컨테이너를 kill | 임대(30초) 만료와 `claim-min-idle-ms`(100초) 뒤 **남은 워커가 회수**(`죽은 소비자 항목 회수 stale_count=1`), 새 `attempt_id`로 재실행, **최종 답글 1개**, 138초, `queue_wait_ms=103158` |
+
+B3·B4는 한 이벤트에서 함께 확인했다(수신을 죽이고 이어서 처리 중 워커를 죽임). 전 과정 뒤 `scripts/p1-residue-check` → `OK: 잔존물 0`(해결 29건, 스트림·반응 스트림 잔존 0).
+
+통합 확인: `SlackEventHandlerTest`에 `recordPhase` 전달 검증 2건(발신 게이트에 막히면 `send_ms` 미기록). 전체 빌드 통과.
+
+### 14.3 관측 사항 (M18이 판단)
+
+- 컨테이너 환경 버스트 5건에서 `recv_ms` p50 464ms(목표 p95 ≤ 200ms), `reaction_ms` p50 3.1s(목표 p95 ≤ 3s)가 관측됐다. 호스트 `bootRun`(§12)에서는 반응이 0.25~0.47s, 수신 15~56ms였다. 원인은 규명하지 않았다 — 컨테이너·Docker 네트워크 오버헤드, 같은 장비의 Ollama·합성 요청 생성 스크립트와의 자원 경합, 워커 2개·반응 소비자 3개(워커 2 + 반응 1)의 경합 후보가 있다. 이것은 성능 판정이 아니라 M18의 고정 조건 실험이 다룬다.
+- `BUSY`로 끝난 중복 메시지는 ACK하지 않고 회수 주기(30초 스캔·100초 idle)에 정리된다. 정확성에는 영향이 없으나 중복 전달이 잦으면 pending이 그동안 쌓인다.
+- 사람이 실제로 멘션하는 Slack→ngrok→수신 컨테이너 경로는 이 마일스톤에서도 검증하지 않았다.
+
+### 14.4 리뷰 대응 (codex는 usage limit이라 code-reviewer 대체, REVISE: MAJOR 2·MINOR 7)
+
+- **MAJOR-1(반영)**: `적체 스냅샷 실패` 줄을 스냅샷으로 오인해 집계가 `KeyError`로 죽던 것을 고쳤다(성공 줄만 스냅샷으로 세고 실패는 따로 센다).
+- **MAJOR-2(반영)**: 발행 실패 1건이 발행자·컨트롤러 줄 때문에 경로에 따라 1~2건으로 세어지던 것을 컨트롤러 줄만 세도록 고쳤다.
+- **MINOR-1(반영)**: 재시도·재처리 시도의 `queue_wait_ms`·`answer_ms`에는 앞선 시도와 백오프가 섞여 p95를 왜곡한다. 지표 줄에 `retries`·`manual_run`을 추가하고, 집계는 **첫 시도(gen=0, 수동 재처리 아님)만** 성능 표본에 넣으며 뺀 건수를 보고한다. MINOR-2(성공률 분모를 event_id별 마지막 결과로도 보고), MINOR-3(`recv_ms`는 `ack_delivered=true`만), MINOR-7(스냅샷 줄 수가 워커 수만큼 중복임을 출력에 명시), MINOR-4(`received_at`이 없거나 깨졌으면 `received_at_missing=true`로 표시하고 측정 무효로 취급), MINOR-6(적체 키 상수 재사용)도 반영.
+- 합성 로그로 집계 회귀 확인(스냅샷 실패 줄·발행 실패 이중 줄·재시도 시도·`ack_delivered=false` 포함) 후 새 이미지로 3건을 다시 돌려 실제 컨테이너 로그 집계도 확인: 정상 답변 3/3, 음수 구간 0, 잔존물 0.
+- **알려진 한계(수정하지 않음)**: 단계 이름(`llm_ms`·`send_ms`)이 문자열 키라 오타가 조용히 -1이 된다(상수화 여지), `answerMs < 0`은 같은 벽시계라 사실상 `queueWaitMs < 0`에 포함된다, 집계의 `kv` 파싱은 값에 공백이 들어가면 잘린다(현재 지표 줄에는 그런 값이 없다).
+- 정정: 위 §14.3의 `reaction_ms` 3.1s는 버스트 5건 관측이었고, 부하가 낮은 3건 재측정에서는 p50 1.5s·p95 2.2s였다. 호스트 `bootRun`(0.25~0.47s)보다는 여전히 느리다 — M18이 판단한다.
+

@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""P1 로그 집계(M17, B14). 지표 라이브러리 없이 로그를 grep해 구간별 건수·p50·p95·max와 결과별 건수, 적체를 낸다.
+
+사용: scripts/p1-metrics <로그 파일...>          (여러 파일을 합친다)
+      docker compose logs --no-log-prefix worker receiver reactor | scripts/p1-metrics
+p95는 PRD §5의 판정 규칙대로 정렬한 표본의 ceil(0.95*N)번째 값이다.
+답변 지표(queue_wait_ms·llm_ms·send_ms·answer_ms)는 정상 답변(kind=answer, Delivered)의 **첫 시도**(gen=0, 수동 재처리 아님)만
+센다 — 실패 안내와 재시도·재처리 시도는 제외한다: 그 시도의 queue_wait_ms·answer_ms에는 앞선 시도와 재시도 대기가 들어가 p95를 왜곡한다.
+recv_ms는 200을 돌려준 응답(ack_delivered=true)만 센다. 적체 스냅샷은 워커 수만큼 찍히므로 "횟수"는 워커 수에 비례한다.
+성공률은 시도가 아니라 event_id별 마지막 결과로 센다.
+negative_interval=true인 줄이 하나라도 있으면 시계 문제로 그 배치의 성능 측정은 무효다.
+"""
+import math
+import re
+import sys
+from collections import Counter
+
+def read_lines(paths):
+    if not paths:
+        yield from sys.stdin
+        return
+    for p in paths:
+        with open(p, errors="replace") as f:
+            yield from f
+
+def kv(line):
+    return dict(re.findall(r"(\w+)=(\S+)", line))
+
+def pct(values, q):
+    s = sorted(values)
+    return s[max(0, math.ceil(q * len(s)) - 1)]
+
+def show(name, values):
+    if not values:
+        print(f"{name:<14} n=0")
+        return
+    print(f"{name:<14} n={len(values):<4} p50={pct(values, .5):<7} p95={pct(values, .95):<7} max={max(values)}")
+
+series = {k: [] for k in ("recv_ms", "enqueue_ms", "queue_wait_ms", "llm_ms", "send_ms", "answer_ms", "reaction_ms")}
+results = Counter()
+negative = 0
+excluded = 0
+last_result = {}
+publish_fail = reaction_fail = snapshot_fail = 0
+backlog = []
+for line in read_lines(sys.argv[1:]):
+    if "ack_delivered=true" in line and "recv_ms=" in line:
+        series["recv_ms"].append(int(kv(line)["recv_ms"]))
+    elif "큐 저장 확인" in line and "enqueue_ms=" in line:
+        series["enqueue_ms"].append(int(kv(line)["enqueue_ms"]))
+    elif "발행 실패 event_id=" in line or "발행 확인 불가 event_id=" in line:
+        # 컨트롤러 줄만 센다: 발행자 쪽 "큐 저장 실패"·"큐 저장 확인 실패"까지 세면 한 건이 경로에 따라 1~2건이 된다.
+        publish_fail += 1
+    elif "처리 지표" in line:
+        f = kv(line)
+        results[(f.get("result"), f.get("kind"))] += 1
+        if "event_id" in f:
+            last_result[f["event_id"]] = (f.get("result"), f.get("kind"))
+        if f.get("negative_interval") == "true":
+            negative += 1
+        if f.get("result") == "Delivered" and f.get("kind") == "answer":
+            first_attempt = f.get("gen") == "0" and f.get("manual_run") != "true"
+            if not first_attempt:
+                excluded += 1
+            else:
+                for k in ("queue_wait_ms", "llm_ms", "send_ms", "answer_ms"):
+                    if int(f.get(k, "-1")) >= 0:
+                        series[k].append(int(f[k]))
+    elif "반응 성공" in line and "reaction_ms=" in line:
+        v = int(kv(line)["reaction_ms"])
+        if v >= 0:
+            series["reaction_ms"].append(v)
+    elif "반응 실패" in line:
+        reaction_fail += 1
+    elif "적체 스냅샷 stream_len=" in line:
+        backlog.append(kv(line))
+    elif "적체 스냅샷 실패" in line:
+        snapshot_fail += 1
+
+for k, v in series.items():
+    show(k, v)
+print()
+print("결과별 건수(시도 단위):")
+for (r, kind), n in sorted(results.items(), key=lambda x: str(x)):
+    print(f"  {r} kind={kind}: {n}")
+total = sum(results.values())
+ok = sum(n for (r, k), n in results.items() if r == "Delivered" and k == "answer")
+print(f"  정상 답변 {ok}/{total} 시도" + (f" ({100 * ok / total:.1f}%)" if total else ""))
+events = len(last_result)
+done = sum(1 for r in last_result.values() if r == ("Delivered", "answer"))
+print(f"  event_id별 마지막 결과: 정상 답변 {done}/{events}" + (f" ({100 * done / events:.1f}%)" if events else "")
+      + f", 재시도·재처리 시도로 표본에서 뺀 정상 답변 {excluded}건")
+print(f"발행 실패 {publish_fail}건, 반응 실패 {reaction_fail}건, 스냅샷 실패 {snapshot_fail}건, 음수 구간 {negative}건"
+      + (" ← 측정 무효" if negative else ""))
+if backlog:
+    def mx(key):
+        return max(int(b[key]) for b in backlog)
+    last = backlog[-1]
+    print(f"적체(스냅샷 {len(backlog)}줄, 워커 수만큼 중복): stream_len 최대 {mx('stream_len')}, pending 최대 {mx('pending')}, "
+          f"마지막 retry={last['retry']} dlq={last['dlq']} recovery={last['recovery']}")
