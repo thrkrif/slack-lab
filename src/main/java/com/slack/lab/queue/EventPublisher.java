@@ -13,9 +13,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.lettuce.LettuceConnection;
-import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.connection.stream.RecordId;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,20 +32,35 @@ public class EventPublisher {
     private static final Logger log = LoggerFactory.getLogger(EventPublisher.class);
     private static final String SCHEMA_VERSION = "1";
 
+    // 두 스트림에 한 번에 XADD하는 스크립트(M15). 반환은 이벤트 스트림 항목 ID다.
+    private static final RedisScript<String> PUBLISH = publishScript();
+
     private final StringRedisTemplate redis;
     private final QueueProperties props;
+    private final ReactionProperties reaction;
 
-    public EventPublisher(StringRedisTemplate redis, QueueProperties props) {
+    public EventPublisher(StringRedisTemplate redis, QueueProperties props, ReactionProperties reaction) {
         this.redis = redis;
         this.props = props;
+        this.reaction = reaction;
+    }
+
+    private static RedisScript<String> publishScript() {
+        DefaultRedisScript<String> script = new DefaultRedisScript<>();
+        script.setLocation(new ClassPathResource("queue/publish.lua"));
+        script.setResultType(String.class);
+        return script;
     }
 
     /** 첫 발행은 gen 0이다. 재시도·재처리 투입은 M13·M14의 몫이라 이 클래스는 모른다. */
     public PublishResult publish(SlackMessageEvent event, long receivedAtMs, String retryNum) {
         long start = System.nanoTime();
-        RecordId id;
+        String id;
         try {
-            id = redis.opsForStream().add(MapRecord.create(props.streamKey(), fields(event, receivedAtMs, retryNum)));
+            id = redis.execute(PUBLISH, List.of(props.streamKey(), reaction.streamKey()), args(event, receivedAtMs, retryNum));
+            if (id == null) {
+                throw new IllegalStateException("발행 스크립트가 ID를 돌려주지 않음");
+            }
         } catch (RuntimeException e) {
             log.warn("큐 저장 실패 event_id={} reason={}", event.eventId(), e.getClass().getSimpleName());
             return new PublishResult.Failed("enqueue_failed:" + e.getClass().getSimpleName());
@@ -52,19 +68,40 @@ public class EventPublisher {
 
         try {
             if (!confirmDurable()) {
-                log.warn("큐 저장 확인 실패(numlocal<1) event_id={} stream_id={}", event.eventId(), id.getValue());
+                log.warn("큐 저장 확인 실패(numlocal<1) event_id={} stream_id={}", event.eventId(), id);
                 return new PublishResult.Unconfirmed("waitaof_numlocal_0");
             }
         } catch (RuntimeException e) {
             // XADD는 됐을 수 있으나 확인을 못 받았다 — 저장 여부가 불명확하므로 200을 주지 않는다.
-            log.warn("큐 저장 확인 실패 event_id={} stream_id={} reason={}", event.eventId(), id.getValue(),
+            log.warn("큐 저장 확인 실패 event_id={} stream_id={} reason={}", event.eventId(), id,
                     e.getClass().getSimpleName());
             return new PublishResult.Unconfirmed("waitaof_failed:" + e.getClass().getSimpleName());
         }
 
         long enqueueMs = (System.nanoTime() - start) / 1_000_000;
-        log.info("큐 저장 확인 event_id={} stream_id={} enqueue_ms={}", event.eventId(), id.getValue(), enqueueMs);
-        return new PublishResult.Enqueued(id.getValue());
+        log.info("큐 저장 확인 event_id={} stream_id={} enqueue_ms={}", event.eventId(), id, enqueueMs);
+        return new PublishResult.Enqueued(id);
+    }
+
+    /** 이벤트 필드 인자 수, 이벤트 필드/값들, 반응 필드/값들 순서(publish.lua). 반응 항목에는 본문이 없다. */
+    private Object[] args(SlackMessageEvent event, long receivedAtMs, String retryNum) {
+        Map<String, String> ev = fields(event, receivedAtMs, retryNum);
+        Map<String, String> rx = new LinkedHashMap<>();
+        rx.put("event_id", event.eventId());
+        rx.put("channel", event.channel());
+        rx.put("ts", event.ts());
+        rx.put("received_at", String.valueOf(receivedAtMs));
+        List<Object> out = new java.util.ArrayList<>();
+        out.add(String.valueOf(ev.size() * 2));
+        ev.forEach((k, v) -> {
+            out.add(k);
+            out.add(v);
+        });
+        rx.forEach((k, v) -> {
+            out.add(k);
+            out.add(v);
+        });
+        return out.toArray();
     }
 
     private Map<String, String> fields(SlackMessageEvent event, long receivedAtMs, String retryNum) {

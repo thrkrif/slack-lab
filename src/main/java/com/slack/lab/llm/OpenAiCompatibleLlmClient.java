@@ -194,6 +194,11 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             if (cause instanceof HttpTimeoutException) {
                 return new HttpOutcome(null, true, "request_timeout");
             }
+            // 기한 타이머의 cancel(true)가 ExecutionException으로 감싸져 올 수 있다(경합, M14 중 간헐 실패로 발견).
+            // 시간 초과로 분류하지 않으면 재시도 가능한 기한 초과가 영구 실패(즉시 안내)로 바뀐다.
+            if (cause instanceof CancellationException) {
+                return new HttpOutcome(null, true, "cancelled_after_deadline");
+            }
             return new HttpOutcome(null, false, cause == null ? "unknown" : cause.getClass().getSimpleName());
         } catch (TimeoutException e) {
             // cancel(true) 예약이 도달하지 못한 방어적 경로. 감시 시간 초과 시 직접 취소한다.

@@ -190,6 +190,37 @@ public class SlackClient {
         }
     }
 
+    /**
+     * {@code reactions.add}. 보조 기능이라 재시도·분류를 단순하게 둔다: {@code already_reacted}는 성공으로 본다
+     * (같은 이벤트 재처리·재전달로 이미 붙은 것). 그 밖의 실패는 사유만 돌려주고 호출자가 로그를 남긴다.
+     * 답변 발신과 달리 "결과 불명"을 따로 다루지 않는다 — 반응이 중복되거나 빠져도 사용자 피해가 없다.
+     */
+    public ReactionResult addReaction(String channel, String ts, String emoji) {
+        try {
+            String json = mapper.writeValueAsString(Map.of("channel", channel, "timestamp", ts, "name", emoji));
+            HttpRequest request = HttpRequest.newBuilder(URI.create(props.baseUrl() + "/reactions.add"))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .header("Authorization", "Bearer " + props.botToken())
+                    .timeout(Duration.ofSeconds(3))
+                    .POST(HttpRequest.BodyPublishers.ofString(json)).build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() / 100 != 2) {
+                return new ReactionResult(false, "status=" + response.statusCode());
+            }
+            JsonNode root = mapper.readTree(response.body());
+            if (root.path("ok").asBoolean(false)) {
+                return new ReactionResult(true, "added");
+            }
+            String error = root.path("error").asText("unknown");
+            return new ReactionResult("already_reacted".equals(error), error);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ReactionResult(false, "interrupted");
+        } catch (Exception e) {
+            return new ReactionResult(false, e.getClass().getSimpleName());
+        }
+    }
+
     private SlackSendResult parseBody(String body, long elapsed) {
         JsonNode root;
         try {

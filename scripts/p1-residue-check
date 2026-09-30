@@ -79,9 +79,22 @@ for id in $(printf '%s\n%s\n%s\n' "$dlq" "$recovery" "$retry" | sort -u); do
   [ "$(rc EXISTS "slack:preserved:$id")" = 1 ] || fail "목록에는 있는데 보존 해시가 없음: $id"
 done
 
+# 반응 스트림(M15): 본문은 없지만 처리된 항목은 XACKDEL로 지워져야 한다. 진행 중인 항목이 있을 수 있어 개수는 보고만 하고,
+# 10분보다 오래된 항목이 남아 있으면(소비자·회수 모두 놓친 것) 위반으로 본다.
+REACTION_STREAM=${REACTION_STREAM_KEY:-slack:reactions}
+reaction_len=$(rc XLEN "$REACTION_STREAM"); reaction_len=${reaction_len:-0}
+if [ "$reaction_len" -gt 0 ] 2>/dev/null; then
+  oldest_id=$(rc XRANGE "$REACTION_STREAM" - + COUNT 1 | head -1)
+  oldest_ms=${oldest_id%%-*}
+  now_ms=$(python3 -c 'import time;print(int(time.time()*1000))')
+  if [ -n "$oldest_ms" ] && [ $((now_ms - oldest_ms)) -gt 600000 ]; then
+    fail "10분 넘게 남은 반응 항목(가장 오래된 ID ${oldest_id})"
+  fi
+fi
+
 d=$(count "$dlq"); r=$(count "$recovery"); t=$(count "$retry")
 listed=$(printf '%s\n%s\n%s\n' "$dlq" "$recovery" "$retry" | sort -u | grep -c .) || listed=0
-echo "해결 ${resolved}건 | 미해결 DLQ ${d} + 복구 ${r} (재시도 예약 ${t}) | 보존 해시 ${preserved} (목록 밖 진행 중 ${inflight_unlisted}) | 스트림 잔존 $(count "$stream_ids")"
+echo "해결 ${resolved}건 | 미해결 DLQ ${d} + 복구 ${r} (재시도 예약 ${t}) | 보존 해시 ${preserved} (목록 밖 진행 중 ${inflight_unlisted}) | 스트림 잔존 $(count "$stream_ids") | 반응 스트림 ${reaction_len}"
 if [ "$preserved" -ne $((listed + inflight_unlisted)) ]; then
   fail "보존 해시 수(${preserved}) != 목록 항목 수(${listed}) + 진행 중(${inflight_unlisted})"
 fi

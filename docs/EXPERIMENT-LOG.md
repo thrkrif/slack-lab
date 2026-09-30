@@ -636,3 +636,24 @@ PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medi
 - 2회전(code-reviewer): **APPROVE, MAJOR 0**. Lua 새 경합·유실·중복 실행 경로 없음(승인은 8행에서 한 스크립트로 소비, 소실은 4'행). 이 중 MINOR m1(redis-cli는 오류 응답에도 종료 코드 0 → 대문자 오류 접두어 감지)·m2(mktemp 실패)·m3(스트림 JSON을 stdin으로)·m7(비어 있지 않은 커서도 "더 있음")는 반영했다.
 - **알려진 한계(수정하지 않음)**: (m4) 승인됐지만 아직 선점 안 된 건(`RETRY_WAIT`+`manual_gen`)은 `close`로 철회할 수 없다. (m5) 4행 `UNKNOWN` 직후 옛 워커의 HTTP 발신이 아직 진행 중일 수 있어, 그 사이 `check`가 "없음"이라 `reprocess`하면 중복 답글이 날 수 있다 — 사람이 `send-deadline`(10초) 이상 지난 뒤 확인해야 한다. (m6) `ANOMALY`로 올라간 DLQ 항목 중 상태가 `PROCESSING`·`CLOSED`이거나 상태 해시가 만료된 것은 CLI로 지울 수 없다. (m7) 메타데이터에 `kind`가 없어 `check`가 실패 안내 답글도 "전송됨"으로 보여준다.
 
+## 12. 2단계 M15 즉시 반응 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`, 수신·워커·반응 소비자 한 프로세스) + `docker slack-lab-redis-1`, 합성 서명 요청 + 실제 부모 메시지(§11과 같은 방식). `reaction_ms`는 수신 필터가 잡은 `received_at`에서 `reactions.add` 성공까지이며 같은 호스트 시계다. 검증 환경이 PRD §5의 장비·부하 조건 전체와 같지는 않다(개발 장비 단일 호스트, 표본 12건).
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **(a) 처리 적체** | `experiment.slow-mode-ms=20000`으로 처리를 막고 12건을 연속 투입(이벤트 12건 pending, 처리 완료 0) | 12/12 반응 성공, `reaction_ms` 오름차순 244·244·245·246·249·253·254·254·257·271·290·467 → **p95 ≈ 467ms(목표 ≤ 3s)**, 누락 0, 반응 스트림 잔존 0 |
+| **(b) 반응 소비자 지연** | `reaction.experiment-delay-ms=8000` | 발신 성공·처리 종료가 12:02:09, 반응은 그 뒤 12:02:15에 붙음(`reaction_ms=8313`). 반응 스트림이 처리 그룹의 XDEL과 독립이라 **답변이 먼저 끝나도 누락 없음**, 잔존 0 |
+| **(c) 반응 오류 유도** | `reaction.emoji=no_such_emoji_zz` → `invalid_name` | `반응 실패(재시도 안 함)` 로그 1회, 호출 1회. **답글은 정상** 발신·`COMPLETED`(총 1663ms). *스코프 오류 자체는 Slack 앱 화면에서 스코프를 빼야 재현되어 하지 않았다 — 같은 실패 경로(비정상 `ok:false`)를 다른 사유로 검증한 것이다* |
+| 소비자 회수 | 10건 실험 중 첫 요청에서 Redis 명령이 1.2초 정체(`QueryTimeoutException`, 발행 503 1회) | 그 반응 항목이 소비자에게 전달만 되고 처리되지 못했으나, 죽은 소비자 회수(min-idle 10초)로 `reaction_ms=13539`에 처리됨. **이 1건은 3초 목표를 넘겼다** — 정체 없는 재측정(위 (a))에서는 재현되지 않았다 |
+
+통합 테스트(`ReactionConsumerTest`): 성공·`already_reacted`·스코프 오류 모두 항목 삭제·호출 1회, 죽은 소비자 항목 회수, 처리 스트림 삭제와 무관한 반응 항목. `EventPublisherTest`: 반응 항목이 본문 없이 `event_id`·`channel`·`ts`·`received_at`만 담김. 전체 빌드 통과.
+
+발견·주의: (1) **기한 취소가 `ExecutionException(CancellationException)`으로 도착하면 `OpenAiCompatibleLlmClient`가 `TimedOut`이 아니라 영구 `Failed`로 분류**하던 실제 경합을 잡았다(M14 중 `기한을_넘기면_취소되고_TimedOut을_반환한다` 간헐 실패의 원인, 재시도 대신 즉시 안내로 가는 결과). 수정 후 6회 연속 통과. (2) 정체 원인은 규명하지 못했다 — 첫 요청 지연은 3회 재기동으로 재현되지 않았다(enqueue 15~56ms). 발행은 실패해도 Lua가 이미 두 스트림에 썼을 수 있어 Slack 재전송이 오면 같은 event_id가 다시 들어오지만, 선점 결과표가 하나만 실행시킨다. (3) 사람이 실제로 멘션하는 Slack→ngrok 경로는 이 마일스톤에서도 검증하지 않았다.
+
+### 12.1 리뷰 대응 (codex는 usage limit이라 code-reviewer 대체, APPROVE·MAJOR 0·MINOR 6)
+
+반영: (1) 반응 읽기를 1건 단위로 줄여 뒤쪽 항목이 회수 min-idle을 넘겨 이중 처리되는 경로를 없앴다. (2) 명령 타임아웃이 나면 다음 반복에서 자기 PEL(`ReadOffset 0`)을 한 번 읽는다 — 위 실측의 13.5초 방치를 없애기 위한 것이다. (3) 종료 중 인터럽트로 `interrupted` 결과가 오면 ACK하지 않고 PEL에 남긴다. (4) 루프가 `Throwable`을 잡아 로그를 남긴다(조용한 실패 방지). (5) `publish.lua`의 "원자성" 주석을 실제 보장(끼어들기 없음, 롤백 없음)에 맞게 정정. 반영 후 정상 설정으로 재기동해 3건 스모크: `reaction_ms` 1526(첫 호출 웜업)·408·285, 전부 성공, 잔존 0. 위 (2)의 자기 PEL 재읽기는 통합 테스트로 만들지 않았고 실측으로도 유도하지 않았다(Redis 정체를 재현하기 어렵다).
+
+알려진 한계(수정하지 않음): 반응 스트림에 `MAXLEN` 상한이 없다(소비자가 하나도 없으면 무한히 자란다 — residue-check가 10분 뒤 경고), 재기동마다 새 소비자 이름이 그룹에 남는다, `reaction_ms`는 Slack 재전송으로 들어온 항목이면 그 전달의 `received_at` 기준이라 최초 수신 기준보다 짧게 잰다, 회수는 PLAN의 `XAUTOCLAIM`이 아니라 `XPENDING`+`XCLAIM`이다(Spring Data Redis 3.4.1에 전용 API가 없다, `EventWorker`와 같은 방식), `ExecutionException(CancellationException)` 분류 수정의 회귀 테스트는 없다(경합이라 안정적 재현이 어렵다).
+
