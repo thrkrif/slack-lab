@@ -8,6 +8,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -58,14 +59,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     }
 
     @Override
-    public LlmResult chat(String prompt, long remainingMs) {
+    public LlmResult chat(List<LlmMessage> messages, long remainingMs) {
         if (remainingMs <= 0) {
             return new LlmResult.Failed("남은 기한 없음", 0, false);
         }
         long start = System.nanoTime();
         HttpRequest request;
         try {
-            request = buildRequest(prompt, remainingMs);
+            request = buildRequest(messages, remainingMs);
         } catch (Exception e) {
             // 요청 준비 단계에서 예외가 나면 호출자(SlackEventHandler)까지 전파시키지 않는다 — LlmClient 계약은
             // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙). 입력 직렬화 실패는
@@ -233,12 +234,15 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return new LlmResult.Success(content.asText(), elapsed);
     }
 
-    private HttpRequest buildRequest(String prompt, long remainingMs) {
+    private HttpRequest buildRequest(List<LlmMessage> messages, long remainingMs) {
+        List<Map<String, String>> wire = new java.util.ArrayList<>();
+        wire.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        for (LlmMessage m : messages) {
+            wire.add(Map.of("role", m.role(), "content", m.content()));
+        }
         Map<String, Object> body = Map.of(
                 "model", props.model(),
-                "messages", java.util.List.of(
-                        Map.of("role", "system", "content", SYSTEM_PROMPT),
-                        Map.of("role", "user", "content", prompt)),
+                "messages", wire,
                 "max_tokens", props.maxTokens(),
                 "keep_alive", props.keepAlive(),
                 // 언어 혼용(중국어·영어 섞임) 실측 후 낮춤 — 창의성보다 지시 준수가 우선이다.

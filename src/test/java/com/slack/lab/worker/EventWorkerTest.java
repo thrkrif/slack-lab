@@ -259,7 +259,7 @@ class EventWorkerTest {
     @Test
     void markSending_이전_예외는_Failed로_귀결된다() {
         ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
-        SlackEventHandler throwsBeforeMark = new SlackEventHandler(null, null, null, null, null, null) {
+        SlackEventHandler throwsBeforeMark = new SlackEventHandler(null, null, null, null, null, null, null) {
             @Override
             public HandlingResult handle(SlackMessageEvent event, AttemptHandle attempt, boolean finalAttempt) {
                 throw new RuntimeException("markSending 전 예외");
@@ -277,7 +277,7 @@ class EventWorkerTest {
     @Test
     void markSending_이후_예외는_Unknown으로_귀결된다() {
         ProcessingStateStore store = new RedisProcessingStateStore(redis, STATE, QUEUE);
-        SlackEventHandler throwsAfterMark = new SlackEventHandler(null, null, null, null, null, null) {
+        SlackEventHandler throwsAfterMark = new SlackEventHandler(null, null, null, null, null, null, null) {
             @Override
             public HandlingResult handle(SlackMessageEvent event, AttemptHandle attempt, boolean finalAttempt) {
                 attempt.markSending();

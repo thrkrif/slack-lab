@@ -5,12 +5,15 @@ import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.config.ExperimentProperties;
 import com.slack.lab.config.ProcessingProperties;
 import com.slack.lab.llm.LlmClient;
+import com.slack.lab.llm.LlmMessage;
 import com.slack.lab.llm.LlmProperties;
 import com.slack.lab.llm.LlmResult;
 import com.slack.lab.slack.ReplyMetadata;
 import com.slack.lab.slack.SlackClient;
 import com.slack.lab.slack.SlackProperties;
 import com.slack.lab.slack.SlackSendResult;
+import java.util.ArrayList;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,17 +37,20 @@ public class SlackEventHandler {
     private final SlackProperties slackProps;
     private final ProcessingProperties processingProps;
     private final ExperimentProperties experimentProps;
+    private final ThreadContextSource threadContext;
     // 테스트가 프로세스를 죽이지 않고 halt 지점 도달만 확인하려고 바꿔 끼운다. 운영 경로는 항상 halt다.
     private Runnable halter = () -> Runtime.getRuntime().halt(137);
 
     public SlackEventHandler(LlmClient llmClient, SlackClient slackClient, LlmProperties llmProps,
-            SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps) {
+            SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps,
+            ThreadContextSource threadContext) {
         this.llmClient = llmClient;
         this.slackClient = slackClient;
         this.llmProps = llmProps;
         this.slackProps = slackProps;
         this.processingProps = processingProps;
         this.experimentProps = experimentProps;
+        this.threadContext = threadContext;
     }
 
     void setHalter(Runnable halter) {
@@ -69,9 +75,18 @@ public class SlackEventHandler {
             }
         }
 
+        // 스레드 안 멘션이면 이전 대화를 문맥으로 붙인다(M16). 조회 시간도 LLM 단계 예산에 포함되므로, 조회 뒤에 남은
+        // 예산을 다시 계산한다. 실패하면 문맥 없이 진행한다(구현체가 빈 목록을 돌려준다).
+        List<LlmMessage> messages = new ArrayList<>();
+        long contextBudgetMs = llmBudgetMs(t0);
+        if (event.threadTs() != null && contextBudgetMs > 0) {
+            messages.addAll(threadContext.fetch(event, contextBudgetMs));
+        }
+        messages.add(LlmMessage.user(event.promptText()));
+
         long llmRemainingMs = llmBudgetMs(t0);
         LlmResult llmResult = llmRemainingMs > 0
-                ? llmClient.chat(event.promptText(), llmRemainingMs)
+                ? llmClient.chat(messages, llmRemainingMs)
                 : new LlmResult.TimedOut(0);
 
         String text;

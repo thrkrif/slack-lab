@@ -13,6 +13,9 @@ import java.util.function.Function;
 final class StubOpenAiServer implements AutoCloseable {
 
     private final HttpServer server;
+    /** 마지막으로 받은 요청 본문(messages 구성 검증용). */
+    private final java.util.concurrent.atomic.AtomicReference<String> lastBody =
+            new java.util.concurrent.atomic.AtomicReference<>();
     /** {@link #chatHeadersThenHangs()}·{@link #modelsHeadersThenHang()} 전용: 클라이언트 소켓이 실제로 닫힌 시각(ms). */
     private final CompletableFuture<Long> peerClosedAtMs = new CompletableFuture<>();
 
@@ -88,8 +91,9 @@ final class StubOpenAiServer implements AutoCloseable {
 
     private static StubOpenAiServer start(String path, Function<HttpExchange, String> body, int status) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        StubOpenAiServer stub = new StubOpenAiServer(server);
         server.createContext(path, ex -> {
-            ex.getRequestBody().readAllBytes();
+            stub.lastBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] bytes = body.apply(ex).getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().add("Content-Type", "application/json");
             ex.sendResponseHeaders(status, bytes.length);
@@ -98,7 +102,11 @@ final class StubOpenAiServer implements AutoCloseable {
             }
         });
         server.start();
-        return new StubOpenAiServer(server);
+        return stub;
+    }
+
+    String lastBody() {
+        return lastBody.get();
     }
 
     String baseUrl() {
