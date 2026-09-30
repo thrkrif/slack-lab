@@ -9,7 +9,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 - 작업 계획 → [`PLAN.md`](.claude/docs/PLAN.md)
 - 실험 기록 → [`docs/EXPERIMENT-LOG.md`](docs/EXPERIMENT-LOG.md)
 
-**현재 단계: 2단계 (큐·워커 분리) · 계획 승인, M9 착수 전.** 1단계는 `v0.1.0`으로 완료. RAG·n8n·LangGraph 없음. 단계가 바뀌면 이 줄을 갱신한다.
+**현재 단계: 2단계 (큐·워커 분리) · M9~M13 완료, M14(결과 불명 복구) 착수 전.** 1단계는 `v0.1.0`으로 완료. RAG·n8n·LangGraph 없음. 세부 진행은 `.claude/docs/PLAN.md`가 정본이다. 단계 번호(2→3 등) 자체가 바뀔 때만 사용자 요청이 필요하다(Git 규칙) — 같은 단계 안의 진행 문구는 마일스톤마다 갱신한다.
 
 ## 규칙
 
