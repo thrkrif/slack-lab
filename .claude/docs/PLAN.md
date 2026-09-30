@@ -80,7 +80,7 @@
 - [x] **M15 즉시 반응** (P1-5) — 완료. `publish.lua`(두 스트림 원자 XADD), `ReactionConsumer`, `SlackClient.addReaction`, residue-check에 반응 스트림 추가. B12 실측 (`EXPERIMENT-LOG.md` §12)
 - [x] **M16 스레드 문맥** (P1-6) — 완료. `LlmMessage`·`LlmClient.chat(List)`, `ThreadContextSource`(event)·`SlackThreadContext`(slack)·`SlackThreadClient.fetchMessages`. 실제 스레드에서 문맥 반영·조회 실패 시 정상 답변 확인 (`EXPERIMENT-LOG.md` §13)
 - [x] **M17 관측 + 다중 워커** (P1-7·P1-8) — 완료. `처리 지표` 통합 로그·`BacklogReporter`·`scripts/p1-metrics`, 워커 2컨테이너에서 D1·D3(B15), B3·B4 kill 실측 (`EXPERIMENT-LOG.md` §14)
-- [ ] **M18 P1 검증 실험** — 성능(순차 20·버스트 5×2)·중복·복구, `EXPERIMENT-LOG.md`, PRD §6 2단계 판정
+- [x] **M18 P1 검증 실험** — 완료. `scripts/p1-load`, P(순차 20·버스트 5×2)·D(워커 1·2개)·R(R1·R2·R3) 수행, 판정 합격(합성 요청 기준·한계는 `EXPERIMENT-LOG.md` §15.5). PRD §6 2단계 세 항목 체크
 - [ ] **2단계 완료** (`develop`→`main`, 태그 `v0.2.0`, 현재 단계 줄) — **P1 합격(또는 사용자가 승인한 목표 변경 후 합격) + 사용자 요청 시에만**
 
 각 마일스톤을 마칠 때 이 목록, `다음 세션 핸드오프` 소절(덮어쓰기), `EXPERIMENT-LOG.md`를 갱신한다. 구조가 바뀐 마일스톤(M12·M13·M14·M15)은 같은 작업에서 `ARCHITECTURE.md`도 갱신한다(규칙 9).
@@ -89,7 +89,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9~M17 완료**. 다음은 **M18 P1 검증 실험**(성능 순차 20·버스트 5×2, 중복, 복구, PRD §6 판정). 성능 미달이면 **사용자 결정 멈춤**. M17 소규모 배치에서 컨테이너 환경의 `recv_ms` p50 464ms·`reaction_ms` 3.1s가 관측됐다 — M18이 판단한다.
+- **2단계 M9~M18 모두 완료, P1 검증 합격**(`EXPERIMENT-LOG.md` §15). 남은 것은 **2단계 완료 전환**(`develop`→`main` 병합, 태그 `v0.2.0`, `AGENTS.md`·PRD·PLAN 단계 줄) — **사용자가 요청할 때만** 한다(Git 규칙). 사람이 실제로 Slack에서 봇을 멘션하는 경로(Slack→ngrok→수신)는 아직 검증되지 않았으니 완료 전환 전에 사용자가 한 번 확인하길 권한다.
 - M15·M16 산출물: `ReactionConsumer`(worker)·`publish.lua`, `SlackThreadContext`. LLM 클라이언트의 간헐 실패는 원인(기한 취소가 `ExecutionException`으로 도착)을 찾아 M15에서 고쳤다.
 - M14 산출물: `RecoveryStore`(state)·`RecoveryService`/`RecoveryRunner`(recovery)·`SlackThreadClient`(slack)·`ReplyMetadata`, `state.lua`의 `resolve`·`reprocess` op. CLI는 `scripts/recovery <list|check|resolve-completed|reprocess <id> confirm-unsent|close>`(부트 jar 실행), 잔존물 검사는 `scripts/p1-residue-check`.
 - 실험 재현용 합성 서명 요청은 세션 스크래치 스크립트였다(커밋 안 함). 필요하면 EXPERIMENT-LOG §11의 절차를 따라 다시 만든다. 실제 스레드 조회에는 실제 부모 메시지(`chat.postMessage`)의 ts가 필요하다.
