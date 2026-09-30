@@ -85,9 +85,11 @@ public class SlackEventHandler {
         messages.add(LlmMessage.user(event.promptText()));
 
         long llmRemainingMs = llmBudgetMs(t0);
+        long llmStart = System.nanoTime();
         LlmResult llmResult = llmRemainingMs > 0
                 ? llmClient.chat(messages, llmRemainingMs)
                 : new LlmResult.TimedOut(0);
+        attempt.recordPhase("llm_ms", elapsedMs(llmStart));
 
         String text;
         String kind;
@@ -140,8 +142,11 @@ public class SlackEventHandler {
         }
 
         long remainingMs = Math.min(slackProps.sendDeadlineMs(), totalRemainingMs(t0));
+        long sendStart = System.nanoTime();
         SlackSendResult sendResult = slackClient.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs,
                 new ReplyMetadata(event.eventId(), attempt.attemptId()));
+
+        attempt.recordPhase("send_ms", elapsedMs(sendStart));
 
         // sealed 타입 switch — SlackSendResult에 분기가 늘어나면 컴파일 오류로 여기서 바로 드러난다.
         return switch (sendResult) {
