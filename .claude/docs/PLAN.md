@@ -78,7 +78,7 @@
 - [x] **M13 재시도·DLQ** (P1-4) — 완료(PR #23). 오류 분류(LlmResult·SlackSendResult에 retryable), `state.lua` RETRY_WAIT 전이·`retry_scheduler.lua`(XADD 후 ZREM), `RetryPolicy`·`RetryScheduler` 신규. codex critic 1회전 REVISE(MAJOR 2)→반영, 2회전 usage limit→code-reviewer 대체→MAJOR-A(재시도 보존 부분실패 잔여 경합) 발견·반영. 전이표 각 행 통합 테스트로 유도, M11 DLQ·복구 회귀 없음 확인. 테스트 163건 (`EXPERIMENT-LOG.md` §10)
 - [x] **M14 결과 불명 복구** (P1-3) — 완료. 스코프(`channels:history`·`reactions:write`)는 이미 반영돼 있어 `auth.test` 헤더로 확인 후 진행. 발신 metadata, `experiment.halt-after-send`, `state.lua` `resolve`·`reprocess` op, `recovery` CLI(`scripts/recovery`), `scripts/p1-residue-check`. B5·B11·B18 실측 (`EXPERIMENT-LOG.md` §11)
 - [x] **M15 즉시 반응** (P1-5) — 완료. `publish.lua`(두 스트림 원자 XADD), `ReactionConsumer`, `SlackClient.addReaction`, residue-check에 반응 스트림 추가. B12 실측 (`EXPERIMENT-LOG.md` §12)
-- [ ] **M16 스레드 문맥** (P1-6) — `conversations.replies`로 이전 대화를 프롬프트에 포함
+- [x] **M16 스레드 문맥** (P1-6) — 완료. `LlmMessage`·`LlmClient.chat(List)`, `ThreadContextSource`(event)·`SlackThreadContext`(slack)·`SlackThreadClient.fetchMessages`. 실제 스레드에서 문맥 반영·조회 실패 시 정상 답변 확인 (`EXPERIMENT-LOG.md` §13)
 - [ ] **M17 관측 + 다중 워커** (P1-7·P1-8) — 단계별 소요·적체·실패율 로그 집계, 워커 2프로세스
 - [ ] **M18 P1 검증 실험** — 성능(순차 20·버스트 5×2)·중복·복구, `EXPERIMENT-LOG.md`, PRD §6 2단계 판정
 - [ ] **2단계 완료** (`develop`→`main`, 태그 `v0.2.0`, 현재 단계 줄) — **P1 합격(또는 사용자가 승인한 목표 변경 후 합격) + 사용자 요청 시에만**
@@ -89,11 +89,12 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9~M15 완료**. 다음은 **M16 스레드 문맥**(`conversations.replies`, 스코프 `channels:history`는 있음, 멈춤 없음). 브랜치는 `develop`에서 새로 판다.
+- 2단계 진행 중. **M9~M16 완료**. 다음은 **M17 관측 + 다중 워커**(멈춤 없음). 브랜치는 `develop`에서 새로 판다.
+- M15·M16 산출물: `ReactionConsumer`(worker)·`publish.lua`, `SlackThreadContext`. LLM 클라이언트의 간헐 실패는 원인(기한 취소가 `ExecutionException`으로 도착)을 찾아 M15에서 고쳤다.
 - M14 산출물: `RecoveryStore`(state)·`RecoveryService`/`RecoveryRunner`(recovery)·`SlackThreadClient`(slack)·`ReplyMetadata`, `state.lua`의 `resolve`·`reprocess` op. CLI는 `scripts/recovery <list|check|resolve-completed|reprocess <id> confirm-unsent|close>`(부트 jar 실행), 잔존물 검사는 `scripts/p1-residue-check`.
 - 실험 재현용 합성 서명 요청은 세션 스크래치 스크립트였다(커밋 안 함). 필요하면 EXPERIMENT-LOG §11의 절차를 따라 다시 만든다. 실제 스레드 조회에는 실제 부모 메시지(`chat.postMessage`)의 ts가 필요하다.
 - "1차 수정이 같은 부류의 새 버그를 여는" 패턴이 M12·M13에서 반복됐다 — Lua·동시성 수정은 재검토를 최소 1회 거친다.
-- B3·B4는 M17(다중 워커, 역할 분리 기동)에서 실측한다. `OpenAiCompatibleLlmClientTest.기한을_넘기면_취소되고_TimedOut을_반환한다`는 부하 시 드물게 `Failed(CancellationException)`으로 흔들린다(플레이크, M14 무관).
+- B3·B4는 M17(다중 워커, 역할 분리 기동)에서 실측한다.
 - 실행: `docker start slack-lab-redis-1` + 호스트 `bootRun`(역할 `all`), ngrok·Slack Request URL은 이미 등록돼 있다. docker 명령은 하나씩 완료를 기다린다.
 - **세션 종료 시 호스트 `bootRun`을 켜둘지 끌지 사용자에게 명시적으로 알릴 것.**
 - M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개. 성능 목표: 순차 20건 p95 ≤ 45s + 버스트 5건×2 정확성.

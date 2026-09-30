@@ -657,3 +657,24 @@ PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medi
 
 알려진 한계(수정하지 않음): 반응 스트림에 `MAXLEN` 상한이 없다(소비자가 하나도 없으면 무한히 자란다 — residue-check가 10분 뒤 경고), 재기동마다 새 소비자 이름이 그룹에 남는다, `reaction_ms`는 Slack 재전송으로 들어온 항목이면 그 전달의 `received_at` 기준이라 최초 수신 기준보다 짧게 잰다, 회수는 PLAN의 `XAUTOCLAIM`이 아니라 `XPENDING`+`XCLAIM`이다(Spring Data Redis 3.4.1에 전용 API가 없다, `EventWorker`와 같은 방식), `ExecutionException(CancellationException)` 분류 수정의 회귀 테스트는 없다(경합이라 안정적 재현이 어렵다).
 
+## 13. 2단계 M16 스레드 문맥 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`), Ollama `qwen2.5:7b`, 합성 서명 요청 + 실제 스레드(§11·§12와 같은 방식). 스레드의 첫 메시지는 봇 계정으로 올린 "이 스레드의 비밀 단어는 '바나나'입니다"이다(사람 계정으로는 올릴 수 없어 조회 상 assistant 역할로 들어간다 — 역할 매핑은 단위 테스트로 따로 검증). 질문은 "이 스레드의 비밀 단어가 뭐였지? 한 단어로만 답해줘."이다.
+
+| 시나리오 | 결과 |
+|---|---|
+| **문맥 조회 성공** | `스레드 문맥 context_messages=1 context_chars=36 fetch_ms=468` → LLM 1342ms → 답글 **"바나나"**(스레드의 이전 내용을 반영). 총 소요 2078ms |
+| **조회 실패 유도** (`context.fetch-deadline-ms=1` → `deadline_exceeded`) | `문맥 없이 진행` 경고 로그 1회, LLM 529ms → 답글 **"비밀"**(문맥이 없어 앞 대화를 알지 못함), `Delivered`·총 799ms. 답글은 정상 발신됐고 조회 실패가 처리를 막지 않음. 문맥 유무에 따라 답이 갈리는 대조가 된다 |
+
+단위·통합 테스트: `SlackThreadContextTest` 10건(역할 매핑·이번 메시지 제외·봇 멘션 제거·빈 메시지 버림·최근 N개·글자 한도·단일 메시지 초과 시 자르기·`ok:false`·기한 초과 시 기한 안에 포기·남은 예산이 더 짧으면 그 예산 사용·예산 0이면 조회 안 함), `SlackEventHandlerTest`(스레드면 이전 대화가 이번 질문 앞에 붙음, 스레드가 아니면 조회 안 함, 조회가 비어도 정상 답변), `OpenAiCompatibleLlmClientTest`(시스템 프롬프트 뒤에 user/assistant 순서 유지). 전체 빌드 통과.
+
+주의: (1) 조회 실패 시연은 스코프 제거 대신 기한을 1ms로 줄여 유도했다(스코프를 빼려면 Slack 앱 화면 조작이 필요). (2) 사람이 실제로 멘션하는 Slack→ngrok 경로와 사람 계정 메시지의 `user` 역할 매핑은 실환경에서 검증하지 않았다 — 봇 메시지 판별을 `bot_id` 유무로만 하므로 다른 봇의 메시지도 assistant로 들어간다. (3) 대조군 이벤트(스레드 밖 질문)는 서버를 내리는 순간과 겹쳐 처리되지 않은 채 큐에 남았다가 다음 기동 때 처리된다.
+
+### 13.1 리뷰 대응 (codex usage limit → code-reviewer 대체, 1회전 REVISE: MAJOR 2·MINOR 7)
+
+- **MAJOR-1(반영)**: `conversations.replies`는 조회 시점의 스레드 전체를 주므로 큐 지연·재시도 사이에 올라온 *뒤 메시지*가 "이전 대화"로 섞였다. 현재 `ts` 이상인 메시지를 걸러낸다(소수 문자열이라 `BigDecimal`로 비교 — 문자열 비교면 `"1000.0" < "300.0"`이 된다). 회귀 테스트 추가.
+- **MAJOR-2(반영)**: JDK `HttpRequest.timeout`은 응답 헤더까지만 막아 본문이 멈추면 3초 기한이 깨지고 60초 상한(규칙 10)까지 위협했다. `sendAsync` + `future.get(기한)` + `cancel`로 바꿨고, 헤더 후 본문이 멈추는 스텁 테스트로 기한 안에 포기함을 확인.
+- **MINOR-1·2(반영)**: 기동 후 첫 조회에서 `auth.test`로 자기 `bot_id`·`user_id`를 알아 캐시한다. 자기 봇 메시지만 assistant로 넣고 **다른 앱의 봇 메시지는 버린다**(assistant로 넣으면 모델이 자기 말로 믿는 프롬프트 주입 경로). 문장 중간의 봇 멘션도 식별한 ID로 지운다. `auth.test`가 실패하면 예전처럼 모든 봇 메시지를 assistant로 본다. 수정 후 실서버 스모크(비밀 단어 '포도') 정상.
+- MINOR-4(`llmBudgetMs` 이중 계산)·MINOR-5(옛 Javadoc)도 반영.
+- **알려진 한계(수정하지 않음)**: 재시도할 때마다 스레드를 다시 조회한다(시도마다 최대 3초·Slack 호출 1회, 예산은 시도별 `t0`로 초기화되어 상한은 안전), 실패 안내(`FAILURE_NOTICE`)가 assistant 문맥으로 들어가 말투를 따라 할 수 있다(`ReplyMetadata`로 거르는 개선 여지), Slack이 Marketplace 밖 상용 앱에 `conversations.replies`를 분당 1회·15건으로 제한한 정책이 있다(내부용 앱이라 해당 없음, 배포 형태가 바뀌면 재확인), 글자 자르기는 UTF-16 단위라 이모지 서로게이트 쌍이 갈라질 수 있다, `fetchMessages`의 다중 페이지 경계(`missing_cursor`·`too_many_pages`) 전용 테스트는 없다.
+

@@ -199,4 +199,23 @@ class OpenAiCompatibleLlmClientTest {
             assertThat(result).isInstanceOf(LlmResult.Failed.class);
         }
     }
+
+    @Test
+    void 문맥_메시지를_역할_순서대로_시스템_프롬프트_뒤에_보낸다() throws Exception {
+        String body = """
+                {"choices":[{"message":{"content":"답"}}]}""";
+        try (var stub = StubOpenAiServer.chatRespondsWith(body, 200)) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            client.chat(java.util.List.of(LlmMessage.user("첫 질문"), LlmMessage.assistant("첫 답"),
+                    LlmMessage.user("두 번째 질문")), 5_000);
+
+            var messages = new ObjectMapper().readTree(stub.lastBody()).path("messages");
+            assertThat(messages).hasSize(4);
+            assertThat(messages.get(0).path("role").asText()).isEqualTo("system");
+            assertThat(messages.get(1).path("role").asText()).isEqualTo("user");
+            assertThat(messages.get(2).path("role").asText()).isEqualTo("assistant");
+            assertThat(messages.get(2).path("content").asText()).isEqualTo("첫 답");
+            assertThat(messages.get(3).path("content").asText()).isEqualTo("두 번째 질문");
+        }
+    }
 }

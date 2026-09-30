@@ -94,7 +94,7 @@ flowchart LR
 | | ~~`EventDeduplicator`·`ClaimResult`·`ProcessingState`~~ | P0 인메모리 dedup·전이 상태 기계 | **M12에서 제거됨.** `state/ProcessingStateStore`(§3.3)가 대체 |
 | | `SlackEventHandler` | LLM 호출 + 답글, `markSending` 게이트, `finalAttempt`로 재시도/최종 안내 분기(M13). HTTP도 큐 ACK도 모른다 | worker가 호출한다. 종료 상태 기록은 하지 않고 `HandlingResult`만 반환(M12) |
 | | `HandlingResult` | 핸들러 출력 계약(`Delivered`/`Failed`/`Unknown`/`Rejected`/`RetryRequested`(M13)) | worker가 이 값으로 `finalizeAttempt`·`scheduleRetry`·ACK 여부를 정한다 |
-| `llm/` | `LlmClient` | 호출 경계 인터페이스 | // 3단계에서 여기가 바뀐다 (RAG) |
+| `llm/` | `LlmClient` | 호출 경계 인터페이스. 입력은 `LlmMessage`(user/assistant) 목록이고 시스템 프롬프트는 구현체가 붙인다(M16) | // 3단계에서 여기가 바뀐다 (RAG) |
 | | `OpenAiCompatibleLlmClient` | Ollama 등 OpenAI 호환 호출 | worker에 있다 |
 | | `EchoLlmClient` | 모델 없이 왕복 검증용 더미 | 유지 |
 | `config/` | `ProcessingProperties`·`ExperimentProperties`, `HealthController`, `AppRole`·`ConditionalOnRole`·`StartupInvariants` | `record` + `@ConfigurationProperties`, `/health`(Redis 포함), 역할별 빈 등록·설정 불변식 | 각자 역할 조건으로 등록 |
@@ -382,6 +382,7 @@ flowchart TB
 | `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 | M11 완료 |
 | `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환 | M12 완료 |
 | `RetryPolicy` | 재시도 예약·최종 안내·DLQ | M13 완료 |
+| `ThreadContextSource` / `SlackThreadContext` | 스레드 안 멘션(`thread_ts` 있음)이면 `conversations.replies`로 이전 대화를 읽어 LLM 문맥으로 조립. 핸들러는 인터페이스만 안다(규칙 2). 봇 메시지(`bot_id`)는 assistant, 사람은 user, 이번 메시지는 제외. 최근 `context.max-messages`(10)개·`context.max-chars`(4000) 안에서 오래된 것부터 버림. 조회 기한 3초(`context.fetch-deadline-ms`)이며 **LLM 50초 예산에 포함**(조회 뒤 남은 예산을 다시 계산). 실패·기한 초과·불완전 조회는 문맥 없이 진행. 프롬프트·본문은 로그에 남기지 않고 메시지 수·글자 수·`fetch_ms`만 기록 | M16 완료 |
 | `EventPublisher`(`publish.lua`)·`ReactionConsumer` | 수신 서버가 처리 스트림(`slack:events`)과 반응 스트림(`slack:reactions`, 본문 없음)에 **한 스크립트로** XADD하고 `WAITAOF`를 한 번만 부른다. 소비자는 `reactions.add(eyes)`를 호출하고 `already_reacted`는 성공으로 본다. 실패는 로그만 남기고 재시도하지 않으며 항목은 XACKDEL로 지운다. 죽은 소비자의 항목은 min-idle 10초로 회수한다. 재시도·`reprocess` 재투입은 반응 스트림에 쓰지 않는다 | M15 완료 |
 | `RecoveryService` / `RecoveryStore` / `SlackThreadClient` | `recovery` 역할 CLI: `list`·`check`(스레드의 metadata 조회)·`resolve-completed`·`reprocess`·`close`. 전이는 `state.lua`의 `resolve`·`reprocess` op | M14 완료 |
 

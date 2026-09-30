@@ -49,6 +49,11 @@ public record SlackMessageEvent(
      * 모르면 문장 앞의 멘션만 지운다.
      */
     public String promptText() {
+        return cleanText(text, botUserId);
+    }
+
+    /** 스레드 문맥의 이전 메시지도 같은 규칙으로 정리한다(M16). */
+    public static String cleanText(String text, String botUserId) {
         String t = text == null ? "" : text;
         if (botUserId != null) {
             t = MENTION.matcher(t).replaceAll(m -> m.group(1).equals(botUserId) ? "" : java.util.regex.Matcher.quoteReplacement(m.group()));
