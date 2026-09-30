@@ -108,7 +108,7 @@ flowchart LR
 |---|---|---|---|
 | `receiver` | O | 서명 검증기·`SlackEventController`·`EventPublisher`·`AckLoggingFilter`·`/health` | LLM·Slack 발신 빈은 없다(B2) |
 | `worker` | X | `EventWorker`·`SlackEventHandler`·`ProcessingStateStore`·`LlmClient`·`SlackClient` | 큐 소비(M12) |
-| `reactor` | X | `SlackClient` | M15 즉시 반응 |
+| `reactor` | X | `ReactionConsumer`·`SlackClient` | M15 즉시 반응. `worker`·`all`에도 독립 스레드로 함께 뜬다 |
 | `recovery` | X | `RecoveryRunner`·`RecoveryService`·`RecoveryStore`·`SlackThreadClient` | M14 복구 CLI(`scripts/recovery`). 명령을 한 번 실행하고 종료한다. 자동 재발신 경로 없음 |
 | `all` | O | receiver+worker 빈 전체 | 개발 기본값. M12부터 큐 경유 흐름이다 |
 
@@ -382,6 +382,7 @@ flowchart TB
 | `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 | M11 완료 |
 | `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환 | M12 완료 |
 | `RetryPolicy` | 재시도 예약·최종 안내·DLQ | M13 완료 |
+| `EventPublisher`(`publish.lua`)·`ReactionConsumer` | 수신 서버가 처리 스트림(`slack:events`)과 반응 스트림(`slack:reactions`, 본문 없음)에 **한 스크립트로** XADD하고 `WAITAOF`를 한 번만 부른다. 소비자는 `reactions.add(eyes)`를 호출하고 `already_reacted`는 성공으로 본다. 실패는 로그만 남기고 재시도하지 않으며 항목은 XACKDEL로 지운다. 죽은 소비자의 항목은 min-idle 10초로 회수한다. 재시도·`reprocess` 재투입은 반응 스트림에 쓰지 않는다 | M15 완료 |
 | `RecoveryService` / `RecoveryStore` / `SlackThreadClient` | `recovery` 역할 CLI: `list`·`check`(스레드의 metadata 조회)·`resolve-completed`·`reprocess`·`close`. 전이는 `state.lua`의 `resolve`·`reprocess` op | M14 완료 |
 
 **M14 복구 규칙.** (1) 발신 시 `metadata(event_type=slack_lab_reply, event_id, attempt_id)`를 붙이고, `check`가 `conversations.replies(include_all_metadata)`로 그 시도의 답글을 찾는다. 스레드를 끝까지 읽지 못하면 "없음"을 단정하지 않는다. (2) `reprocess`는 `confirm-unsent` 위치 인자가 있어야만 실행된다(`--`로 시작하는 인자는 Boot가 옵션으로 가져가 쓰지 않는다). 순서는 claim 불변식을 따른다: 상태(`RETRY_WAIT`, gen+1, `manual_gen`) → `XADD` → 목록에서 제거. 보존 해시는 그 실행이 `COMPLETED`가 될 때 지워지고, 실패·소실되면 각 종료 경로(4'행 포함)가 다시 DLQ·복구 목록에 올린다. 중간에 끊기면 같은 명령을 다시 실행할 수 있고(같은 gen), 중복 투입은 선점 결과표가 하나만 실행시킨다. (3) `resolve-completed`·`close`는 상태 → 보존 해시·목록 삭제 → TTL 순서이며 TTL이 마지막이라 미완이 드러난다. 같은 명령을 다시 실행하면 정리를 마친다. (4) 별도 `SENDING` 스위퍼는 없다 — 결과표 4행이 그 역할이다(B5). (5) 목록 밖에서 진행 중인 수동 재처리(`RETRY_WAIT`·`PROCESSING`·`SENDING`)는 보존 해시를 붙잡고 있으므로 `scripts/p1-residue-check`는 이를 정상으로 본다.

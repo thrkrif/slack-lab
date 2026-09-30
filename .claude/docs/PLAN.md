@@ -77,7 +77,7 @@
 - [x] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 완료(PR #22). code-reviewer(codex 대체) REVISE(MAJOR 3건) → MAJOR-1(임대 갱신 미구현)·MAJOR-2(Redis 타임아웃 없음) 수정·회귀 테스트·실측 반영, MAJOR-3(왕복 근거 부풀림) 문서 정정 후 서버 재기동해 재확인(200→큐→워커→LLM→Slack 발신 성공→Delivered). B3·B4(역할 분리 kill 시나리오)는 `app.role=all` 단일 프로세스로 재현 불가해 M17(다중 워커)로 이월. 테스트 133건(MAJOR-1 회귀 테스트 추가 포함) (`EXPERIMENT-LOG.md` §9)
 - [x] **M13 재시도·DLQ** (P1-4) — 완료(PR #23). 오류 분류(LlmResult·SlackSendResult에 retryable), `state.lua` RETRY_WAIT 전이·`retry_scheduler.lua`(XADD 후 ZREM), `RetryPolicy`·`RetryScheduler` 신규. codex critic 1회전 REVISE(MAJOR 2)→반영, 2회전 usage limit→code-reviewer 대체→MAJOR-A(재시도 보존 부분실패 잔여 경합) 발견·반영. 전이표 각 행 통합 테스트로 유도, M11 DLQ·복구 회귀 없음 확인. 테스트 163건 (`EXPERIMENT-LOG.md` §10)
 - [x] **M14 결과 불명 복구** (P1-3) — 완료. 스코프(`channels:history`·`reactions:write`)는 이미 반영돼 있어 `auth.test` 헤더로 확인 후 진행. 발신 metadata, `experiment.halt-after-send`, `state.lua` `resolve`·`reprocess` op, `recovery` CLI(`scripts/recovery`), `scripts/p1-residue-check`. B5·B11·B18 실측 (`EXPERIMENT-LOG.md` §11)
-- [ ] **M15 즉시 반응** (P1-5) — 별도 반응 스트림·소비자가 "확인 중" 이모지, 최초 수신→표시 시간 측정
+- [x] **M15 즉시 반응** (P1-5) — 완료. `publish.lua`(두 스트림 원자 XADD), `ReactionConsumer`, `SlackClient.addReaction`, residue-check에 반응 스트림 추가. B12 실측 (`EXPERIMENT-LOG.md` §12)
 - [ ] **M16 스레드 문맥** (P1-6) — `conversations.replies`로 이전 대화를 프롬프트에 포함
 - [ ] **M17 관측 + 다중 워커** (P1-7·P1-8) — 단계별 소요·적체·실패율 로그 집계, 워커 2프로세스
 - [ ] **M18 P1 검증 실험** — 성능(순차 20·버스트 5×2)·중복·복구, `EXPERIMENT-LOG.md`, PRD §6 2단계 판정
@@ -89,7 +89,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9~M14 완료**. 다음은 **M15 즉시 반응**(스코프 `reactions:write`는 이미 있음, 멈춤 없음). 브랜치는 `develop`에서 새로 판다.
+- 2단계 진행 중. **M9~M15 완료**. 다음은 **M16 스레드 문맥**(`conversations.replies`, 스코프 `channels:history`는 있음, 멈춤 없음). 브랜치는 `develop`에서 새로 판다.
 - M14 산출물: `RecoveryStore`(state)·`RecoveryService`/`RecoveryRunner`(recovery)·`SlackThreadClient`(slack)·`ReplyMetadata`, `state.lua`의 `resolve`·`reprocess` op. CLI는 `scripts/recovery <list|check|resolve-completed|reprocess <id> confirm-unsent|close>`(부트 jar 실행), 잔존물 검사는 `scripts/p1-residue-check`.
 - 실험 재현용 합성 서명 요청은 세션 스크래치 스크립트였다(커밋 안 함). 필요하면 EXPERIMENT-LOG §11의 절차를 따라 다시 만든다. 실제 스레드 조회에는 실제 부모 메시지(`chat.postMessage`)의 ts가 필요하다.
 - "1차 수정이 같은 부류의 새 버그를 여는" 패턴이 M12·M13에서 반복됐다 — Lua·동시성 수정은 재검토를 최소 1회 거친다.

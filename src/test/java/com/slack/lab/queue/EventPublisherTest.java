@@ -2,6 +2,7 @@ package com.slack.lab.queue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -21,8 +22,7 @@ import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnection;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.connection.stream.RecordId;
-import org.springframework.data.redis.core.StreamOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -44,6 +44,7 @@ class EventPublisherTest {
             .withCommand("redis-server", "--appendonly", "yes", "--appendfsync", "always");
 
     static final QueueProperties PROPS = new QueueProperties("slack:events", "workers", 500, 100000);
+    static final ReactionProperties REACTION = new ReactionProperties("slack:reactions", "reactors", "eyes", 10000, 0);
 
     static LettuceConnectionFactory factory;
     static StringRedisTemplate redis;
@@ -78,7 +79,7 @@ class EventPublisherTest {
 
     @Test
     void 발행에_성공하면_Enqueued를_돌려주고_필드가_정확히_저장된다() {
-        EventPublisher publisher = new EventPublisher(redis, PROPS);
+        EventPublisher publisher = new EventPublisher(redis, PROPS, REACTION);
 
         PublishResult result = publisher.publish(event("EP1"), 1_700_000_000_000L, "0");
 
@@ -99,7 +100,7 @@ class EventPublisherTest {
 
     @Test
     void null_필드는_빈_문자열로_저장된다() {
-        EventPublisher publisher = new EventPublisher(redis, PROPS);
+        EventPublisher publisher = new EventPublisher(redis, PROPS, REACTION);
         SlackMessageEvent event = new SlackMessageEvent("EP2", "C1", null, null, "100.1", null, null, null, null);
 
         PublishResult result = publisher.publish(event, 1L, null);
@@ -111,6 +112,20 @@ class EventPublisherTest {
                 .containsEntry("user", "")
                 .containsEntry("text", "")
                 .containsEntry("retry_num", "");
+    }
+
+    @Test
+    void 발행하면_반응_스트림에도_본문_없는_최소_항목이_함께_들어간다() {
+        EventPublisher publisher = new EventPublisher(redis, PROPS, REACTION);
+
+        publisher.publish(event("EPR"), 1_700_000_000_000L, "0");
+
+        List<MapRecord<String, Object, Object>> rx = redis.opsForStream().range(REACTION.streamKey(), Range.unbounded());
+        assertThat(rx).hasSize(1);
+        assertThat(rx.get(0).getValue()).containsOnlyKeys("event_id", "channel", "ts", "received_at")
+                .containsEntry("event_id", "EPR").containsEntry("channel", "C1").containsEntry("ts", "100.1")
+                .containsEntry("received_at", "1700000000000");
+        assertThat(redis.opsForStream().size(PROPS.streamKey())).isEqualTo(1);
     }
 
     private Map<Object, Object> lastEntryFields(String streamId) {
@@ -126,11 +141,10 @@ class EventPublisherTest {
     @SuppressWarnings("unchecked")
     void XADD가_실패하면_Failed를_돌려준다() {
         StringRedisTemplate mockRedis = mock(StringRedisTemplate.class);
-        StreamOperations<String, Object, Object> streamOps = mock(StreamOperations.class);
-        when(mockRedis.opsForStream()).thenReturn(streamOps);
-        when(streamOps.add(any(MapRecord.class))).thenThrow(new RedisConnectionFailureException("연결 거부"));
+        when(mockRedis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("연결 거부"));
 
-        PublishResult result = new EventPublisher(mockRedis, PROPS).publish(event("EP3"), 1L, "0");
+        PublishResult result = new EventPublisher(mockRedis, PROPS, REACTION).publish(event("EP3"), 1L, "0");
 
         assertThat(result).isInstanceOf(PublishResult.Failed.class);
     }
@@ -143,9 +157,7 @@ class EventPublisherTest {
     @SuppressWarnings("unchecked")
     private static StringRedisTemplate mockRedisForWaitaof(LettuceConnection connection) {
         StringRedisTemplate mockRedis = mock(StringRedisTemplate.class);
-        StreamOperations<String, Object, Object> streamOps = mock(StreamOperations.class);
-        when(mockRedis.opsForStream()).thenReturn(streamOps);
-        when(streamOps.add(any(MapRecord.class))).thenReturn(RecordId.of("1-1"));
+        when(mockRedis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenReturn("1-1");
 
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
         when(mockRedis.getConnectionFactory()).thenReturn(factory);
@@ -159,7 +171,7 @@ class EventPublisherTest {
         when(connection.execute(eq("WAITAOF"), any(CommandOutput.class), any(byte[].class), any(byte[].class),
                 any(byte[].class))).thenThrow(new RedisConnectionFailureException("타임아웃"));
 
-        PublishResult result = new EventPublisher(mockRedisForWaitaof(connection), PROPS).publish(event("EP4"), 1L, "0");
+        PublishResult result = new EventPublisher(mockRedisForWaitaof(connection), PROPS, REACTION).publish(event("EP4"), 1L, "0");
 
         assertThat(result).isInstanceOf(PublishResult.Unconfirmed.class);
     }
@@ -170,7 +182,7 @@ class EventPublisherTest {
         when(connection.execute(eq("WAITAOF"), any(CommandOutput.class), any(byte[].class), any(byte[].class),
                 any(byte[].class))).thenReturn(List.of(0L, 0L));
 
-        PublishResult result = new EventPublisher(mockRedisForWaitaof(connection), PROPS).publish(event("EP5"), 1L, "0");
+        PublishResult result = new EventPublisher(mockRedisForWaitaof(connection), PROPS, REACTION).publish(event("EP5"), 1L, "0");
 
         assertThat(result).isInstanceOf(PublishResult.Unconfirmed.class);
     }
