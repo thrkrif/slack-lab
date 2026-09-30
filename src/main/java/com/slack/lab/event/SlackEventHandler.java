@@ -7,6 +7,7 @@ import com.slack.lab.config.ProcessingProperties;
 import com.slack.lab.llm.LlmClient;
 import com.slack.lab.llm.LlmProperties;
 import com.slack.lab.llm.LlmResult;
+import com.slack.lab.slack.ReplyMetadata;
 import com.slack.lab.slack.SlackClient;
 import com.slack.lab.slack.SlackProperties;
 import com.slack.lab.slack.SlackSendResult;
@@ -33,6 +34,8 @@ public class SlackEventHandler {
     private final SlackProperties slackProps;
     private final ProcessingProperties processingProps;
     private final ExperimentProperties experimentProps;
+    // 테스트가 프로세스를 죽이지 않고 halt 지점 도달만 확인하려고 바꿔 끼운다. 운영 경로는 항상 halt다.
+    private Runnable halter = () -> Runtime.getRuntime().halt(137);
 
     public SlackEventHandler(LlmClient llmClient, SlackClient slackClient, LlmProperties llmProps,
             SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps) {
@@ -42,6 +45,10 @@ public class SlackEventHandler {
         this.slackProps = slackProps;
         this.processingProps = processingProps;
         this.experimentProps = experimentProps;
+    }
+
+    void setHalter(Runnable halter) {
+        this.halter = halter;
     }
 
     /**
@@ -118,11 +125,20 @@ public class SlackEventHandler {
         }
 
         long remainingMs = Math.min(slackProps.sendDeadlineMs(), totalRemainingMs(t0));
-        SlackSendResult sendResult = slackClient.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs);
+        SlackSendResult sendResult = slackClient.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs,
+                new ReplyMetadata(event.eventId(), attempt.attemptId()));
 
         // sealed 타입 switch — SlackSendResult에 분기가 늘어나면 컴파일 오류로 여기서 바로 드러난다.
         return switch (sendResult) {
-            case SlackSendResult.Success s -> new HandlingResult.Delivered(kind, s.ts());
+            case SlackSendResult.Success s -> {
+                if (experimentProps.haltAfterSend()) {
+                    // 실험 R3: 발신은 끝났고 완료 기록은 아직이다. 정상 종료 훅도 돌지 않게 halt로 끊는다.
+                    log.warn("experiment.halt-after-send — 발신 직후 프로세스 중단 event_id={} attempt_id={}",
+                            event.eventId(), attempt.attemptId());
+                    halter.run();
+                }
+                yield new HandlingResult.Delivered(kind, s.ts());
+            }
             case SlackSendResult.Failed failed -> {
                 String stage = kind + "_send:" + failed.reason();
                 // M13 전이표: 답변(kind=answer) 발신의 재시도 가능한 실패는 마지막 시도가 아니면 안내 없이

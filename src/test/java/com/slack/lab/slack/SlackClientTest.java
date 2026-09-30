@@ -172,4 +172,30 @@ class SlackClientTest {
         assertThat(result).isInstanceOf(SlackSendResult.Failed.class);
         assertThat(((SlackSendResult.Failed) result).reason()).startsWith("request_build_failed");
     }
+
+    @Test
+    void 메타데이터를_주면_event_type과_payload가_요청_본문에_실린다() throws Exception {
+        try (var stub = StubSlackServer.respondsWith("{\"ok\":true,\"ts\":\"100.1\"}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            client.postMessage("C1", "99.9", "안녕", 5_000, new ReplyMetadata("Ev1", "att-1"));
+
+            var body = new ObjectMapper().readTree(stub.lastBody());
+            assertThat(body.path("metadata").path("event_type").asText()).isEqualTo("slack_lab_reply");
+            assertThat(body.path("metadata").path("event_payload").path("event_id").asText()).isEqualTo("Ev1");
+            assertThat(body.path("metadata").path("event_payload").path("attempt_id").asText()).isEqualTo("att-1");
+            assertThat(body.path("thread_ts").asText()).isEqualTo("99.9");
+        }
+    }
+
+    @Test
+    void 메타데이터가_없으면_metadata_필드를_보내지_않는다() throws Exception {
+        try (var stub = StubSlackServer.respondsWith("{\"ok\":true,\"ts\":\"100.1\"}", 200)) {
+            var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
+            client.postMessage("C1", null, "안녕", 5_000);
+
+            var body = new ObjectMapper().readTree(stub.lastBody());
+            assertThat(body.has("metadata")).isFalse();
+            assertThat(body.has("thread_ts")).isFalse();
+        }
+    }
 }

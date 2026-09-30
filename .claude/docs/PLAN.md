@@ -76,7 +76,7 @@
 - [x] **M11 공유 처리 상태 저장소** — 완료(codex 2회전 반영, 3회전은 usage limit으로 code-reviewer 대체). `state/` 패키지·`state.lua`, 선점 결과표 9종, `finalize` 검증→보존→상태→ACK 순서, 세대 인식 정리. 통합 테스트 26건 (`EXPERIMENT-LOG.md` §8)
 - [x] **M12 수신–큐–워커 분리** (P1-1·P1-2) — 완료(PR #22). code-reviewer(codex 대체) REVISE(MAJOR 3건) → MAJOR-1(임대 갱신 미구현)·MAJOR-2(Redis 타임아웃 없음) 수정·회귀 테스트·실측 반영, MAJOR-3(왕복 근거 부풀림) 문서 정정 후 서버 재기동해 재확인(200→큐→워커→LLM→Slack 발신 성공→Delivered). B3·B4(역할 분리 kill 시나리오)는 `app.role=all` 단일 프로세스로 재현 불가해 M17(다중 워커)로 이월. 테스트 133건(MAJOR-1 회귀 테스트 추가 포함) (`EXPERIMENT-LOG.md` §9)
 - [x] **M13 재시도·DLQ** (P1-4) — 완료(PR #23). 오류 분류(LlmResult·SlackSendResult에 retryable), `state.lua` RETRY_WAIT 전이·`retry_scheduler.lua`(XADD 후 ZREM), `RetryPolicy`·`RetryScheduler` 신규. codex critic 1회전 REVISE(MAJOR 2)→반영, 2회전 usage limit→code-reviewer 대체→MAJOR-A(재시도 보존 부분실패 잔여 경합) 발견·반영. 전이표 각 행 통합 테스트로 유도, M11 DLQ·복구 회귀 없음 확인. 테스트 163건 (`EXPERIMENT-LOG.md` §10)
-- [ ] **M14 결과 불명 복구** (P1-3) — **착수 전 Slack 스코프 재설치에서 멈춤**, `recovery` CLI(수동 재처리 승인 포함), 발신 직후 halt 유도
+- [x] **M14 결과 불명 복구** (P1-3) — 완료. 스코프(`channels:history`·`reactions:write`)는 이미 반영돼 있어 `auth.test` 헤더로 확인 후 진행. 발신 metadata, `experiment.halt-after-send`, `state.lua` `resolve`·`reprocess` op, `recovery` CLI(`scripts/recovery`), `scripts/p1-residue-check`. B5·B11·B18 실측 (`EXPERIMENT-LOG.md` §11)
 - [ ] **M15 즉시 반응** (P1-5) — 별도 반응 스트림·소비자가 "확인 중" 이모지, 최초 수신→표시 시간 측정
 - [ ] **M16 스레드 문맥** (P1-6) — `conversations.replies`로 이전 대화를 프롬프트에 포함
 - [ ] **M17 관측 + 다중 워커** (P1-7·P1-8) — 단계별 소요·적체·실패율 로그 집계, 워커 2프로세스
@@ -89,17 +89,15 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- 2단계 진행 중. **M9~M13 완료**(PR #22·#23 모두 `develop` 병합됨). 다음은 **M14 결과 불명 복구**, 브랜치는 아직 없음(`feature/m14-recovery` 등으로 새로 판다).
-- **M14 착수 전 멈춤(PLAN 원문)**: Slack 앱에 스코프 `channels:history`(비공개 채널이면 `groups:history`)·`reactions:write` 추가 후 재설치, `auth.test`로 확인 — **사람 조작 필요, 여기서 멈춘다.** M15·M16 스코프까지 한 번에 처리해도 된다.
-- M12·M13 모두 codex critic이 usage limit에 걸려 code-reviewer로 대체 검토한 라운드가 있었다. 두 마일스톤 다 **"1차 수정이 같은 부류의 새 버그를 하나 더 여는" 패턴**이 나왔다(M12: 임대 갱신 추가 자체는 맞았지만 관련 없는 버그 2건 발견, M13: retry 부분실패 수정이 새 경합을 하나 더 엶) — Lua 스크립트나 동시성 관련 수정은 **한 번 고치고 끝내지 말고, 재검토(codex 또는 code-reviewer) 최소 1회를 항상 거친다.**
-- M13에서 `HandlingResult.RetryRequested`, `RetryPolicy`, `RetryScheduler`, `state.lua`의 `RETRY_WAIT` 전이, `retry_scheduler.lua`가 추가됐다. `preserve_at()`에 `hset_first` 파라미터가 생겼다 — DLQ·복구는 HSET 먼저(기본값), 재시도는 ZADD 먼저. M14 복구 CLI를 만들 때 이 함수·전제를 재사용하게 될 가능성이 높으니 `state.lua` 주석을 먼저 읽을 것.
-- B3(수신 kill)·B4(워커 kill)는 `app.role=all` 단일 프로세스로는 재현 불가 — M17(다중 워커, 역할 분리 기동)에서 실측한다.
-- 실행: `docker start slack-lab-redis-1`(또는 `docker compose up -d redis`) + 호스트 `bootRun`(역할 `all`), ngrok은 이미 떠 있고 Slack Request URL도 등록돼 있다(재등록 불필요 — 터널이 재시작되지 않는 한).
-- docker 명령은 병렬로 여러 개 띄우지 말고 하나씩 완료를 기다릴 것(이전에 여러 세션의 `docker compose up`/`docker start`가 동시에 쌓여 서로 lock을 잡고 멈춘 적 있음).
-- **세션 종료 시 호스트 `bootRun`을 켜둘지 끌지 사용자에게 명시적으로 알릴 것**(M12에서 조용히 꺼서 사용자의 실제 멘션이 무응답으로 보인 적 있음).
-- M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개.
-- 성능 목표: 순차 20건 답변 p95 ≤ 45s + 버스트 5건×2는 정확성만 판정(사용자 결정).
-- 다음 멈춤 지점은 M14 착수 전 Slack 스코프 재설치다.
+- 2단계 진행 중. **M9~M14 완료**. 다음은 **M15 즉시 반응**(스코프 `reactions:write`는 이미 있음, 멈춤 없음). 브랜치는 `develop`에서 새로 판다.
+- M14 산출물: `RecoveryStore`(state)·`RecoveryService`/`RecoveryRunner`(recovery)·`SlackThreadClient`(slack)·`ReplyMetadata`, `state.lua`의 `resolve`·`reprocess` op. CLI는 `scripts/recovery <list|check|resolve-completed|reprocess <id> confirm-unsent|close>`(부트 jar 실행), 잔존물 검사는 `scripts/p1-residue-check`.
+- 실험 재현용 합성 서명 요청은 세션 스크래치 스크립트였다(커밋 안 함). 필요하면 EXPERIMENT-LOG §11의 절차를 따라 다시 만든다. 실제 스레드 조회에는 실제 부모 메시지(`chat.postMessage`)의 ts가 필요하다.
+- "1차 수정이 같은 부류의 새 버그를 여는" 패턴이 M12·M13에서 반복됐다 — Lua·동시성 수정은 재검토를 최소 1회 거친다.
+- B3·B4는 M17(다중 워커, 역할 분리 기동)에서 실측한다. `OpenAiCompatibleLlmClientTest.기한을_넘기면_취소되고_TimedOut을_반환한다`는 부하 시 드물게 `Failed(CancellationException)`으로 흔들린다(플레이크, M14 무관).
+- 실행: `docker start slack-lab-redis-1` + 호스트 `bootRun`(역할 `all`), ngrok·Slack Request URL은 이미 등록돼 있다. docker 명령은 하나씩 완료를 기다린다.
+- **세션 종료 시 호스트 `bootRun`을 켜둘지 끌지 사용자에게 명시적으로 알릴 것.**
+- M9 확정값: `queue.enqueue-timeout-ms=150`, 워커 LLM 동시성 1, 테스트 채널 1개. 성능 목표: 순차 20건 p95 ≤ 45s + 버스트 5건×2 정확성.
+- 다음 멈춤 지점: 없음(M15~M17은 자동 진행). M18 성능 목표 미달 시 사용자 결정.
 
 ---
 

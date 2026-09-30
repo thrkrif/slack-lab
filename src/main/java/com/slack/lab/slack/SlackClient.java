@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -68,6 +69,15 @@ public class SlackClient {
      *                     계산해 넘긴다. 예산이 없으면 발신을 시작하지 않는다(A15).
      */
     public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs) {
+        return postMessage(channel, threadTs, text, remainingMs, null);
+    }
+
+    /**
+     * @param metadata 발신에 붙일 메타데이터(M14). 결과 불명 뒤 {@code conversations.replies}로 "이 시도가 실제로
+     *                 보낸 답글"을 찾는 유일한 단서다. null이면 붙이지 않는다.
+     */
+    public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
+            ReplyMetadata metadata) {
         if (remainingMs <= 0) {
             log.warn("Slack 발신 예산 없음 — 발신 시작 안 함");
             return new SlackSendResult.Failed("budget_exhausted");
@@ -76,7 +86,7 @@ public class SlackClient {
 
         HttpRequest request;
         try {
-            request = buildRequest(channel, threadTs, text, remainingMs);
+            request = buildRequest(channel, threadTs, text, remainingMs, metadata);
         } catch (Exception e) {
             // 요청을 만들다 실패했으면 네트워크로 나가지 않았으므로 명확한 실패다. 같은 입력으로 다시
             // 시도해도 그대로 실패하므로(M13) 영구 실패다.
@@ -213,10 +223,18 @@ public class SlackClient {
         return new SlackSendResult.Failed(error);
     }
 
-    private HttpRequest buildRequest(String channel, String threadTs, String text, long remainingMs) {
-        Map<String, Object> body = threadTs == null
-                ? Map.of("channel", channel, "text", text)
-                : Map.of("channel", channel, "thread_ts", threadTs, "text", text);
+    private HttpRequest buildRequest(String channel, String threadTs, String text, long remainingMs,
+            ReplyMetadata metadata) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("channel", channel);
+        if (threadTs != null) {
+            body.put("thread_ts", threadTs);
+        }
+        body.put("text", text);
+        if (metadata != null) {
+            body.put("metadata", Map.of("event_type", ReplyMetadata.EVENT_TYPE, "event_payload",
+                    Map.of("event_id", metadata.eventId(), "attempt_id", metadata.attemptId())));
+        }
         String json;
         try {
             json = mapper.writeValueAsString(body);

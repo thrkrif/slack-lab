@@ -612,3 +612,27 @@ PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medi
 **스킵(문서화만)**: LOW-2(Slack/LLM 예산 소진 분류 불일치)·LOW-4(취소 테스트가 실제 취소를 증명 못 함)·LOW-6(스케줄러 배치 제한의 head-of-line blocking)은 code-reviewer 권고대로 이번엔 건드리지 않았다.
 
 전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.
+
+## 11. 2단계 M14 결과 불명 복구 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`) + `docker slack-lab-redis-1`, Ollama `qwen2.5:7b`, 테스트 채널 1개. 요청은 서명이 유효한 **합성** `event_callback`이고(Slack→ngrok 구간은 아님), 답글은 **실제 Slack 스레드**에 달렸다. 스레드 조회를 위해 실제 부모 메시지를 `chat.postMessage`로 먼저 올렸다. 스코프 `channels:history`·`reactions:write`는 `auth.test`의 `x-oauth-scopes` 헤더로 이미 반영됨을 확인했다(멈춤 지점 해소). event_id·채널 ID는 기록하지 않는다.
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **B5** 발신 직후 중단 | `--experiment.halt-after-send=true`로 기동 → 이벤트 1건 → LLM 성공, Slack 발신 성공 직후 `Runtime.halt` → 상태 `SENDING`, 메시지 pending | 서버 재기동 후 약 95초(`claim-min-idle-ms=100s`) 뒤 `XAUTOCLAIM` 회수 → 결과표 4행 `SETTLED:UNKNOWN`, `stage=sending_lease_expired`, 복구 목록에 보존. 재발신 0회 |
+| B5 `check` | `scripts/recovery check <id>` | 스레드에서 `metadata` 일치 답글 발견, **`attempt_id`가 halt된 그 시도와 일치** |
+| B5 해결 | `resolve-completed <id> <ts>` | `COMPLETED`(ts 기록), 보존 해시·목록 삭제, TTL 약 7일 |
+| **미전송 → `reprocess`** | `slack.base-url`을 요청을 받고 연결을 끊는 스텁으로 → `UNKNOWN(answer_send:IOException)`(스텁 접속 1회 = 자동 재발신 0회). `check`는 "답글 없음(스레드 전체 확인)". 서버를 내리고 `confirm-unsent` 없이 실행하면 거절(종료 코드 2), 붙이면 승인 | 실제 Slack으로 재기동 → gen 1, `manual_run=1`로 1회 실행, 답글 발신, `COMPLETED`, 보존본 삭제 |
+| **B11** 24시간 초과 | 25시간 전 `received_at`으로 스트림에 직접 `XADD` | 선점 결과 `SETTLED:EXPIRED` → `DEAD(window_expired)`, DLQ 보존, **발신 0회**. `reprocess` 승인 후 1회 실행 → `COMPLETED`, `manual_gen` 소비 |
+| **B18** | `scripts/p1-residue-check` | 실행마다 `OK: 잔존물 0`(해결 8건, 미해결 0, 보존 해시 0, 스트림 잔존 0). 위반 주입(보존 해시·스트림 본문 잔존, TTL 없는 CLOSED, 보존 없는 목록 항목)에서는 5건을 모두 잡고 종료 코드 1 |
+
+통합 테스트(Testcontainers, `RecoveryStoreTest` 17건): resolve·close 정리와 멱등, 다른 ts 거절, 진행 중 건 거절, **resolve의 쓰기 1~6번째 뒤 실패 주입 → 재실행으로 잔존 0**, **reprocess의 쓰기 1~4번째 뒤 실패 주입 → 재실행해도 gen은 한 번만 오르고 승인 실행은 정확히 1건**, 승인 실행 소실 시 4'행으로 `DEAD` 후 새 승인은 gen+1, 창 초과 건의 자동 차단과 수동 승인 실행. 전체 빌드 205건 통과.
+
+발견·주의: (1) `--`로 시작하는 CLI 인자는 Boot가 옵션으로 파싱해 비옵션 인자에서 빠진다 → 확인 인자를 위치 인자 `confirm-unsent`로 했다. (2) `gradlew bootRun`은 CLI의 종료 코드 1·2를 빌드 실패로 출력해 `scripts/recovery`는 부트 jar를 직접 실행한다. (3) `docker exec -i`가 셸 반복문의 표준 입력을 삼켜 `p1-residue-check`가 첫 키만 보고 끝나던 버그를 실험 중 발견해 `</dev/null`로 고쳤다. (4) 개발 중 남아 있던 옛 DLQ 2건(`channel_not_found`)은 `close`로 정리했다. (5) 실제 사람 멘션(Slack→ngrok) 경로는 이 마일스톤에서도 검증하지 않았다. (6) 승인 실행 소실(4'행)은 통합 테스트로만 확인했고 실제 kill 실측은 없다.
+
+### 11.1 리뷰 대응 (codex 1회전 REVISE → 반영, 2회전은 usage limit으로 code-reviewer 대체 APPROVE)
+
+- codex 1회전: MAJOR 1(잔존 검사기가 Redis 실패를 `OK`로 보고 — `REDIS_CLI=false`로 재현) + MINOR 2(스트림 본문 속 `event_id` 줄 오인, `has_more`인데 커서 없는 스레드 조회를 완료로 판정). 모두 수정: 조회 실패는 종료 코드 3(검사 불가), 스트림은 JSON 짝 단위 파싱, 커서 없는 `has_more`·`messages` 누락은 불완전/실패. 오탐·미탐을 독립 Redis에 재현해 확인.
+- 2회전(code-reviewer): **APPROVE, MAJOR 0**. Lua 새 경합·유실·중복 실행 경로 없음(승인은 8행에서 한 스크립트로 소비, 소실은 4'행). 이 중 MINOR m1(redis-cli는 오류 응답에도 종료 코드 0 → 대문자 오류 접두어 감지)·m2(mktemp 실패)·m3(스트림 JSON을 stdin으로)·m7(비어 있지 않은 커서도 "더 있음")는 반영했다.
+- **알려진 한계(수정하지 않음)**: (m4) 승인됐지만 아직 선점 안 된 건(`RETRY_WAIT`+`manual_gen`)은 `close`로 철회할 수 없다. (m5) 4행 `UNKNOWN` 직후 옛 워커의 HTTP 발신이 아직 진행 중일 수 있어, 그 사이 `check`가 "없음"이라 `reprocess`하면 중복 답글이 날 수 있다 — 사람이 `send-deadline`(10초) 이상 지난 뒤 확인해야 한다. (m6) `ANOMALY`로 올라간 DLQ 항목 중 상태가 `PROCESSING`·`CLOSED`이거나 상태 해시가 만료된 것은 CLI로 지울 수 없다. (m7) 메타데이터에 `kind`가 없어 `check`가 실패 안내 답글도 "전송됨"으로 보여준다.
+

@@ -11,6 +11,9 @@ import com.sun.net.httpserver.HttpServer;
 final class StubSlackServer implements AutoCloseable {
 
     private final HttpServer server;
+    /** {@link #respondsWith}가 마지막으로 받은 요청 본문(메타데이터 전달 검증용). */
+    private final java.util.concurrent.atomic.AtomicReference<String> lastBody =
+            new java.util.concurrent.atomic.AtomicReference<>();
     /** {@link #headersThenHangs()} 전용: 클라이언트 소켓이 실제로 닫힌 시각(ms), 못 감지하면 -1. */
     private final CompletableFuture<Long> peerClosedAtMs = new CompletableFuture<>();
 
@@ -20,8 +23,9 @@ final class StubSlackServer implements AutoCloseable {
 
     static StubSlackServer respondsWith(String json, int status) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        StubSlackServer stub = new StubSlackServer(server);
         server.createContext("/chat.postMessage", ex -> {
-            ex.getRequestBody().readAllBytes();
+            stub.lastBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().add("Content-Type", "application/json");
             ex.sendResponseHeaders(status, bytes.length);
@@ -30,7 +34,11 @@ final class StubSlackServer implements AutoCloseable {
             }
         });
         server.start();
-        return new StubSlackServer(server);
+        return stub;
+    }
+
+    String lastBody() {
+        return lastBody.get();
     }
 
     static StubSlackServer hangs() throws IOException {

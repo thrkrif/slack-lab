@@ -109,7 +109,7 @@ flowchart LR
 | `receiver` | O | 서명 검증기·`SlackEventController`·`EventPublisher`·`AckLoggingFilter`·`/health` | LLM·Slack 발신 빈은 없다(B2) |
 | `worker` | X | `EventWorker`·`SlackEventHandler`·`ProcessingStateStore`·`LlmClient`·`SlackClient` | 큐 소비(M12) |
 | `reactor` | X | `SlackClient` | M15 즉시 반응 |
-| `recovery` | X | `SlackClient` | M14 복구 CLI |
+| `recovery` | X | `RecoveryRunner`·`RecoveryService`·`RecoveryStore`·`SlackThreadClient` | M14 복구 CLI(`scripts/recovery`). 명령을 한 번 실행하고 종료한다. 자동 재발신 경로 없음 |
 | `all` | O | receiver+worker 빈 전체 | 개발 기본값. M12부터 큐 경유 흐름이다 |
 
 - 실행: `compose.yaml`의 `redis`(`redis:8.2-alpine`, `infra/redis.conf` — AOF always)와 profile `app`의 `receiver`·`worker`·`reactor`가 한 이미지(`slack-lab-app`)를 쓴다. Ollama는 호스트에 두고 `host.docker.internal:11434`로 호출한다. 포트는 모두 `127.0.0.1`에만 연다.
@@ -372,7 +372,7 @@ flowchart TB
 
 ### 5.1 P1의 변경 범위와 책임
 
-아래 컴포넌트는 P1에서 도입했다(M9~M12). 재시도·DLQ·복구(M13·M14)는 계속 진행 중이다.
+아래 컴포넌트는 P1에서 도입했다(M9~M12). 재시도·DLQ(M13)와 복구(M14)도 도입했다.
 
 | 컴포넌트 | 책임 | 상태 |
 |---|---|---|
@@ -381,7 +381,10 @@ flowchart TB
 | `EventWorker` | 큐 소비, 처리 권한 선점, 임대 주기적 갱신(§3.2), 핸들러 호출, 결과 분류, 종료 기록 뒤 ACK(Rejected는 ACK 안 함) | M12 완료(최소 정책. 재시도는 M13) |
 | `ProcessingStateStore` | 소유권·임대·상태 전이·보존 기간을 원자적으로 관리; P0 인메모리 dedup을 대체 | M11 완료 |
 | `SlackEventHandler` | HTTP·큐 ACK와 무관한 업무 처리; 발신 결과와 실패 단계를 반환 | M12 완료 |
-| `RetryPolicy` / `RecoveryService` | 재시도 예약·최종 안내·DLQ·UNKNOWN 확인 및 수동 복구 | M13·M14 예정 |
+| `RetryPolicy` | 재시도 예약·최종 안내·DLQ | M13 완료 |
+| `RecoveryService` / `RecoveryStore` / `SlackThreadClient` | `recovery` 역할 CLI: `list`·`check`(스레드의 metadata 조회)·`resolve-completed`·`reprocess`·`close`. 전이는 `state.lua`의 `resolve`·`reprocess` op | M14 완료 |
+
+**M14 복구 규칙.** (1) 발신 시 `metadata(event_type=slack_lab_reply, event_id, attempt_id)`를 붙이고, `check`가 `conversations.replies(include_all_metadata)`로 그 시도의 답글을 찾는다. 스레드를 끝까지 읽지 못하면 "없음"을 단정하지 않는다. (2) `reprocess`는 `confirm-unsent` 위치 인자가 있어야만 실행된다(`--`로 시작하는 인자는 Boot가 옵션으로 가져가 쓰지 않는다). 순서는 claim 불변식을 따른다: 상태(`RETRY_WAIT`, gen+1, `manual_gen`) → `XADD` → 목록에서 제거. 보존 해시는 그 실행이 `COMPLETED`가 될 때 지워지고, 실패·소실되면 각 종료 경로(4'행 포함)가 다시 DLQ·복구 목록에 올린다. 중간에 끊기면 같은 명령을 다시 실행할 수 있고(같은 gen), 중복 투입은 선점 결과표가 하나만 실행시킨다. (3) `resolve-completed`·`close`는 상태 → 보존 해시·목록 삭제 → TTL 순서이며 TTL이 마지막이라 미완이 드러난다. 같은 명령을 다시 실행하면 정리를 마친다. (4) 별도 `SENDING` 스위퍼는 없다 — 결과표 4행이 그 역할이다(B5). (5) 목록 밖에서 진행 중인 수동 재처리(`RETRY_WAIT`·`PROCESSING`·`SENDING`)는 보존 해시를 붙잡고 있으므로 `scripts/p1-residue-check`는 이를 정상으로 본다.
 
 - 초기 재시도 정책은 최초 시도 이후 최대 3회, 기본 대기 5초·30초·120초다. 적용 가능한 서버 지정 대기 시간이 있으면 그보다 일찍 재시도하지 않는다. 최초 수신 후 24시간을 넘으면 자동 실행을 멈추고 복구 대상으로 넘긴다.
 - LLM 일시 실패와 미전송이 확실한 일시적 발신 실패만 자동 재시도한다. 인증·권한·잘못된 입력 등 영구 오류와 전송 결과 불명은 반복 호출하지 않는다. 오류 분류는 각 클라이언트 경계에서 수행한다.

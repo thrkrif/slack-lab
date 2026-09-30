@@ -6,9 +6,12 @@ import com.slack.lab.SlackLabApplication;
 import com.slack.lab.event.SlackEventHandler;
 import com.slack.lab.llm.LlmClient;
 import com.slack.lab.queue.EventPublisher;
+import com.slack.lab.recovery.RecoveryService;
 import com.slack.lab.slack.SlackClient;
 import com.slack.lab.slack.SlackEventController;
 import com.slack.lab.slack.SlackSignatureVerifier;
+import com.slack.lab.slack.SlackThreadClient;
+import com.slack.lab.state.RecoveryStore;
 import com.slack.lab.state.RedisProcessingStateStore;
 import com.slack.lab.worker.EventWorker;
 import org.junit.jupiter.api.Test;
@@ -28,7 +31,7 @@ class AppRoleContextTest {
     private static ConfigurableApplicationContext start(String role) {
         return new SpringApplicationBuilder(SlackLabApplication.class).run(
                 "--app.role=" + role, "--server.port=0", "--slack.signing-secret=s", "--slack.bot-token=t",
-                "--llm.model=m", "--llm.client=echo");
+                "--llm.model=m", "--llm.client=echo", "--recovery.exit-after-run=false");
     }
 
     @Test
@@ -66,6 +69,20 @@ class AppRoleContextTest {
             assertThat(ctx.getBeanNamesForType(EventWorker.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(SlackClient.class)).hasSize(1);
             assertThat(ctx.getBeanNamesForType(RedisProcessingStateStore.class)).hasSize(1);
+            assertThat(ctx.getBeanNamesForType(RecoveryService.class)).hasSize(1);
+            assertThat(ctx.getBeanNamesForType(RecoveryStore.class)).hasSize(1);
+            assertThat(ctx.getBeanNamesForType(SlackThreadClient.class)).hasSize(1);
+        }
+    }
+
+    @Test
+    void 복구_명령은_복구_역할에만_있다() {
+        try (ConfigurableApplicationContext ctx = start("all")) {
+            assertThat(ctx.getBeanNamesForType(RecoveryService.class)).isEmpty();
+            assertThat(ctx.getBeanNamesForType(RecoveryStore.class)).isEmpty();
+        }
+        try (ConfigurableApplicationContext ctx = start("worker")) {
+            assertThat(ctx.getBeanNamesForType(RecoveryService.class)).isEmpty();
         }
     }
 
