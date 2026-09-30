@@ -432,3 +432,351 @@ Slack API 실제 발신(네트워크 왕복 300~500ms)·ngrok 왕복 지연이 �
 기한을 늘리자 70초짜리 느린 응답도 정상적으로(재전송은 1회만 발생, dedup이 정확히 억제하며) 전달됐다 —
 **하드캡이 존재 이유가 있는 정상 응답을 실패로 오분류할 수 있음을 실측으로 확인**했다. 60초 캡을 유지하는
 결정(ADR-7)의 트레이드오프를 구체적 수치로 뒷받침하는 근거다.
+
+## 6. 2단계 M9 타당성 스파이크 (2026-09-28)
+
+### 6.1 Redis 크래시 내구성·지연 (`docs/spikes/redis_durability_spike.py`)
+
+환경: Docker `redis:8.2-alpine`(서버 8.2.10), `--appendonly yes --appendfsync always`. 클라이언트는 호스트 Python 소켓.
+
+| 항목 | 결과 |
+|---|---|
+| `XADD` + `WAITAOF 1 0 150` 왕복, n=200 | p50 0.83ms · **p95 3.18ms** · max 5.52ms |
+| `WAITAOF` numlocal | 200건 모두 1 |
+| `XACKDEL`(단일 명령) | 반환 `[1]`, XLEN 200→199, pending 0 — ACK와 삭제가 한 번에 적용됨 |
+| `docker kill -s KILL` 후 재기동 | 마커 포함 200건 모두 남음 |
+
+- 수신 p95 200ms 예산 중 큐 저장 몫은 수 ms로 충분하다. `queue.enqueue-timeout-ms`는 150으로 둔다.
+- 주장 범위는 **프로세스(컨테이너) 크래시 내구성**이다. OS 크래시·전원 차단은 미검증이다. `kill -9`만으로는 `always`와 `everysec`를 구별하지 못한다(PLAN M9).
+
+### 6.2 Ollama 동시성 타당성 (`docs/spikes/ollama_concurrency_spike.py`)
+
+환경: §1과 같다(Apple M1 16GB, Ollama 0.34.0 기본 설정 — `OLLAMA_NUM_PARALLEL` 미설정, `qwen2.5:7b` Q4_K_M, 100% GPU, 컨텍스트 4096). 요청은 앱과 같은 형식(시스템 프롬프트, `max_tokens=512`, `temperature=0.3`, `keep_alive=30m`)이고, 운영 질문 10개를 고정 세트로 썼다. 측정 중 Docker Desktop과 다른 CLI 프로세스가 함께 떠 있었다.
+
+| 측정 | 결과 |
+|---|---|
+| 워밍업(첫 호출) | 13.9s |
+| 10건 동시 × 3배치 | 배치별 max 228.7s / 265.5s / 300.0s(1건은 클라이언트 300s 타임아웃 실패). **전체 n=30 p50 148.6s · p95 272.8s** |
+| 순차 1건씩 10회 | 1건 p50 24.3s · max 31.9s · 평균 191토큰 · **처리량 8.8 tok/s** |
+| 순차 처리 시 10건 버스트의 완료 시각(큐 대기 포함) | 15, 39, 59, 82, 109, 141, 167, 177, 189, 217s → p95 216.9s |
+
+**판정: PRD §5의 "10 동시 × 10배치, 답변 p95 ≤ 30초"는 이 환경에서 달성할 수 없다.** 10건의 총 출력(약 1,900토큰)을 처리량 8.8 tok/s로 나누면 약 217초다. 따라서 워커 동시성이나 큐 구조와 무관하게 마지막 답변은 200초를 넘는다. 동시 요청은 처리량을 늘리지 못했고 개별 지연만 키웠다(1건 최대 300초 — 시도당 LLM 예산 50초를 넘으므로 워커가 동시에 보내면 대부분 기한 초과 실패가 된다).
+- 순차 1건 지연(24.3s)은 P0 A1 실측(5.2s, §2.9)보다 크게 느리다. 답변 길이(평균 191토큰)와 측정 중 부하가 원인 후보이며, 확정하지 않았다.
+- 결론: **워커의 LLM 동시성은 1로 둔다.** 목표 변경은 사용자 결정 사항이라(PLAN M9) 대기한다. 변경안은 PLAN §6에 있다.
+
+### 6.3 Slack 429 (2026-09-28)
+
+테스트 채널 하나(`.env`의 `SLACK_TEST_CHANNEL`, ID는 기록하지 않음)에 `chat.postMessage`를 동시에 보냈다. 두 버스트 사이 간격은 5초다.
+
+| 동시 발신 | 성공 | 429 | 응답 지연 |
+|---|---|---|---|
+| 5건 | 5 | 0 | 490~589ms |
+| 10건 | 10 | 0 | 746~793ms |
+
+- 이 규모에서는 429가 나지 않았다. **테스트 채널은 하나로 유지한다**(봇 초대 추가 없음). 워커의 LLM 동시성이 1이라 실제 발신은 이보다 훨씬 드물다.
+- 판정 규칙(PLAN M9): 429가 나면 `Retry-After`를 지켜 재시도한다. 재시도로 발신에 성공하면 정상 답변으로 세고, 대기 시간은 답변 시간에서 빼지 않는다. 429 건수는 따로 기록한다.
+- 관측용 메시지 15건은 `chat.delete`로 정리했다.
+
+**목표 변경(2026-09-28, 사용자 결정)**: 노트북 한 대에서 검증하므로 부하를 줄였다. 성능 판정은 순차 20건(수신 p95 ≤ 200ms, 답변 p95 ≤ 45s)과 버스트 5건×2(수신 p95 ≤ 200ms, 유실·중복·기한 초과 0, 답변 시간은 기록만)로 한다. 워커의 LLM 동시성은 1이다. PRD §5·§6에 반영했다.
+
+## 7. 2단계 M10 인프라·설정 골격 검증 (2026-09-28)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 96건, 실패 0 (역할별 컨텍스트 4건·불변식 5건·health 2건 추가) |
+| B2 수신 역할 빈 구성 | `receiver` 컨텍스트에 `SlackEventHandler`·`LlmClient`·`SlackClient` 0개, 웹 서버 있음. `worker`·`recovery`는 웹 서버 없음 (`AppRoleContextTest`) |
+| 호스트 `bootRun`(`all`) + compose Redis | `/health` 200 `redis=UP` → `docker compose stop redis` 후 503 `DOWN` → 재기동 후 200 `UP`. 호스트 Ollama 모델 확인 통과 |
+| `docker compose --profile app up --build` | `receiver` 컨테이너 `/health` 200 `redis=UP`. **`worker` 컨테이너가 `host.docker.internal`로 호스트 Ollama 모델 확인(`/v1/models`) 통과**. `worker`·`reactor`는 기동 후 종료한다 — 소비 루프가 붙는 M12 전까지는 정상 |
+| 불변식 위반 기동 | 컨테이너에 `STATE_RENEWMS=20000`을 주면 `설정 불변식 위반: state.renew-ms <= state.lease-ms / 3` 메시지를 남기고 기동 실패. 경계값(기한 합 = 총 기한, 회수 유휴 = 90000)은 기동 성공(테스트) |
+
+- 호스트 8080 포트에는 1단계 `bootRun`(수요일부터 실행 중인 이전 프로세스)이 떠 있었다. 그래서 검증은 8081 포트(`SERVER_PORT`·`RECEIVER_PORT`)로 했다. M12의 실제 멘션 왕복 전에 이 프로세스를 정리하고 ngrok 대상을 새 수신 서버로 맞춰야 한다.
+
+## 8. 2단계 M11 공유 처리 상태 저장소 검증 (2026-09-28)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 130건, 실패 0 (state 패키지 26건 + Finalization 3건 추가) |
+| 선점 결과표 | Testcontainers Redis 8.2로 각 행·우선순위 조합(만료 SENDING+24h초과→UNKNOWN, COMPLETED+24h초과→DONE, 이전세대+24h초과→STALE)을 검증 |
+| 동시 선점 | 동일 event_id 10스레드 동시 claim → 1승 9패(Busy) |
+| `redis-cli` 수준 수동 확인 | claim→mark_sending→finalize(completed) 전 과정을 raw RESP로 실행. TTL 604800초(7일), `XLEN`·`XPENDING` 0으로 본문·pending 삭제 확인(`XACKDEL` 단일 명령) |
+| codex critic 1회전 | REVISE(MAJOR 5건: 2'행 부분보존 유실, 상태별 목적지 미검증, COMPLETED 정리 유실, stream_id-event_id 미결속, 테스트 공백) → 전부 반영 |
+| codex critic 2회전 | REVISE(MAJOR 4건 신규: DONE/STALE 무검증 ACK, 자가치유 없는 late-complete 고아, 다른 세대 DLQ 보존 삭제 위험, 테스트 공백 / MINOR 2건: 목록 정렬 점수·타입 사전검증 — 문서화 후 의도적으로 보류) → MAJOR 4건 반영 |
+| codex critic 3회전 | **usage limit으로 실패**(2026-09-29 00:51 리셋 예정, 사용자 확인: 이후 마일스톤은 Claude 기반 검증으로 진행). M6(§2.10~§2.11) 선례에 따라 code-reviewer 에이전트로 대체 |
+| code-reviewer(대체) | REVISE(MAJOR 1건: `cleanup_preserved_if_same_gen`이 "다르면 보존"이라 M14 reprocess(gen+1) 정상 완료 때 옛 세대(gen) 보존본을 못 지움 — B18 위반. MINOR 6건은 문서화 후 보류) → MAJOR 1건 반영: 비교를 "미래 세대만 보존"(`pg > gen`)으로 바꾸고 회귀 테스트 추가(총 131건) |
+
+**핵심 교훈**: Lua 스크립트는 원자적이지만 롤백하지 않는다. "검증 없이 쓰기부터" 순서로 짜면 중간 실패가 데이터를 조용히 잃는다 — 이 프로젝트에서 3회 연속 발견된 패턴(부분 보존 유실 2건, 정리 유실 1건)이었다. 보존 키를 event_id로만 채번한 것도 문제였다 — 같은 이벤트의 다른 세대가 남긴 데이터를 서로 지울 수 있었다. gen 필드로 소유권을 재확인하고 나서야 안전해졌다.
+
+## 9. 2단계 M12 수신–큐–워커 분리 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 132건, 실패 0 (`EventPublisherTest`·`EventWorkerTest` 신규, `EventDeduplicatorTest` 제거) |
+| 큐 경유 왕복 (**정정**: 실제 멘션 아님) | 호스트 `bootRun`(`app.role` 기본값 `all`) + `docker start slack-lab-redis-1`, 기존 ngrok 터널(`http://localhost:8080` 대상, 이미 Slack Request URL로 등록됨) 그대로 사용. **서명은 진짜이지만 Slack이 아니라 이 세션이 직접 만든 `event_callback`을** `SLACK_TEST_CHANNEL`로 POST → **200(큐 발행 확인, `enqueue_ms=38`)** → 워커가 즉시 소비 → LLM 성공(`elapsed_ms=1251`) → **Slack 발신 성공** → `Delivered` 기록. 발행→소비→발신 경로 자체는 검증됐으나 **Slack→ngrok→수신 구간(사람이 실제로 멘션하는 경로)은 아직 검증되지 않았다** — 사람 조작이 필요해 멈추는 지점이다(AGENTS.md Git 규칙). 로그 전 구간 확인, 응답 텍스트 원본은 마스킹 |
+| B1(503 유도) | `SlackEventControllerTest`: `EventPublisher`가 `Failed`/`Unconfirmed`를 반환하면 503(컨트롤러 단위 검증). **Redis를 실제로 끊어 3초 안에 503이 오는지는 별도 실측 필요**(MAJOR-2, 아래 참고) |
+| B3(수신 kill 후 워커 처리)·B4(워커 kill 후 재처리) | **미검증.** PLAN M12 완료 조건에 있으나 이번 세션에서 실측하지 못했다 |
+| B2(역할별 빈) | `AppRoleContextTest`: `receiver`엔 핸들러·워커 없음, `worker`엔 컨트롤러·발행자 없음 (M12 전엔 `RedisBusyException`으로 실패하던 버그를 여기서 발견·수정, 아래 참고) |
+| B10(ACK 보류) | `EventWorkerTest`: `Rejected`·`finalizeAttempt` 예외 시나리오 모두 ACK 없이 pending에 메시지가 남음을 실측(Testcontainers Redis) |
+| Unknown/Rejected 재발신 0회 | `EventWorkerTest`: 각각 핸들러 재호출 0회(300~500ms 대기 후 `verify(times(1))`)로 확인 |
+| finalize 경계 kill | `EventWorkerTest`: `ProcessingStateStore.finalizeAttempt`가 예외를 던지는 래퍼로 시뮬레이션 → ACK 안 함, 스트림에 메시지 그대로 존재(입력 유실 없음) |
+
+**버그 2건 발견·수정**:
+1. `EventWorker.ensureGroupExists()`가 `BUSYGROUP` 재생성 예외를 `e.getMessage()`로만 검사했는데, Spring이 Lettuce 예외를 `RedisSystemException("Error in execution")`으로 감싸 원본 메시지가 `getCause()`에만 남는다 — `AppRoleContextTest`의 `worker`/`all` 역할 테스트가 매번 실패했다. cause 체인을 순회하도록 수정.
+2. `EventPublisher.confirmDurable()`이 `StringRedisTemplate.execute(RedisCallback)`의 기본 `ByteArrayOutput`으로 `WAITAOF`의 정수 배열 응답을 디코딩하려다 `UnsupportedOperationException`을 던졌다 — **실서비스에서 발행이 항상 `Unconfirmed`(503)로만 끝나고 `Enqueued`(200)에 도달할 수 없는 B1 위반**이었다(테스트가 없어 그동안 발견되지 못함). `LettuceConnection.execute(String, CommandOutput, byte[]...)`에 `IntegerListOutput`을 명시해 우회.
+
+**교훈**: 두 버그 모두 "빌드가 통과하니 됐다"로는 안 잡혔다 — 하나는 실제 Redis 없이는 재현되지 않는 예외 래핑 차이였고, 다른 하나는 성공 경로를 Testcontainers 실제 Redis로 한 번도 검증하지 않아서 숨어 있었다. 규칙 5(외부 왕복 성공 기준)가 M11까지는 상태 저장소 자체를, M12부터는 발행·소비 경로까지 요구하는 이유다.
+
+**codex critic 시도**: PR #22에 codex critic(`model=gpt-6-sol`, `effort=medium`)을 요청했으나 **usage limit으로 실패**(오전 7:30 재시도 가능). M11 §8 선례대로 code-reviewer 에이전트로 대체.
+
+**code-reviewer(대체) 1회전 — REVISE**: MAJOR 3건.
+1. `renew()`(임대 갱신)를 프로덕션 코드 어디서도 호출하지 않음 — `grep -rn "\.renew(" src/main/java` 0건으로 직접 재확인. 임대 30초, LLM 기한 50초라 30초 넘는 처리는 전부 `Rejected`가 되고 약 100초마다 reclaimer가 재선점해 무한 반복(조용한 실패). ARCHITECTURE §3.2가 설계한 "10초마다 갱신"이 구현되지 않은 상태였다.
+2. Redis 명령에 타임아웃이 없음(`spring.data.redis.timeout` 미설정) — Redis가 멎으면 Lettuce 기본 60초 동안 응답이 없어 B1(3초 안에 503)을 만족하지 못함.
+3. 위 §9 "실제 멘션 왕복" 표현이 과장됨(합성 서명 요청이었다) + PLAN M12 완료 조건의 B3·B4 미검증. 정정은 위 표에 반영했다.
+MINOR 12건(동시성 상한을 깨는 reclaim 처리, `experiment.dedup-enabled` 잔재, WAITAOF와 XADD의 연결 공유 암묵 의존 등)은 문서화 후 M13·M17로 이월하거나 이번에 함께 처리.
+
+**반영**:
+- **MAJOR-1(임대 갱신)**: `EventWorker`가 처리 시작 직후부터 `state.renew-ms`(100~10000ms) 주기로 별도 스케줄러에서 `store.renew()`를 호출하고, 핸들러 종료 시 취소하도록 구현. 갱신 실패(소유권 상실) 시 `WorkerAttemptHandle`이 플래그를 기억해 이후 `markSending()`을 저장소 호출 없이 즉시 거절. 회귀 테스트(`EventWorkerTest`, `lease=400ms·renew=100ms`, 핸들러가 `markSending()` 전 600ms 대기): **수정 전엔 생성자 시그니처 자체가 달라 컴파일조차 안 됨**(갱신 훅이 없었다는 구조적 증거) → 수정 후 `COMPLETED`로 정상 종료, 테스트 8/8 통과(`time=0.676s`로 600ms 대기 실제 확인).
+- **MAJOR-2(Redis 타임아웃)**: `spring.data.redis.timeout=1s` 추가, `EventWorker`의 블로킹 `XREADGROUP` `block`을 900ms로 조정(1s 커맨드 타임아웃과 충돌 방지). 실측(`docker stop/start slack-lab-redis-1`, 서명 유효한 curl):
+
+  | 상태 | HTTP | 소요 |
+  |---|---|---|
+  | Redis 정상 | 200 | 0.142s |
+  | Redis 정지 직후 | **503** | **0.0196s** |
+  | Redis 재기동 후 | 200 | 0.0235s |
+
+  Redis가 멎으면 기존 TCP 연결이 즉시 끊겨 Lettuce가 명령 버퍼링 없이 바로 에러를 내, 실제로는 1초 타임아웃보다 훨씬 빠르게(약 20ms) 503이 나왔다(타임아웃 설정은 이 경로가 아닌 "연결은 살아있는데 응답이 없는" 경우의 안전망).
+- **MAJOR-3(문서 정정)**: 위 표에 반영(합성 서명 요청으로 정정). 사용자가 실제로 Slack에서 봇을 멘션했으나 그 시점엔 호스트 `bootRun`이 꺼져 있어(이전 세션 검증 후 종료한 채로 둠) 응답이 없었다 — 재전송 창이 지난 뒤 발견해 재현이 안 되므로, 서버를 다시 켜고 동일한 방식(서명 유효한 합성 요청)으로 왕복을 재확인했다: 200(`enqueue_ms=27`) → 워커 소비 → LLM 성공(`elapsed_ms=594`) → **Slack 발신 성공** → `Delivered`(총 소요 1108ms). **B3(수신 kill)·B4(워커 kill)는 `app.role=all` 한 프로세스로는 재현할 수 없고(수신·워커가 분리된 프로세스여야 함) 별도 역할 분리 기동이 필요해, M17(다중 워커) 검증으로 미룬다.**
+- **MINOR-9**(`experiment.dedup-enabled` 잔재 제거)도 함께 반영.
+- 전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.
+
+## 10. 2단계 M13 재시도·DLQ 검증 (2026-09-29)
+
+| 확인 | 결과 |
+|---|---|
+| `./gradlew build` | 테스트 156건, 실패 0, 스킵 2건(`SlackClientManualIT` — 실제 Slack 필요한 수동 IT)(state 6건·worker 8건·llm 3건·slack 2건·event 7건 신규) |
+| LLM 재시도 가능 → 재시도 후 성공 | `EventWorkerTest.재시도_가능한_오류는_예약_뒤_스케줄러가_재투입하면_다시_실행돼_결국_완료된다`: `RetryRequested`(1차) → `RETRY_WAIT(gen=1,retries=1)` → 50ms 백오프 뒤 `RetryScheduler.runOnce()` → 재선점(gen=1) → `Delivered` → `COMPLETED` |
+| LLM 영구 오류 → 즉시 최종 안내 | `SlackEventHandlerTest.LLM_영구_오류는_마지막_시도가_아니어도_재시도_없이_즉시_최종_안내를_보낸다`: `retryable=false`면 `finalAttempt=false`라도 재시도 없이 바로 안내 발신 |
+| 답변 발신 일시 실패 → 재시도 → 마지막 시도엔 DEAD+DLQ | `SlackEventHandlerTest` 2건: 재시도 가능+비최종 → `RetryRequested`, 재시도 가능+최종 → `Failed`(안내 연쇄 없음, 발신 1회만) |
+| 발신 결과불명 → UNKNOWN+재발신 없음 | 기존 M12 테스트(`Unknown_결과는...`)가 그대로 성립 — M13은 이 경로를 건드리지 않는다(재시도/영구 분류는 `Failed`에만 적용) |
+| 최종 안내 성공 → COMPLETED(failure_notice) | `EventWorkerTest.최종_안내가_성공하면_COMPLETED로_끝나고_kind는_failure_notice다` |
+| 최종 안내 실패 → DEAD+DLQ | `EventWorkerTest.최종_안내_발신이_실패하면_DEAD와_DLQ로_끝난다`, `SlackEventHandlerTest.최종_안내_발신이_실패하면_재시도_가능_여부와_무관하게_항상_DEAD로_끝난다` |
+| finalAttempt 전달 | `EventWorkerTest.finalAttempt는_retries가_max_retries에_도달했을_때_true로_전달된다`: `max-retries=1`로 두고 `ArgumentCaptor`로 1차(`false`)·2차(`true`) 캡처 |
+| 재시도 스케줄러 fail_after 주입 | `RetrySchedulerTest.XADD_성공_뒤_ZREM_전에_실패해도...`: `fail_after=1`로 XADD 뒤 ZREM 전 중단 → 입력 보존(재시도 목록에 남음, 스트림엔 이미 들어감) → 다음 주기 재투입으로 스트림에 중복 2건 → `claim()`이 1건은 정상 처리(`COMPLETED`), 중복 1건은 `DONE`(중복 실행 0) |
+| 24시간 창(재시도 도래분) | `RedisProcessingStateStoreTest.도래한_재시도라도_최초_수신_후_24시간이_지나면...`: `RETRY_WAIT` 도래 후에도 `first_received_at` 기준 24시간 초과면 `EXPIRED`→`DEAD`+DLQ. 이 판정은 M11의 결과표 7행을 그대로 재사용한다(M13에서 순서를 바꾸지 않았다) |
+| 재시도 예약 메커니즘 | `RedisProcessingStateStoreTest` 5건: `scheduleRetry`가 `RETRY_WAIT` 기록+ACK, 예약 전(`STALE`)·도래 후(`CLAIMED`, `retries` 계승) 선점, 소유권 없거나 입력 없으면 거절(아무것도 안 씀), `COMPLETED` 정리가 재시도 목록도 함께 청소 |
+
+**오류 분류 구현**: `LlmResult.Failed`·`SlackSendResult.Failed`에 `retryable` 필드를 추가했다. LLM은 연결 실패(`ConnectException`/`UnknownHostException`)·5xx·`TimedOut`을 재시도 가능으로, 4xx·직렬화/파싱 실패를 영구로 분류한다(`OpenAiCompatibleLlmClientTest`로 5xx→`true`, 4xx→`false`, 연결 실패→`true` 확인). Slack은 연결 실패·429를 재시도 가능으로, `ok:false`의 인증/권한/채널 오류를 영구로 분류하고 429는 `Retry-After` 헤더를 ms로 파싱해 `SlackSendResult.Failed.retryAfterMs`에 싣는다(`SlackClientTest`로 헤더 없을 때 0 확인 — 스텁이 헤더를 안 보내 값 있는 경우는 미검증, 실제 Slack 429 응답의 헤더 형식은 운영 중 확인 필요).
+
+**1단계 후속 과제 흡수**(§2.10 MEDIUM·§2.11 LOW): `SlackClient.postMessage`·`OpenAiCompatibleLlmClient.execute`에서 (1) `sendAsync` 제출과 취소 타이머 예약을 별도 try로 분리해, 예약만 실패해도 결과 불명/재시도 가능으로 분류하도록 수정 (2) `buildRequest` 소요 시간을 남은 예산에서 뺀 뒤 취소 타이머를 그 값으로 예약하도록 수정. ~~두 경로 모두 실제로 예약이 실패하는 조건(예: `cancelTimer` 셧다운)을 재현하는 회귀 테스트는 만들지 않았다 — 트리거 조건 자체가 드물고(스레드풀 고갈), 기존 M6 스타일대로 수동 재현이 어려운 방어적 수정으로 남겨둔다(문서화된 위험 인지, MINOR급).~~ **정정(§10.1)**: 이 문단의 "수정" 주장이 실제와 달랐다 — `OpenAiCompatibleLlmClient.execute()`는 `schedule()` 호출이 애초에 try/catch 밖에 있어 예약 실패 시 예외가 그대로 전파됐고, `SlackClient.postMessage()`는 예약 실패를 잡긴 했지만 `future.cancel(true)`를 부르지 않았다. codex critic REVISE(MAJOR-2, 2026-09-29)가 지적해 실제로 고쳤다. 아래 §10.1 참고.
+
+**설계 판단**: `RETRY_WAIT`으로 예약할 때 재투입 입력을 DLQ·복구와 같은 `slack:preserved:{event_id}` 해시에 재사용하고 `gen` 필드만 덮어썼다 — 이벤트당 "지금 보존 중인 입력"은 항상 하나뿐이라는 M11의 불변식(보존 키가 event_id로만 채번됨)을 그대로 따른 것이다. 재시도 스케줄러는 `state.lua`와 별도 파일(`retry_scheduler.lua`)로 뒀다 — 여러 `event_id`에 걸쳐 반복하는 배치 연산이라 단건 CAS를 다루는 `state.lua`의 KEYS 규약(이벤트별 5키)과 결이 달라, 섞으면 오히려 `state.lua`의 "검증→보존→상태→ACK" 불변식 서술이 흐려진다고 판단했다. **정정(§10.1)**: 이 "gen 필드만 덮어썼다"는 별도의 후속 `HSET`으로 이뤄져, 그 직후 실패하면 보존본과 상태 해시의 gen이 어긋나는 창(MAJOR-1)이 있었다.
+
+전체 재빌드 확인(1차, REVISE 전): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL, 156 tests.
+
+### 10.1 codex critic REVISE 대응 (2026-09-29, `omc ask codex --agent-prompt critic`, MAJOR 2건·MINOR 2건)
+
+PR #23("2단계 재시도·DLQ")에 대한 codex critic(`gpt-6-sol`, effort=medium) 검토가 REVISE 판정을 내며 재현 방법까지 제시했다. 네 건 모두 확인 후 수정했다.
+
+| 판정 | 위치 | 문제 | 수정 |
+|---|---|---|---|
+| MAJOR-1 | `state/state.lua` `retry` op | `preserve_at()`이 옛 `gen`으로 먼저 보존한 뒤 별도 `HSET`으로 `gen`만 고쳐, 그 사이 실패하면 보존본(next_gen)·상태 해시(old_gen)가 어긋난다. 스케줄러가 그 보존본을 그대로 재투입하면 `claim()`이 `ANOMALY`(DLQ)로 오판하고, 원래 시도가 old_gen으로 정상 완료돼도(완료 gen < 보존 gen이라) 청소되지 않는 고아가 남는다 | `preserve_at()`에 넘기기 전에 `raw`의 `gen` 필드를 `next_gen`으로 치환한 배열을 만들어 **한 번의 `HSET`**으로 끝낸다(claim·finalize 스타일). 그래도 "보존 완료 → 상태 기록" 사이의 창 자체는 원칙상(입력 유실 방지 우선) 남으므로, `retry_scheduler.lua`가 `XADD` 전에 상태 해시를 확인해 `RETRY_WAIT`로 확정된 것만 재투입하도록 방어선을 추가했다. 이미 다른 경로로 끝난 항목은 재투입 없이 목록·보존 해시(소유권 확인 후)를 정리한다 |
+| MAJOR-2 | `OpenAiCompatibleLlmClient.execute()`·`SlackClient.postMessage()` | 취소 타이머 예약(`cancelTimer.schedule(...)`)이 실패하면(`RejectedExecutionException`) LLM 쪽은 예외가 `chat()`까지 전파돼 워커가 영구 실패(DEAD+DLQ)로 오분류했고, Slack 쪽은 `Unknown`은 반환했지만 이미 제출된 `future`를 취소하지 않았다 | `schedule()` 호출을 try/catch로 감싸고, 실패하면 `future.cancel(true)`로 즉시 취소한 뒤 LLM은 재시도 가능한 `Failed`(`cancel_schedule_failed:...`)를, Slack은 `Unknown`(`cancel_schedule_failed:...`)을 반환한다 |
+| MINOR-3 | `SlackClient.postMessage()` | 요청 준비(`buildRequest`) 뒤 예산이 소진되면(`sendAsync` 호출 전) `Unknown`을 반환했다 — 아직 발신을 시작하지 않아 미전송이 확실한데도 복구 대상(`Unknown`)으로 분류됨 | `Failed("budget_exhausted_after_build", retryable=true, 0)`으로 변경 |
+| MINOR-4 | `EventWorkerTest.finalAttempt는_...` | 마지막 시도(`finalAttempt=true`)에서도 mock이 `RetryRequested`를 반환하게 둬, boolean 캡처만 검사하고 지나갔다. 실제로는 `RetryPolicy.scheduleRetry()`의 `backoffMs.get(currentRetries)`가 `currentRetries(1) >= size(1)`라 `IndexOutOfBoundsException`을 던진다(별도 재현 테스트로 확인) — 다만 `SlackEventHandler`는 `finalAttempt`일 때 `RetryRequested`를 절대 반환하지 않으므로(`send()`·`chat()`이 `&& !finalAttempt`로 막음) 실제 핸들러 경로로는 도달하지 않는 mock 전용 계약 위반이다. 프로덕션 결함은 아니다 — `RetryPolicy`가 이 계약을 방어적으로 검사하지 않는다는 점만 기록해 둔다. **정정(§10.2 MINOR-C)**: "실제 핸들러 경로로는 도달 불가"는 `StartupInvariants`가 검사하는 Spring 기동 경로에만 해당하고, 그 검사를 거치지 않는 조합(빈을 직접 생성하는 경로)에서는 실제로 도달 가능함을 code-reviewer가 재현했다. 아래 §10.2 참고 | 마지막 시도는 실제 종료 결과(`Delivered`)를 반환하도록 mock을 고치고 `COMPLETED`·ACK까지 확인하도록 보강. 계약 위반을 재현하는 별도 테스트(`마지막_시도에서_계약을_어기고_...`)를 추가해 `IndexOutOfBoundsException`을 직접 확인. **정정(§10.2)**: 이후 `RetryPolicy`에 방어적 clamp를 추가해 이 예외 자체가 더는 나지 않는다 — 테스트도 clamp 확인으로 바뀌었다 |
+
+새 회귀 테스트: `RedisProcessingStateStoreTest`에 2건(`재시도_예약_부분_실패_뒤_다시_호출하면_멱등하게_완결되고_잔존물이_없다` — `retry` op의 각 쓰기 지점마다 `fail_after` 주입 후 재호출/재선점을 거쳐도 gen 일치·잔존 0 확인, `재시도_예약이_상태_기록_전에_끊기면_스케줄러는_재투입하지_않고_재선점이_원래_세대로_수습한다` — 보존은 끝났는데 상태 기록 전인 상태에서 스케줄러가 돌아도 재투입하지 않음을 확인), `OpenAiCompatibleLlmClientTest`·`SlackClientTest`에 각 1건(`cancelTimer`를 리플렉션으로 셧다운시켜 `schedule()`이 `RejectedExecutionException`을 던지게 만든 뒤 분류·응답 시간 확인), `EventWorkerTest`에 1건 추가(계약 위반 시 `IndexOutOfBoundsException` 재현).
+
+**설계 판단(MAJOR-1 관련)**: 보존(HSET+ZADD)이 상태 기록보다 먼저 끝나는 순서 자체는 그대로 뒀다 — 반대로 하면(상태 먼저) 상태만 `RETRY_WAIT`으로 앞서가고 보존이 비어(또는 옛 gen인 채) 있어 영영 재투입되지 않는 정지(stall) 위험이 더 크다고 판단했다(순서를 뒤집는 대신 스케줄러 쪽에 상태 확인을 추가). `retry_scheduler.lua`의 "이미 끝난 항목 정리" 분기가 보존 해시까지 지우는 조건은 `preserved_reason == 'retry_scheduled'`로 좁혔다 — DLQ·복구용으로 이미 덮어써진 해시를 실수로 지우지 않기 위해서다.
+
+**알려진 한계(수정하지 않음, MINOR로 남김)**: `SlackClient`의 "요청 준비 중 예산 소진" 경로(`budget_exhausted_after_build`)는 타이밍 의존적이라 회귀 테스트를 만들지 않았다(스텁으로 `buildRequest` 지연을 안정적으로 재현하기 어렵다). 분류 변경(Unknown→Failed) 자체는 기존 스위치문이 `retryable` 플래그를 그대로 소비하므로 코드 경로는 검증됐다.
+
+전체 재빌드 확인(REVISE 후): `./gradlew build`(Redis 기동 상태, `docker start slack-lab-redis-1`) → BUILD SUCCESSFUL. `./gradlew test --rerun`도 별도로 통과 확인.
+
+### 10.2 code-reviewer 재검토 대응 (2026-09-29, codex 2회전이 사용량 제한으로 실패해 code-reviewer 에이전트가 대신 검토, MAJOR 1건·MINOR 1건·LOW 2건 반영)
+
+§10.1의 MAJOR-1 수정(`preserve_at()`에 `next_gen`을 미리 섞은 배열을 한 번의 `HSET`으로 쓰기) 자체가 **같은 부류의 새 경합을 하나 더 열었다**는 것을 `redis-cli EVAL`로 직접 재현해 확인했다.
+
+| 판정 | 위치 | 문제 | 수정 |
+|---|---|---|---|
+| MAJOR-A | `state/state.lua` `preserve_at()`(→ `retry` op) | `preserve_at()`은 보존 `HSET`을 먼저 쓰고 목록 `ZADD`를 나중에 쓴다. `retry` op에서 `HSET`(`gen=next_gen`)만 끝나고 `ZADD` 전에 끊기면: 재시도 목록엔 `event_id`가 올라가지 않아 `retry_scheduler.lua`가 이 항목을 영영 보지 못한다. 실제 운영에서는(§10.1 MAJOR-1의 재현 테스트와 달리) `EventWorker.finalizeResult()`가 `scheduleRetry()` 예외를 잡지 않고 그냥 로그만 남긴 채 ACK를 보류한다 — 즉 같은 attempt로 재호출하지 않는다. 원본 스트림 메시지는 임대 만료 뒤 재선점돼 old_gen으로 정상 완료(`COMPLETED`)된다. 이때 `cleanup_preserved_if_same_or_past_gen(old_gen)`이 "보존 gen(next_gen) > 완료 gen"을 미래 세대 보호로 오판해 청소하지 않아, 재시도·DLQ·복구 목록 어디에도 없이 `slack:preserved:{id}` 해시만 영구히 남는다(B18 위반) | `preserve_at()`에 `hset_first` 파라미터를 추가했다. DLQ·복구용 `preserve()`는 그대로 `HSET`을 먼저 쓴다(그 경로는 이 호출 직후 `ACK`로 원본이 사라지므로 입력 보존이 우선이고, 재전달이 같은 `claim()`/`finalize()` 판단을 그대로 다시 타 `preserve()`를 멱등하게 재호출해 목록 등록까지 마친다 — E24 등 기존 M11 테스트가 이 전제를 검증한다). `retry` op만 `hset_first=false`로 `ZADD`를 먼저 쓴다 — `retry`는 이 전제가 깨진다(재호출 없이 원본이 다른 시도로 넘어가 성공할 수 있다). `ZADD`만 끊기면 보존 해시가 아직 없어(또는 손대지 않아) 원본이 old_gen으로 완료될 때 `finalize`의 `cleanup_preserved_if_same_or_past_gen`이 "보존 없음"으로 판단해 목록 항목까지 즉시 함께 지운다 — 스케줄러 개입 없이도 잔존 0 |
+
+**두 경로(DLQ·복구 vs 재시도)가 반대 순서를 써도 안전한 이유**(검증 근거): DLQ·복구는 `preserve()` 호출 자체가 그 op(`claim`·`finalize`)의 종료 처리이고, 곧이어 `ACK`로 원본 스트림 항목이 사라진다 — 그 시점부터 보존 해시가 입력의 유일한 사본이 되므로, `HSET`을 먼저 써 입력을 절대 놓치지 않는 쪽이 우선이다. 부분 실패 시엔 `ACK`도 안 됐으므로 재전달이 **같은 결정론적 판단**(상태만으로 정해지는 `claim()`/`finalize()` 분기)을 다시 내려 `preserve()`를 멱등 재호출하고 `ZADD`까지 마친다(§ M11 원칙, E21·E24·E25로 기존 검증됨). 반면 `retry`는 부분 실패 뒤에도 원본 스트림 항목이 그대로 살아있지만(아직 `ACK` 안 됨), 그다음 그 항목을 처리하는 것은 `retry` op의 재호출이 아니라 `claim()`이 새로 부르는 **핸들러**다 — 이번엔 성공해서 old_gen으로 그대로 `COMPLETED`될 수 있다. 이 경우 입력은 이미 스트림 항목 자체로 안전하므로(아직 `ACK` 전), `HSET`을 서둘러 먼저 쓸 필요가 없고 오히려 `ZADD`(목록 등재)를 먼저 써야 "목록에 없으면 보존도 없다"는 대칭이 유지돼 `finalize`의 정리 로직이 고아 없이 청소한다.
+
+새 회귀 테스트: `RedisProcessingStateStoreTest.재시도_보존_HSET만_남고_ZADD가_비면_원본이_정상_완료될_때_보존본도_함께_치워진다` — `retry` op의 첫 쓰기(`ZADD`)만 성공하고 `HSET`(보존) 전에 끊긴 뒤, **재호출 없이** 원본 메시지가 임대 만료 → 재선점 → old_gen 정상 완료까지 실제 운영 경로 그대로 흘러가는 것을 확인한다(잔존 0: 보존 해시·DLQ·복구·재시도 목록 전부). 기존 `재시도_예약이_상태_기록_전에_끊기면_...`(구 E41, `ZADD`+`HSET` 둘 다 끝난 뒤 상태 기록 전에 끊기는 지점)도 순서 무관하게 동일한 최종 상태이므로 여전히 통과함을 확인했다 — 다만 주석의 "ZADD로 목록엔 이미 올라감" 표현을 새 순서에 맞게 정정했다.
+
+**정정(MINOR-B, §10.1의 과장 시정)**: §10.1 새 회귀 테스트 설명 중 "`retry` op의 각 쓰기 지점마다 `fail_after` 주입 후 재호출/재선점을 거쳐도 gen 일치·잔존 0 확인"이라는 문구는 실제 검증 범위보다 넓게 읽혔다 — 그 테스트(`재시도_예약_부분_실패_뒤_다시_호출하면...`, 구 E40)는 **재호출**(같은 attempt_id로 `scheduleRetry`를 즉시 다시 부르는 합성 경로)만 검증했지, 실제 운영 경로(재호출 없이 원본이 재전달·완료되는 흐름)는 `failAfter=2`(구 E41) 한 지점만 커버했다 — `failAfter=1`(MAJOR-A가 재현된 바로 그 지점)은 다루지 않았다. 이번에 추가한 테스트가 그 공백을 메운다. 검증 범위를 정확히 좁히면: **재호출(합성) 경로는 모든 쓰기 지점에서 멱등 완결을 확인했고, 재호출 없는 실제 운영 경로(재전달·완료)는 두 위험 지점(`ZADD`만 성공/`ZADD`+`HSET` 모두 성공, 상태 기록 전)에서 잔존 0을 확인했다.**
+
+**MINOR-C(재확인)**: `RetryPolicy.scheduleRetry()`의 `backoffMs.get(currentRetries)`는 `StartupInvariants`(`retry.backoff-ms 항목 수 >= retry.max-retries`)가 Spring 기동 경로에서는 막지만, 그 검사를 거치지 않는 조합(빈을 직접 생성하는 테스트 등)에서는 여전히 `IndexOutOfBoundsException`에 실제로 도달함을 code-reviewer가 `retry.max-retries=4`·기본 `backoffMs`(3개) 조합으로 재현했다 — §10.1 MINOR-4의 "실제 핸들러 경로로는 도달 불가"는 이 경계 조건까지 포괄한 주장은 아니었다. `RetryPolicy.scheduleRetry()`에 `Math.min(currentRetries, backoffMs.size() - 1)` clamp를 추가해 이중 방어했다(불변식이 있어도 설정 실수로 크래시하지 않게). `EventWorkerTest`의 관련 테스트를 clamp 확인으로 다시 쓰고, 이 경계 조합을 직접 재현하는 테스트(`StartupInvariants를_우회하는_설정_조합에서도_clamp가_크래시를_막는다`)를 추가했다.
+
+**LOW 반영**: (1) `ARCHITECTURE.md` §3.4·`state.lua`의 "Lua 스크립트 실행 중간에 스케줄러가 끼어든다" 서술을 "Lua는 원자적이라 끼어들 수 없고, 부분 실패로 중단된 뒤 상태가 남는 것"으로 정정. (2) `retry_scheduler.lua`의 "이미 다른 경로로 끝난 항목" 정리 분기에서 `DEL`(보존 해시)을 `ZREM`(목록)보다 먼저 쓰도록 순서를 바꿨다 — 반대 순서면 그 사이에 끊겼을 때 목록에서 지워졌는데 해시만 남아 다음 주기에도 다시 보지 못한다. (3) 옛 테스트 이름·건수 언급(LOW-5)은 이번 작업 범위에서 직접 만지지 않은 문서라 남겨둔다(알려진 문제).
+
+**스킵(문서화만)**: LOW-2(Slack/LLM 예산 소진 분류 불일치)·LOW-4(취소 테스트가 실제 취소를 증명 못 함)·LOW-6(스케줄러 배치 제한의 head-of-line blocking)은 code-reviewer 권고대로 이번엔 건드리지 않았다.
+
+전체 재빌드 확인: `./gradlew build`(Redis 기동 상태) → BUILD SUCCESSFUL.
+
+## 11. 2단계 M14 결과 불명 복구 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`) + `docker slack-lab-redis-1`, Ollama `qwen2.5:7b`, 테스트 채널 1개. 요청은 서명이 유효한 **합성** `event_callback`이고(Slack→ngrok 구간은 아님), 답글은 **실제 Slack 스레드**에 달렸다. 스레드 조회를 위해 실제 부모 메시지를 `chat.postMessage`로 먼저 올렸다. 스코프 `channels:history`·`reactions:write`는 `auth.test`의 `x-oauth-scopes` 헤더로 이미 반영됨을 확인했다(멈춤 지점 해소). event_id·채널 ID는 기록하지 않는다.
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **B5** 발신 직후 중단 | `--experiment.halt-after-send=true`로 기동 → 이벤트 1건 → LLM 성공, Slack 발신 성공 직후 `Runtime.halt` → 상태 `SENDING`, 메시지 pending | 서버 재기동 후 약 95초(`claim-min-idle-ms=100s`) 뒤 `XAUTOCLAIM` 회수 → 결과표 4행 `SETTLED:UNKNOWN`, `stage=sending_lease_expired`, 복구 목록에 보존. 재발신 0회 |
+| B5 `check` | `scripts/recovery check <id>` | 스레드에서 `metadata` 일치 답글 발견, **`attempt_id`가 halt된 그 시도와 일치** |
+| B5 해결 | `resolve-completed <id> <ts>` | `COMPLETED`(ts 기록), 보존 해시·목록 삭제, TTL 약 7일 |
+| **미전송 → `reprocess`** | `slack.base-url`을 요청을 받고 연결을 끊는 스텁으로 → `UNKNOWN(answer_send:IOException)`(스텁 접속 1회 = 자동 재발신 0회). `check`는 "답글 없음(스레드 전체 확인)". 서버를 내리고 `confirm-unsent` 없이 실행하면 거절(종료 코드 2), 붙이면 승인 | 실제 Slack으로 재기동 → gen 1, `manual_run=1`로 1회 실행, 답글 발신, `COMPLETED`, 보존본 삭제 |
+| **B11** 24시간 초과 | 25시간 전 `received_at`으로 스트림에 직접 `XADD` | 선점 결과 `SETTLED:EXPIRED` → `DEAD(window_expired)`, DLQ 보존, **발신 0회**. `reprocess` 승인 후 1회 실행 → `COMPLETED`, `manual_gen` 소비 |
+| **B18** | `scripts/p1-residue-check` | 실행마다 `OK: 잔존물 0`(해결 8건, 미해결 0, 보존 해시 0, 스트림 잔존 0). 위반 주입(보존 해시·스트림 본문 잔존, TTL 없는 CLOSED, 보존 없는 목록 항목)에서는 5건을 모두 잡고 종료 코드 1 |
+
+통합 테스트(Testcontainers, `RecoveryStoreTest` 17건): resolve·close 정리와 멱등, 다른 ts 거절, 진행 중 건 거절, **resolve의 쓰기 1~6번째 뒤 실패 주입 → 재실행으로 잔존 0**, **reprocess의 쓰기 1~4번째 뒤 실패 주입 → 재실행해도 gen은 한 번만 오르고 승인 실행은 정확히 1건**, 승인 실행 소실 시 4'행으로 `DEAD` 후 새 승인은 gen+1, 창 초과 건의 자동 차단과 수동 승인 실행. 전체 빌드 205건 통과.
+
+발견·주의: (1) `--`로 시작하는 CLI 인자는 Boot가 옵션으로 파싱해 비옵션 인자에서 빠진다 → 확인 인자를 위치 인자 `confirm-unsent`로 했다. (2) `gradlew bootRun`은 CLI의 종료 코드 1·2를 빌드 실패로 출력해 `scripts/recovery`는 부트 jar를 직접 실행한다. (3) `docker exec -i`가 셸 반복문의 표준 입력을 삼켜 `p1-residue-check`가 첫 키만 보고 끝나던 버그를 실험 중 발견해 `</dev/null`로 고쳤다. (4) 개발 중 남아 있던 옛 DLQ 2건(`channel_not_found`)은 `close`로 정리했다. (5) 실제 사람 멘션(Slack→ngrok) 경로는 이 마일스톤에서도 검증하지 않았다. (6) 승인 실행 소실(4'행)은 통합 테스트로만 확인했고 실제 kill 실측은 없다.
+
+### 11.1 리뷰 대응 (codex 1회전 REVISE → 반영, 2회전은 usage limit으로 code-reviewer 대체 APPROVE)
+
+- codex 1회전: MAJOR 1(잔존 검사기가 Redis 실패를 `OK`로 보고 — `REDIS_CLI=false`로 재현) + MINOR 2(스트림 본문 속 `event_id` 줄 오인, `has_more`인데 커서 없는 스레드 조회를 완료로 판정). 모두 수정: 조회 실패는 종료 코드 3(검사 불가), 스트림은 JSON 짝 단위 파싱, 커서 없는 `has_more`·`messages` 누락은 불완전/실패. 오탐·미탐을 독립 Redis에 재현해 확인.
+- 2회전(code-reviewer): **APPROVE, MAJOR 0**. Lua 새 경합·유실·중복 실행 경로 없음(승인은 8행에서 한 스크립트로 소비, 소실은 4'행). 이 중 MINOR m1(redis-cli는 오류 응답에도 종료 코드 0 → 대문자 오류 접두어 감지)·m2(mktemp 실패)·m3(스트림 JSON을 stdin으로)·m7(비어 있지 않은 커서도 "더 있음")는 반영했다.
+- **알려진 한계(수정하지 않음)**: (m4) 승인됐지만 아직 선점 안 된 건(`RETRY_WAIT`+`manual_gen`)은 `close`로 철회할 수 없다. (m5) 4행 `UNKNOWN` 직후 옛 워커의 HTTP 발신이 아직 진행 중일 수 있어, 그 사이 `check`가 "없음"이라 `reprocess`하면 중복 답글이 날 수 있다 — 사람이 `send-deadline`(10초) 이상 지난 뒤 확인해야 한다. (m6) `ANOMALY`로 올라간 DLQ 항목 중 상태가 `PROCESSING`·`CLOSED`이거나 상태 해시가 만료된 것은 CLI로 지울 수 없다. (m7) 메타데이터에 `kind`가 없어 `check`가 실패 안내 답글도 "전송됨"으로 보여준다.
+
+## 12. 2단계 M15 즉시 반응 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`, 수신·워커·반응 소비자 한 프로세스) + `docker slack-lab-redis-1`, 합성 서명 요청 + 실제 부모 메시지(§11과 같은 방식). `reaction_ms`는 수신 필터가 잡은 `received_at`에서 `reactions.add` 성공까지이며 같은 호스트 시계다. 검증 환경이 PRD §5의 장비·부하 조건 전체와 같지는 않다(개발 장비 단일 호스트, 표본 12건).
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **(a) 처리 적체** | `experiment.slow-mode-ms=20000`으로 처리를 막고 12건을 연속 투입(이벤트 12건 pending, 처리 완료 0) | 12/12 반응 성공, `reaction_ms` 오름차순 244·244·245·246·249·253·254·254·257·271·290·467 → **p95 ≈ 467ms(목표 ≤ 3s)**, 누락 0, 반응 스트림 잔존 0 |
+| **(b) 반응 소비자 지연** | `reaction.experiment-delay-ms=8000` | 발신 성공·처리 종료가 12:02:09, 반응은 그 뒤 12:02:15에 붙음(`reaction_ms=8313`). 반응 스트림이 처리 그룹의 XDEL과 독립이라 **답변이 먼저 끝나도 누락 없음**, 잔존 0 |
+| **(c) 반응 오류 유도** | `reaction.emoji=no_such_emoji_zz` → `invalid_name` | `반응 실패(재시도 안 함)` 로그 1회, 호출 1회. **답글은 정상** 발신·`COMPLETED`(총 1663ms). *스코프 오류 자체는 Slack 앱 화면에서 스코프를 빼야 재현되어 하지 않았다 — 같은 실패 경로(비정상 `ok:false`)를 다른 사유로 검증한 것이다* |
+| 소비자 회수 | 10건 실험 중 첫 요청에서 Redis 명령이 1.2초 정체(`QueryTimeoutException`, 발행 503 1회) | 그 반응 항목이 소비자에게 전달만 되고 처리되지 못했으나, 죽은 소비자 회수(min-idle 10초)로 `reaction_ms=13539`에 처리됨. **이 1건은 3초 목표를 넘겼다** — 정체 없는 재측정(위 (a))에서는 재현되지 않았다 |
+
+통합 테스트(`ReactionConsumerTest`): 성공·`already_reacted`·스코프 오류 모두 항목 삭제·호출 1회, 죽은 소비자 항목 회수, 처리 스트림 삭제와 무관한 반응 항목. `EventPublisherTest`: 반응 항목이 본문 없이 `event_id`·`channel`·`ts`·`received_at`만 담김. 전체 빌드 통과.
+
+발견·주의: (1) **기한 취소가 `ExecutionException(CancellationException)`으로 도착하면 `OpenAiCompatibleLlmClient`가 `TimedOut`이 아니라 영구 `Failed`로 분류**하던 실제 경합을 잡았다(M14 중 `기한을_넘기면_취소되고_TimedOut을_반환한다` 간헐 실패의 원인, 재시도 대신 즉시 안내로 가는 결과). 수정 후 6회 연속 통과. (2) 정체 원인은 규명하지 못했다 — 첫 요청 지연은 3회 재기동으로 재현되지 않았다(enqueue 15~56ms). 발행은 실패해도 Lua가 이미 두 스트림에 썼을 수 있어 Slack 재전송이 오면 같은 event_id가 다시 들어오지만, 선점 결과표가 하나만 실행시킨다. (3) 사람이 실제로 멘션하는 Slack→ngrok 경로는 이 마일스톤에서도 검증하지 않았다.
+
+### 12.1 리뷰 대응 (codex는 usage limit이라 code-reviewer 대체, APPROVE·MAJOR 0·MINOR 6)
+
+반영: (1) 반응 읽기를 1건 단위로 줄여 뒤쪽 항목이 회수 min-idle을 넘겨 이중 처리되는 경로를 없앴다. (2) 명령 타임아웃이 나면 다음 반복에서 자기 PEL(`ReadOffset 0`)을 한 번 읽는다 — 위 실측의 13.5초 방치를 없애기 위한 것이다. (3) 종료 중 인터럽트로 `interrupted` 결과가 오면 ACK하지 않고 PEL에 남긴다. (4) 루프가 `Throwable`을 잡아 로그를 남긴다(조용한 실패 방지). (5) `publish.lua`의 "원자성" 주석을 실제 보장(끼어들기 없음, 롤백 없음)에 맞게 정정. 반영 후 정상 설정으로 재기동해 3건 스모크: `reaction_ms` 1526(첫 호출 웜업)·408·285, 전부 성공, 잔존 0. 위 (2)의 자기 PEL 재읽기는 통합 테스트로 만들지 않았고 실측으로도 유도하지 않았다(Redis 정체를 재현하기 어렵다).
+
+알려진 한계(수정하지 않음): 반응 스트림에 `MAXLEN` 상한이 없다(소비자가 하나도 없으면 무한히 자란다 — residue-check가 10분 뒤 경고), 재기동마다 새 소비자 이름이 그룹에 남는다, `reaction_ms`는 Slack 재전송으로 들어온 항목이면 그 전달의 `received_at` 기준이라 최초 수신 기준보다 짧게 잰다, 회수는 PLAN의 `XAUTOCLAIM`이 아니라 `XPENDING`+`XCLAIM`이다(Spring Data Redis 3.4.1에 전용 API가 없다, `EventWorker`와 같은 방식), `ExecutionException(CancellationException)` 분류 수정의 회귀 테스트는 없다(경합이라 안정적 재현이 어렵다).
+
+## 13. 2단계 M16 스레드 문맥 검증 (2026-09-30)
+
+조건: 호스트 `bootRun`(역할 `all`), Ollama `qwen2.5:7b`, 합성 서명 요청 + 실제 스레드(§11·§12와 같은 방식). 스레드의 첫 메시지는 봇 계정으로 올린 "이 스레드의 비밀 단어는 '바나나'입니다"이다(사람 계정으로는 올릴 수 없어 조회 상 assistant 역할로 들어간다 — 역할 매핑은 단위 테스트로 따로 검증). 질문은 "이 스레드의 비밀 단어가 뭐였지? 한 단어로만 답해줘."이다.
+
+| 시나리오 | 결과 |
+|---|---|
+| **문맥 조회 성공** | `스레드 문맥 context_messages=1 context_chars=36 fetch_ms=468` → LLM 1342ms → 답글 **"바나나"**(스레드의 이전 내용을 반영). 총 소요 2078ms |
+| **조회 실패 유도** (`context.fetch-deadline-ms=1` → `deadline_exceeded`) | `문맥 없이 진행` 경고 로그 1회, LLM 529ms → 답글 **"비밀"**(문맥이 없어 앞 대화를 알지 못함), `Delivered`·총 799ms. 답글은 정상 발신됐고 조회 실패가 처리를 막지 않음. 문맥 유무에 따라 답이 갈리는 대조가 된다 |
+
+단위·통합 테스트: `SlackThreadContextTest` 10건(역할 매핑·이번 메시지 제외·봇 멘션 제거·빈 메시지 버림·최근 N개·글자 한도·단일 메시지 초과 시 자르기·`ok:false`·기한 초과 시 기한 안에 포기·남은 예산이 더 짧으면 그 예산 사용·예산 0이면 조회 안 함), `SlackEventHandlerTest`(스레드면 이전 대화가 이번 질문 앞에 붙음, 스레드가 아니면 조회 안 함, 조회가 비어도 정상 답변), `OpenAiCompatibleLlmClientTest`(시스템 프롬프트 뒤에 user/assistant 순서 유지). 전체 빌드 통과.
+
+주의: (1) 조회 실패 시연은 스코프 제거 대신 기한을 1ms로 줄여 유도했다(스코프를 빼려면 Slack 앱 화면 조작이 필요). (2) 사람이 실제로 멘션하는 Slack→ngrok 경로와 사람 계정 메시지의 `user` 역할 매핑은 실환경에서 검증하지 않았다 — 봇 메시지 판별을 `bot_id` 유무로만 하므로 다른 봇의 메시지도 assistant로 들어간다. (3) 대조군 이벤트(스레드 밖 질문)는 서버를 내리는 순간과 겹쳐 처리되지 않은 채 큐에 남았다가 다음 기동 때 처리된다.
+
+### 13.1 리뷰 대응 (codex usage limit → code-reviewer 대체, 1회전 REVISE: MAJOR 2·MINOR 7)
+
+- **MAJOR-1(반영)**: `conversations.replies`는 조회 시점의 스레드 전체를 주므로 큐 지연·재시도 사이에 올라온 *뒤 메시지*가 "이전 대화"로 섞였다. 현재 `ts` 이상인 메시지를 걸러낸다(소수 문자열이라 `BigDecimal`로 비교 — 문자열 비교면 `"1000.0" < "300.0"`이 된다). 회귀 테스트 추가.
+- **MAJOR-2(반영)**: JDK `HttpRequest.timeout`은 응답 헤더까지만 막아 본문이 멈추면 3초 기한이 깨지고 60초 상한(규칙 10)까지 위협했다. `sendAsync` + `future.get(기한)` + `cancel`로 바꿨고, 헤더 후 본문이 멈추는 스텁 테스트로 기한 안에 포기함을 확인.
+- **MINOR-1·2(반영)**: 기동 후 첫 조회에서 `auth.test`로 자기 `bot_id`·`user_id`를 알아 캐시한다. 자기 봇 메시지만 assistant로 넣고 **다른 앱의 봇 메시지는 버린다**(assistant로 넣으면 모델이 자기 말로 믿는 프롬프트 주입 경로). 문장 중간의 봇 멘션도 식별한 ID로 지운다. `auth.test`가 실패하면 예전처럼 모든 봇 메시지를 assistant로 본다. 수정 후 실서버 스모크(비밀 단어 '포도') 정상.
+- MINOR-4(`llmBudgetMs` 이중 계산)·MINOR-5(옛 Javadoc)도 반영.
+- **알려진 한계(수정하지 않음)**: 재시도할 때마다 스레드를 다시 조회한다(시도마다 최대 3초·Slack 호출 1회, 예산은 시도별 `t0`로 초기화되어 상한은 안전), 실패 안내(`FAILURE_NOTICE`)가 assistant 문맥으로 들어가 말투를 따라 할 수 있다(`ReplyMetadata`로 거르는 개선 여지), Slack이 Marketplace 밖 상용 앱에 `conversations.replies`를 분당 1회·15건으로 제한한 정책이 있다(내부용 앱이라 해당 없음, 배포 형태가 바뀌면 재확인), 글자 자르기는 UTF-16 단위라 이모지 서로게이트 쌍이 갈라질 수 있다, `fetchMessages`의 다중 페이지 경계(`missing_cursor`·`too_many_pages`) 전용 테스트는 없다.
+
+## 14. 2단계 M17 관측 + 다중 워커 검증 (2026-09-30)
+
+조건: `docker compose --profile app up --scale worker=2`(수신 1·워커 2·반응 1 컨테이너 + Redis 컨테이너), 호스트 Ollama `qwen2.5:7b`, 합성 서명 요청 + 실제 스레드(§11~13과 같은 방식). 워커는 `worker.concurrency=1`이다. 검증 환경은 PRD §5의 성능 판정 조건이 아니라 정확성 확인용이다.
+
+### 14.1 집계 명령 (B14)
+
+`scripts/p1-metrics <로그...>` 또는 `docker compose logs --no-log-prefix receiver worker reactor | scripts/p1-metrics`. 구간별 건수·p50·p95(정렬한 표본의 `ceil(0.95×N)`번째)·max, 결과별 건수, 발행·반응 실패 건수, 음수 구간 건수, 적체(스냅샷 횟수·최대 `stream_len`·최대 `pending`·마지막 `retry`/`dlq`/`recovery`)를 낸다. 답변 지표는 정상 답변(`Delivered`·`kind=answer`)만 센다. 실행 예(버스트 5건, 컨테이너 로그): `recv_ms` p50 464·p95 498, `enqueue_ms` p50 200·p95 207, `queue_wait_ms` p50 3106·p95 5331, `llm_ms` p50 2429·p95 3167, `send_ms` p50 296·p95 664, `answer_ms` p50 5318·p95 8404, `reaction_ms` p50 3132·p95 3356, 정상 답변 5/5, 발행·반응 실패 0, 음수 구간 0, 적체 스냅샷 14회(`stream_len`·`pending` 최대 1).
+
+### 14.2 다중 워커 (B15)와 kill (B3·B4)
+
+| 시나리오 | 절차 | 결과 |
+|---|---|---|
+| **D1** 동일 event_id 10회 동시 전달 | 워커 2개 | 10건 모두 200·큐 저장, 실행 1회, 나머지 9건 `BUSY`(ACK 안 함 → 이후 회수에서 정리, 최종 `pending 0`·`stream_len 0`), **답글 1개** |
+| **D3** 서로 다른 10건 | 워커 2개, 10건 동시 투입 | **답글 정확히 10개**, 시도 10건 각각 별개의 `attempt_id` |
+| **B3** 큐 저장 후 수신 kill | 200(큐 저장 확인)을 받은 직후 `docker kill -s KILL`로 수신 컨테이너 종료 | 이벤트는 큐에 남아 워커가 처리 |
+| **B4** 처리 중 워커 kill | `EXPERIMENT_SLOW_MODE_MS=30000` 오버라이드로 처리를 느리게 → `XPENDING`으로 소유 소비자를 찾아 그 워커 컨테이너를 kill | 임대(30초) 만료와 `claim-min-idle-ms`(100초) 뒤 **남은 워커가 회수**(`죽은 소비자 항목 회수 stale_count=1`), 새 `attempt_id`로 재실행, **최종 답글 1개**, 138초, `queue_wait_ms=103158` |
+
+B3·B4는 한 이벤트에서 함께 확인했다(수신을 죽이고 이어서 처리 중 워커를 죽임). 전 과정 뒤 `scripts/p1-residue-check` → `OK: 잔존물 0`(해결 29건, 스트림·반응 스트림 잔존 0).
+
+통합 확인: `SlackEventHandlerTest`에 `recordPhase` 전달 검증 2건(발신 게이트에 막히면 `send_ms` 미기록). 전체 빌드 통과.
+
+### 14.3 관측 사항 (M18이 판단)
+
+- 컨테이너 환경 버스트 5건에서 `recv_ms` p50 464ms(목표 p95 ≤ 200ms), `reaction_ms` p50 3.1s(목표 p95 ≤ 3s)가 관측됐다. 호스트 `bootRun`(§12)에서는 반응이 0.25~0.47s, 수신 15~56ms였다. 원인은 규명하지 않았다 — 컨테이너·Docker 네트워크 오버헤드, 같은 장비의 Ollama·합성 요청 생성 스크립트와의 자원 경합, 워커 2개·반응 소비자 3개(워커 2 + 반응 1)의 경합 후보가 있다. 이것은 성능 판정이 아니라 M18의 고정 조건 실험이 다룬다.
+- `BUSY`로 끝난 중복 메시지는 ACK하지 않고 회수 주기(30초 스캔·100초 idle)에 정리된다. 정확성에는 영향이 없으나 중복 전달이 잦으면 pending이 그동안 쌓인다.
+- 사람이 실제로 멘션하는 Slack→ngrok→수신 컨테이너 경로는 이 마일스톤에서도 검증하지 않았다.
+
+### 14.4 리뷰 대응 (codex는 usage limit이라 code-reviewer 대체, REVISE: MAJOR 2·MINOR 7)
+
+- **MAJOR-1(반영)**: `적체 스냅샷 실패` 줄을 스냅샷으로 오인해 집계가 `KeyError`로 죽던 것을 고쳤다(성공 줄만 스냅샷으로 세고 실패는 따로 센다).
+- **MAJOR-2(반영)**: 발행 실패 1건이 발행자·컨트롤러 줄 때문에 경로에 따라 1~2건으로 세어지던 것을 컨트롤러 줄만 세도록 고쳤다.
+- **MINOR-1(반영)**: 재시도·재처리 시도의 `queue_wait_ms`·`answer_ms`에는 앞선 시도와 백오프가 섞여 p95를 왜곡한다. 지표 줄에 `retries`·`manual_run`을 추가하고, 집계는 **첫 시도(gen=0, 수동 재처리 아님)만** 성능 표본에 넣으며 뺀 건수를 보고한다. MINOR-2(성공률 분모를 event_id별 마지막 결과로도 보고), MINOR-3(`recv_ms`는 `ack_delivered=true`만), MINOR-7(스냅샷 줄 수가 워커 수만큼 중복임을 출력에 명시), MINOR-4(`received_at`이 없거나 깨졌으면 `received_at_missing=true`로 표시하고 측정 무효로 취급), MINOR-6(적체 키 상수 재사용)도 반영.
+- 합성 로그로 집계 회귀 확인(스냅샷 실패 줄·발행 실패 이중 줄·재시도 시도·`ack_delivered=false` 포함) 후 새 이미지로 3건을 다시 돌려 실제 컨테이너 로그 집계도 확인: 정상 답변 3/3, 음수 구간 0, 잔존물 0.
+- **알려진 한계(수정하지 않음)**: 단계 이름(`llm_ms`·`send_ms`)이 문자열 키라 오타가 조용히 -1이 된다(상수화 여지), `answerMs < 0`은 같은 벽시계라 사실상 `queueWaitMs < 0`에 포함된다, 집계의 `kv` 파싱은 값에 공백이 들어가면 잘린다(현재 지표 줄에는 그런 값이 없다).
+- 정정: 위 §14.3의 `reaction_ms` 3.1s는 버스트 5건 관측이었고, 부하가 낮은 3건 재측정에서는 p50 1.5s·p95 2.2s였다. 호스트 `bootRun`(0.25~0.47s)보다는 여전히 느리다 — M18이 판단한다.
+
+## 15. 2단계 M18 P1 검증 실험 (2026-09-30)
+
+**구분: 검증 수행 완료 = 예(P·D·R 세 실험 모두 수행). P1 합격 = 아래 판정 표대로, 단 §15.5의 한계 안에서.**
+
+### 15.1 환경 (PRD §5 환경 고정)
+
+| 항목 | 값 |
+|---|---|
+| 장비 | Apple M1(8코어), RAM 16GB, macOS 26.6.1 (§1과 같은 장비) |
+| Ollama | 0.34.0, 호스트에서 실행(컨테이너 아님), 기본 설정(`OLLAMA_NUM_PARALLEL` 미설정) |
+| 모델 | `qwen2.5:7b`, digest `845dbda0ea48…`, Q4_K_M, 7.6B, 컨텍스트 32768(요청은 §1과 같은 형식) |
+| 출력 토큰 상한 | `llm.max-tokens=512`, `keep_alive=30m`, 온도 0.3(코드 기본값) |
+| 추론 동시성 | 워커 `worker.concurrency=1`(M9 확정값) |
+| 워커 수 | 성능 P: **1개**(모든 배치 동일). 중복 D: 1개와 2개 각각. 복구 R: R1 2개·R2 2개·R3 1개 |
+| 컨테이너 | Docker Engine 29.3.1, VM 8 CPU / 약 8.5GiB. 수신·워커·반응·Redis(`redis:8.2-alpine`, 서버 8.2.10, AOF `always`) 컨테이너, Java 21 |
+| 입력 | 같은 질문 세트 20개(고정 순서, `scripts/p1-load`), 짧은 답을 유도하는 한 문장 질문 |
+| 요청 | 서명이 유효한 **합성** `event_callback`(실제 테스트 채널·실제 부모 메시지). Slack→ngrok 구간은 거치지 않음 |
+| 429 | 실행 중 실제 429 0건(로그 확인) |
+
+### 15.2 성능 P (워커 1개, 로그 집계 `scripts/p1-metrics`)
+
+콜드 스타트(모델을 내리고 기동한 직후 첫 건): `llm_ms=7997`, `answer_ms=8374`; 두 번째 건은 `llm_ms=1792`, `answer_ms=2153`. 워밍업 2건은 표본에서 제외.
+
+| | n | 수신 `recv_ms` p95 | 답변 `answer_ms` p95 | 유실·중복·실패 안내 | 판정 |
+|---|---|---|---|---|---|
+| (a) 순차 20건 | 20 | **88ms**(p50 46, max 131) | **9095ms**(p50 2935, max 24473) | 0·0·0 | 수신 ≤ 200ms ✓, 답변 ≤ 45s ✓ |
+| (b) 버스트 5건×2 | 10 | **171ms**(p50 99, max 171) | 31230ms(p50 13080) — *적체 관측값, 판정 제외* | 0·0·0, 기한 초과 0 | 수신 ≤ 200ms ✓ |
+
+세부(순차): `enqueue_ms` p95 27, `queue_wait_ms` p95 87, `llm_ms` p50 2602·p95 8045·max 23983, `send_ms` p95 953, `reaction_ms` p50 299·p95 408. 세부(버스트): `enqueue_ms` p95 106, `queue_wait_ms` p95 20708, `llm_ms` p95 10879, `reaction_ms` p50 951·p95 1642(B12 ≤ 3s ✓). 발행·반응 실패 0, 음수 구간 0, 적체 최대 `stream_len` 1(순차)·`pending` 1. 순차 `llm_ms` max 23983ms인 한 건은 모델 추론 편차로 보이며(원인 미규명) 45초 안에 들었다.
+
+### 15.3 중복 D
+
+| 실험 | 워커 | 결과 |
+|---|---|---|
+| D1 동일 event_id 10회 동시 | 1 / 2 | 10회 모두 200, **최종 답글 1개** / **1개** |
+| D2 완료 뒤 재전달 1회 | 1 / 2 | 200, 10초 대기 뒤에도 **답글 추가 0개** / **0개** |
+| D3 서로 다른 event_id 10건 동시 | 1 / 2 | **답글 정확히 10개**(각 스레드 1개, 유실·중복·실패 안내 0) / **10개** |
+
+D1의 나머지 9건은 `BUSY`로 ACK하지 않고 회수 주기에 정리된다(실험 뒤 `pending 0`, `stream_len 0`). 실행 뒤 `scripts/p1-residue-check` → `OK: 잔존물 0`.
+
+### 15.4 복구 R (성능 측정과 분리, 컨테이너)
+
+| 실험 | 절차 | 결과 |
+|---|---|---|
+| **R1** 큐 저장 후 수신 kill | 200 수신 직후 `docker kill -s KILL` 수신 컨테이너 | 워커가 처리, 상태 `COMPLETED`, 답글 1개 (B3 ✓) |
+| **R2** 처리 중 워커 kill | `EXPERIMENT_SLOW_MODE_MS=30000`, 워커 2개, `XPENDING` 소비자로 소유 워커를 찾아 kill | 남은 워커가 회수해 재실행, 새 `attempt_id`, **153초**(claim-min-idle 100s + 임대 + 재실행), 답글 1개 (B4 ✓) |
+| **R3** 발신 직후 halt | `EXPERIMENT_HALT_AFTER_SEND=true` → 발신 성공 직후 컨테이너 종료(137) → 정상 설정으로 재기동 | 약 110초 뒤 회수돼 `UNKNOWN(sending_lease_expired)`·복구 목록 보존, 재발신 0회. `recovery check`가 metadata로 그 시도의 답글(`attempt_id` 일치)을 찾고 `resolve-completed`로 완료 → 잔존물 0 (B5 ✓) |
+
+B11(24시간 자동 차단·수동 승인 1회)은 §11에서 실측했고, 이번 실행에서는 다시 유도하지 않았다.
+
+### 15.5 판정과 한계
+
+| 기준 | 판정 |
+|---|---|
+| B1(503)·B2(역할별 빈)·B8~B11(재시도·DLQ·승인)·B13(문맥) | 해당 마일스톤(§8~§13)에서 수행. 이번 M18에서 재실행하지 않음 |
+| B3·B4·B5 | ✓ (R1·R2·R3, 컨테이너) |
+| B6·B7·B15 | ✓ (D1~D3, 워커 1·2개) |
+| B12 | ✓ 순차 p95 408ms·버스트 p95 1642ms(≤ 3s), 누락 0. 적체·답변 선완료·오류 유도는 §12 |
+| B14 | ✓ (`scripts/p1-metrics`, §14) |
+| B16 | ✓ 순차 20: 수신 p95 88ms·답변 p95 9.1s, 버스트 5×2: 수신 p95 171ms, 유실·중복·실패·기한 초과 0 |
+| B17 | ✓ `grep`로 `event/` 패키지의 HTTP import 0건 |
+| B18 | ✓ 각 실험 뒤 `p1-residue-check` 잔존물 0 |
+| B19 | ✓ `./gradlew build` 통과 |
+
+**한계(합격 주장의 범위)**: (1) 요청이 합성이라 **사람이 실제로 멘션하는 Slack→ngrok→수신 구간은 M9~M18 어디서도 검증하지 않았다** — "수신 p95"는 서버 HTTP 진입부터 응답 완료까지이며 ngrok·Slack 구간은 포함하지 않는다. (2) 표본이 작다(순차 20·버스트 10). 버스트 수신 p95는 171ms로 한도(200ms)에 근접해 여유가 크지 않고, M17 소규모 버스트에서는 p50 464ms까지 나온 적이 있다(부하 생성 스크립트·Ollama와 같은 장비 경합 후보, 원인 미규명). 각 실험은 한 번씩만 실행했다. (3) 중복 억제 보장 범위는 `COMPLETED` 보존 7일이다(PRD §5) — 7일 뒤 같은 event_id가 다시 오면 새로 실행된다. (4) 죽은 워커 회수에는 최대 약 100초가 걸린다(R2 153초). (5) 코드 리뷰는 M9~M17 각 마일스톤에서 거쳤고, M18의 산출물은 부하 생성기(`scripts/p1-load`)와 문서뿐이라 별도 리뷰를 하지 않았다.
+

@@ -9,7 +9,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 - 작업 계획 → [`PLAN.md`](.claude/docs/PLAN.md)
 - 실험 기록 → [`docs/EXPERIMENT-LOG.md`](docs/EXPERIMENT-LOG.md)
 
-**현재 단계: 1단계 (동기) · 구현 중(M1 골격 완료).** 큐·n8n·RAG 없음. 단계가 바뀌면 이 줄을 갱신한다.
+**현재 단계: 2단계 완료(`v0.2.0`) · 3단계(RAG) 착수 전.** 1단계는 `v0.1.0`, 2단계(큐·워커 분리, M9~M18)는 `v0.2.0`으로 완료. RAG·n8n·LangGraph는 아직 없다. 세부 진행은 `.claude/docs/PLAN.md`가 정본이다. 단계 번호(3→4 등) 자체가 바뀔 때만 사용자 요청이 필요하다(Git 규칙) — 같은 단계 안의 진행 문구는 마일스톤마다 갱신한다.
 
 ## 규칙
 
@@ -37,7 +37,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 
 이 저장소는 **public**이다. 한 번 push한 비밀값·실명·로컬 경로는 지워도 이력에 남는다.
 
-- **작업 단위마다 브랜치 → 커밋 → push → PR → `develop` 병합까지 자동으로 한다.** 사용자의 별도 요청·승인 없이 진행한다(2026-09-22 결정, 1단계 한정).
+- **작업 단위마다 브랜치 → 커밋 → push → PR → `develop` 병합까지 자동으로 한다.** 사용자의 별도 요청·승인 없이 진행한다(2026-09-22 결정, 2026-09-28 2단계로 연장).
   작업 단위는 검증 가능한 한 덩어리(마일스톤 또는 그 일부)이며, 한 커밋·PR에 서로 다른 작업을 섞지 않는다.
   **`main` 병합과 태그**, 그리고 **PRD·PLAN의 단계 전환**(예: 1단계→2단계, `AGENTS.md` 상단 "현재 단계" 줄이 바뀌는 시점)**은 사용자가 요청했을 때만 한다.**
 - **브랜치**: `main`(단계 완료 시점만, 직접 push 금지) ← `develop`(통합) ← `feature/<마일스톤>-<주제>`(예: `feature/m2-signature`).
@@ -54,7 +54,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 - **세션**: 작업 단위(마일스톤)를 마치면 멈추지 않고 다음 단위로 이어간다. 단위를 끝낼 때마다 `.claude/docs/PLAN.md`의 진행 상태와 `docs/EXPERIMENT-LOG.md`를 갱신한다.
   PLAN.md 진행 상태의 `다음 세션 핸드오프` 소절도 그때마다 **덮어쓴다**(누적 금지, 10줄 안팎). 별도 handoff 파일은 두지 않는다.
   이 소절은 대화가 요약되거나 세션이 끊겨도 이어갈 수 있게 하는 안전망이다 — 대화에만 남은 상태는 이어지지 않는다.
-  **자동으로 넘어가지 않고 멈추는 지점**: (1) Slack 화면 조작(스코프 재설치, 채널 초대, 이벤트 구독 활성화 등) (2) ngrok URL 재등록 (3) 위 Git 규칙의 단계 전환. **PR 병합은 여기 포함되지 않는다** — 1단계 안의 마일스톤 PR은 승인 없이 병합하고 계속 진행한다.
+  **자동으로 넘어가지 않고 멈추는 지점**: (1) Slack 화면 조작(스코프 재설치, 채널 초대, 이벤트 구독 활성화 등) (2) ngrok URL 재등록 (3) 위 Git 규칙의 단계 전환. **PR 병합은 여기 포함되지 않는다** — 현재 단계 안의 마일스톤 PR은 승인 없이 병합하고 계속 진행한다. 2단계는 PLAN의 사용자 결정 멈춤(M9 성능 목표 미달 시 변경안)도 멈추는 지점이다.
 
 ## 명령어
 
@@ -62,7 +62,13 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 ./gradlew build                                   # 컴파일 + 테스트
 set -a && source .env && set +a && ./gradlew bootRun
 ngrok http 8080                                   # 별도 터미널
-ollama serve                                      # 별도 터미널
+ollama serve                                      # 별도 터미널 (Ollama는 호스트에서 실행, 컨테이너 X)
+docker compose up -d redis                        # 2단계: Redis(8.2, AOF always) — M10부터
+docker compose --profile app up --build           # 2단계: 수신·워커·반응 컨테이너 (호스트 Ollama 사용)
+scripts/recovery list                             # 2단계: 결과 불명·DLQ 복구 CLI (check·resolve-completed·reprocess·close)
+scripts/p1-residue-check                          # 2단계: 해결된 건의 본문 잔존 검사(B18)
+scripts/p1-metrics <로그...>                      # 2단계: 로그 집계 (p50/p95·결과별 건수·적체, B14)
+scripts/p1-load <warmup|seq|burst|dup|distinct>   # 2단계: 검증 부하 생성기 (합성 서명 요청)
 ollama list                                       # 설정에 박을 모델 ID는 여기서 확인
 git config core.hooksPath .githooks               # 클론 후 1회: pre-commit 훅 활성화
 curl localhost:8080/health                        # bootRun 후 200 확인

@@ -17,9 +17,14 @@ repositories {
     mavenCentral()
 }
 
+// Boot 3.4.1 기본 Testcontainers 1.20.4는 Docker Engine 29(API 1.54)와 호환되지 않아 400으로 실패한다.
+ext['testcontainers.version'] = '1.21.4'
+
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
+    // 2단계 큐(Streams)·공유 처리 상태 (ARCHITECTURE ADR-8)
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
 
     // 한쪽만 선언하면 컴파일이 실패한다 (ARCHITECTURE §7)
@@ -27,6 +32,8 @@ dependencies {
     annotationProcessor 'org.projectlombok:lombok'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 

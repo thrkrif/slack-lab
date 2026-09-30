@@ -2,12 +2,11 @@ package com.slack.lab.slack;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.slack.lab.event.AttemptHandle;
-import com.slack.lab.event.ClaimResult;
-import com.slack.lab.event.EventDeduplicator;
-import com.slack.lab.event.HandlingResult;
-import com.slack.lab.event.SlackEventHandler;
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.event.SlackMessageEvent;
+import com.slack.lab.queue.EventPublisher;
+import com.slack.lab.queue.PublishResult;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -19,25 +18,23 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * ARCHITECTURE §3.1 표대로 HTTP 응답을 결정한다. 처리 권한(claim)을 확보한 뒤에는 어떤 예외·처리 결과가 나와도
- * 200을 유지하고 로그만 남긴다 — 선점 전 내부 오류만 500이다.
+ * ARCHITECTURE §3.1 표대로 HTTP 응답을 결정한다(M12부터: 큐 저장 확인 후에만 200). 처리는 워커의 몫이라
+ * 이 컨트롤러는 서명 검증·필터링·발행만 한다 — LLM도 Slack 발신도 호출하지 않는다(B2).
  */
 @RestController
+@ConditionalOnRole({AppRole.RECEIVER, AppRole.ALL})
 public class SlackEventController {
 
     private static final Logger log = LoggerFactory.getLogger(SlackEventController.class);
 
     private final SlackSignatureVerifier verifier;
     private final ObjectMapper mapper;
-    private final EventDeduplicator deduplicator;
-    private final SlackEventHandler handler;
+    private final EventPublisher publisher;
 
-    public SlackEventController(SlackSignatureVerifier verifier, ObjectMapper mapper,
-            EventDeduplicator deduplicator, SlackEventHandler handler) {
+    public SlackEventController(SlackSignatureVerifier verifier, ObjectMapper mapper, EventPublisher publisher) {
         this.verifier = verifier;
         this.mapper = mapper;
-        this.deduplicator = deduplicator;
-        this.handler = handler;
+        this.publisher = publisher;
     }
 
     @PostMapping("/slack/events")
@@ -88,10 +85,10 @@ public class SlackEventController {
             return ResponseEntity.ok().build();
         }
 
-        return handleEventCallback(root, servletRequest);
+        return handleEventCallback(root, retryNum, servletRequest);
     }
 
-    private ResponseEntity<?> handleEventCallback(JsonNode root, HttpServletRequest servletRequest) {
+    private ResponseEntity<?> handleEventCallback(JsonNode root, String retryNum, HttpServletRequest servletRequest) {
         SlackMessageEvent event;
         try {
             event = SlackMessageEvent.from(root);
@@ -104,26 +101,33 @@ public class SlackEventController {
         servletRequest.setAttribute(AckLoggingFilter.EVENT_ID_ATTR, event.eventId());
 
         if (event.shouldIgnore()) {
-            // bot_id·subtype 있는 이벤트를 거르지 않으면 무한 루프가 된다(AGENTS.md 함정).
+            // bot_id·subtype 있는 이벤트를 거르지 않으면 무한 루프가 된다(AGENTS.md 함정). 큐에 넣지 않는다.
             log.info("무시된 이벤트 event_id={} bot_id={} subtype={}", event.eventId(), event.botId(), event.subtype());
             return ResponseEntity.ok().build();
         }
 
-        ClaimResult claim = deduplicator.claim(event.eventId());
-        if (claim instanceof ClaimResult.Duplicate duplicate) {
-            log.info("중복 억제 event_id={} existing_state={}", event.eventId(), duplicate.existing());
-            return ResponseEntity.ok().build();
-        }
+        // 중복 입력은 여기서 거르지 않는다(ARCHITECTURE §3.1) — 워커가 M11 선점 결과표로 억제한다.
+        long receivedAtMs = receivedAtMs(servletRequest);
+        PublishResult result = publisher.publish(event, receivedAtMs, retryNum);
+        return switch (result) {
+            case PublishResult.Enqueued enqueued -> {
+                log.info("발행 완료 event_id={} stream_id={}", event.eventId(), enqueued.streamId());
+                yield ResponseEntity.ok().build();
+            }
+            case PublishResult.Failed failed -> {
+                log.error("발행 실패 event_id={} reason={}", event.eventId(), failed.reason());
+                yield ResponseEntity.status(503).build();
+            }
+            case PublishResult.Unconfirmed unconfirmed -> {
+                log.error("발행 확인 불가 event_id={} reason={}", event.eventId(), unconfirmed.reason());
+                yield ResponseEntity.status(503).build();
+            }
+        };
+    }
 
-        AttemptHandle attempt = ((ClaimResult.Claimed) claim).handle();
-        try {
-            HandlingResult result = handler.handle(event, attempt);
-            log.info("이벤트 처리 완료 event_id={} attempt_id={} result={}", event.eventId(), attempt.attemptId(),
-                    result.getClass().getSimpleName());
-        } catch (Exception e) {
-            // 처리 권한 확보 후의 예외는 200을 유지한다 — 재전송으로 재시도되게 두지 않는다(중복 방지는 dedup이 담당).
-            log.error("핸들러 처리 중 예외 event_id={} attempt_id={}", event.eventId(), attempt.attemptId(), e);
-        }
-        return ResponseEntity.ok().build();
+    private static long receivedAtMs(HttpServletRequest servletRequest) {
+        Object attr = servletRequest.getAttribute(AckLoggingFilter.RECEIVED_AT_MS_ATTR);
+        // 필터가 항상 먼저 실행되므로 정상 경로에서는 null이 아니다 — 없으면(테스트 등) 지금 시각으로 대체한다.
+        return attr instanceof Long l ? l : System.currentTimeMillis();
     }
 }

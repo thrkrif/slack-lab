@@ -8,8 +8,19 @@ public sealed interface SlackSendResult {
 
     record Success(String ts) implements SlackSendResult {}
 
-    /** 전송되지 않았음이 확실한 실패. */
-    record Failed(String reason) implements SlackSendResult {}
+    /**
+     * 전송되지 않았음이 확실한 실패.
+     *
+     * @param retryable 재시도 가능 여부(M13). 연결 수립 실패·429(rate limit)는 true, {@code ok:false}의
+     *     인증·권한·채널 오류나 요청 준비 실패는 false다.
+     * @param retryAfterMs 429 응답의 {@code Retry-After} 헤더(ms로 환산). 해당 없으면 0 — 호출자는
+     *     0이면 재시도 정책의 기본 대기를 쓴다.
+     */
+    record Failed(String reason, boolean retryable, long retryAfterMs) implements SlackSendResult {
+        public Failed(String reason) {
+            this(reason, false, 0);
+        }
+    }
 
     /** 전송 여부를 확인할 수 없음. 자동 재발신 대상이 아니다(A10). */
     record Unknown(String reason) implements SlackSendResult {}

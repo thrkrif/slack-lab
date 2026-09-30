@@ -49,6 +49,11 @@ public record SlackMessageEvent(
      * 모르면 문장 앞의 멘션만 지운다.
      */
     public String promptText() {
+        return cleanText(text, botUserId);
+    }
+
+    /** 스레드 문맥의 이전 메시지도 같은 규칙으로 정리한다(M16). */
+    public static String cleanText(String text, String botUserId) {
         String t = text == null ? "" : text;
         if (botUserId != null) {
             t = MENTION.matcher(t).replaceAll(m -> m.group(1).equals(botUserId) ? "" : java.util.regex.Matcher.quoteReplacement(m.group()));
@@ -56,6 +61,24 @@ public record SlackMessageEvent(
             t = LEADING_MENTIONS.matcher(t).replaceFirst("");
         }
         return t.trim().replaceAll("\\s+", " ");
+    }
+
+    /**
+     * 큐 메시지 필드에서 재구성한다(M12). 발행자는 {@code bot_id}·{@code subtype}·봇 user_id를 싣지 않는다 —
+     * {@code shouldIgnore()} 필터링은 발행 전 수신 서버에서 이미 끝났고, 봇 멘션 제거는 {@link #promptText()}의
+     * 선행 멘션 정리(fallback)로 충분하기 때문이다(PLAN 2단계 M12).
+     */
+    public static SlackMessageEvent fromQueueFields(java.util.Map<Object, Object> fields) {
+        return new SlackMessageEvent(
+                str(fields, "event_id"), str(fields, "channel"), str(fields, "user"), str(fields, "text"),
+                str(fields, "ts"), str(fields, "thread_ts"), null, null, null);
+    }
+
+    private static String str(java.util.Map<Object, Object> fields, String key) {
+        Object v = fields.get(key);
+        if (v == null) return null;
+        String s = v.toString();
+        return s.isEmpty() ? null : s;
     }
 
     private static String required(JsonNode node, String field) {

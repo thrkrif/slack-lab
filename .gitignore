@@ -42,3 +42,6 @@ logs/
 .omx-state-locks/
 .omx-state-locks.identity.json
 
+
+# Python 스파이크 캐시
+__pycache__/

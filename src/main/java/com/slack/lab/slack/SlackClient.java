@@ -2,6 +2,8 @@ package com.slack.lab.slack;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.slack.lab.config.AppRole;
+import com.slack.lab.config.ConditionalOnRole;
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.UnknownHostException;
@@ -10,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -33,6 +36,7 @@ import org.springframework.stereotype.Component;
  * M6이 재시도 가능한 실패로 오분류해 중복 발신 위험이 생긴다. 모두 결과 불명으로 남긴다.
  */
 @Component
+@ConditionalOnRole({AppRole.WORKER, AppRole.REACTOR, AppRole.RECOVERY, AppRole.ALL})
 public class SlackClient {
 
     private static final Logger log = LoggerFactory.getLogger(SlackClient.class);
@@ -65,6 +69,15 @@ public class SlackClient {
      *                     계산해 넘긴다. 예산이 없으면 발신을 시작하지 않는다(A15).
      */
     public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs) {
+        return postMessage(channel, threadTs, text, remainingMs, null);
+    }
+
+    /**
+     * @param metadata 발신에 붙일 메타데이터(M14). 결과 불명 뒤 {@code conversations.replies}로 "이 시도가 실제로
+     *                 보낸 답글"을 찾는 유일한 단서다. null이면 붙이지 않는다.
+     */
+    public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
+            ReplyMetadata metadata) {
         if (remainingMs <= 0) {
             log.warn("Slack 발신 예산 없음 — 발신 시작 안 함");
             return new SlackSendResult.Failed("budget_exhausted");
@@ -73,33 +86,67 @@ public class SlackClient {
 
         HttpRequest request;
         try {
-            request = buildRequest(channel, threadTs, text, remainingMs);
+            request = buildRequest(channel, threadTs, text, remainingMs, metadata);
         } catch (Exception e) {
-            // 요청을 만들다 실패했으면 네트워크로 나가지 않았으므로 명확한 실패다.
+            // 요청을 만들다 실패했으면 네트워크로 나가지 않았으므로 명확한 실패다. 같은 입력으로 다시
+            // 시도해도 그대로 실패하므로(M13) 영구 실패다.
             log.warn("Slack 요청 준비 실패 elapsed_ms={} reason={}", elapsedMs(start), e.getClass().getSimpleName());
             return new SlackSendResult.Failed("request_build_failed:" + e.getClass().getSimpleName());
         }
 
+        // M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.11 LOW): buildRequest에 걸린 시간을 예산에서
+        // 빼지 않으면 취소 예약이 원래 남은 시간보다 늦게 잡혀 총 처리 기한(A16)을 넘길 수 있다.
+        long buildElapsedMs = elapsedMs(start);
+        long budgetMs = remainingMs - buildElapsedMs;
+        if (budgetMs <= 0) {
+            // sendAsync를 아직 호출하지 않았으므로 미전송이 확실하다 — 결과 불명(Unknown)이 아니라 명확한
+            // 실패다(codex critic REVISE MINOR-3). 준비 지연은 시스템 부하 등 일시적 요인일 수 있어 재시도
+            // 가능으로 분류한다.
+            log.warn("Slack 요청 준비에 예산을 모두 써서 발신하지 않음 elapsed_ms={}", buildElapsedMs);
+            return new SlackSendResult.Failed("budget_exhausted_after_build", true, 0);
+        }
+
         CompletableFuture<HttpResponse<String>> future;
-        java.util.concurrent.ScheduledFuture<?> cancelTask;
         try {
             future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
-            cancelTask = cancelTimer.schedule(() -> future.cancel(true), remainingMs, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             // sendAsync 제출 자체가 실패하면(예: 잘못된 URI) 이때도 아직 네트워크로 나가지 않았다.
             log.warn("Slack 발신 제출 실패 elapsed_ms={} reason={}", elapsedMs(start), e.getClass().getSimpleName());
             return new SlackSendResult.Failed("send_submit_failed:" + e.getClass().getSimpleName());
         }
 
+        // M13 흡수 과제(codex WATCH, §2.10 MEDIUM): 제출(sendAsync)과 취소 타이머 예약을 같은 try에 두면,
+        // 제출은 이미 성공한 뒤 예약만 실패해도 이미 나갔을 수 있는 요청을 Failed(미전송 확정)로 오분류한다.
+        // 여기부터는 요청이 네트워크로 나갔을 수 있으므로 실패해도 결과 불명이다.
+        java.util.concurrent.ScheduledFuture<?> cancelTask;
         try {
-            HttpResponse<String> response = future.get(remainingMs + 500, TimeUnit.MILLISECONDS);
+            cancelTask = cancelTimer.schedule(() -> future.cancel(true), budgetMs, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            // 취소 타이머가 없으면 응답을 무기한 기다릴 위험이 있다 — 여기서 직접 취소한다(codex critic
+            // REVISE MAJOR-2). 이미 네트워크로 나갔을 수 있어 결과는 여전히 불명이다.
+            future.cancel(true);
+            log.warn("Slack 발신 취소 타이머 예약 실패(결과 불명) elapsed_ms={} reason={}", elapsedMs(start),
+                    e.getClass().getSimpleName());
+            return new SlackSendResult.Unknown("cancel_schedule_failed:" + e.getClass().getSimpleName());
+        }
+
+        try {
+            HttpResponse<String> response = future.get(budgetMs + 500, TimeUnit.MILLISECONDS);
             long elapsed = elapsedMs(start);
+            if (response.statusCode() == 429) {
+                // Rate limit — 미전송이 확실하고(Slack이 아예 처리하지 않고 거절), Retry-After가 있으면
+                // 재시도 정책이 그 값을 기본 대기보다 우선해 쓴다(M13, PLAN "429 → Retry-After 반영").
+                long retryAfterMs = parseRetryAfterMs(response);
+                log.warn("Slack 발신 rate limit elapsed_ms={} retry_after_ms={}", elapsed, retryAfterMs);
+                return new SlackSendResult.Failed("rate_limited", true, retryAfterMs);
+            }
             if (response.statusCode() / 100 == 5) {
                 // 5xx는 Slack 쪽에서 일부 처리됐을 수 있어 명확한 실패로 단정하지 않는다.
                 log.warn("Slack 발신 서버 오류(결과 불명) status={} elapsed_ms={}", response.statusCode(), elapsed);
                 return new SlackSendResult.Unknown("status=" + response.statusCode());
             }
             if (response.statusCode() / 100 != 2) {
+                // 4xx(인증·권한·채널 오류 등)는 같은 요청을 다시 보내도 그대로 실패한다 — 영구 실패.
                 log.warn("Slack 발신 실패 status={} elapsed_ms={}", response.statusCode(), elapsed);
                 return new SlackSendResult.Failed("status=" + response.statusCode());
             }
@@ -115,7 +162,8 @@ public class SlackClient {
             if (cause instanceof ConnectException || cause instanceof UnknownHostException) {
                 // 연결조차 되지 않았으므로 전송 안 됐음이 확실하다.
                 log.warn("Slack 발신 연결 실패 elapsed_ms={} reason={}", elapsed, cause.getClass().getSimpleName());
-                return new SlackSendResult.Failed("connect_failed:" + cause.getClass().getSimpleName());
+                // 연결 자체가 안 됐으므로 미전송이 확실하고, 다음 시도에서 연결이 회복될 수 있어 재시도 가능하다.
+                return new SlackSendResult.Failed("connect_failed:" + cause.getClass().getSimpleName(), true, 0);
             }
             if (cause instanceof HttpTimeoutException) {
                 log.warn("Slack 발신 읽기 시간 초과 elapsed_ms={}", elapsed);
@@ -139,6 +187,37 @@ public class SlackClient {
             return new SlackSendResult.Unknown(e.getClass().getSimpleName());
         } finally {
             cancelTask.cancel(false);
+        }
+    }
+
+    /**
+     * {@code reactions.add}. 보조 기능이라 재시도·분류를 단순하게 둔다: {@code already_reacted}는 성공으로 본다
+     * (같은 이벤트 재처리·재전달로 이미 붙은 것). 그 밖의 실패는 사유만 돌려주고 호출자가 로그를 남긴다.
+     * 답변 발신과 달리 "결과 불명"을 따로 다루지 않는다 — 반응이 중복되거나 빠져도 사용자 피해가 없다.
+     */
+    public ReactionResult addReaction(String channel, String ts, String emoji) {
+        try {
+            String json = mapper.writeValueAsString(Map.of("channel", channel, "timestamp", ts, "name", emoji));
+            HttpRequest request = HttpRequest.newBuilder(URI.create(props.baseUrl() + "/reactions.add"))
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .header("Authorization", "Bearer " + props.botToken())
+                    .timeout(Duration.ofSeconds(3))
+                    .POST(HttpRequest.BodyPublishers.ofString(json)).build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() / 100 != 2) {
+                return new ReactionResult(false, "status=" + response.statusCode());
+            }
+            JsonNode root = mapper.readTree(response.body());
+            if (root.path("ok").asBoolean(false)) {
+                return new ReactionResult(true, "added");
+            }
+            String error = root.path("error").asText("unknown");
+            return new ReactionResult("already_reacted".equals(error), error);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ReactionResult(false, "interrupted");
+        } catch (Exception e) {
+            return new ReactionResult(false, e.getClass().getSimpleName());
         }
     }
 
@@ -175,10 +254,18 @@ public class SlackClient {
         return new SlackSendResult.Failed(error);
     }
 
-    private HttpRequest buildRequest(String channel, String threadTs, String text, long remainingMs) {
-        Map<String, Object> body = threadTs == null
-                ? Map.of("channel", channel, "text", text)
-                : Map.of("channel", channel, "thread_ts", threadTs, "text", text);
+    private HttpRequest buildRequest(String channel, String threadTs, String text, long remainingMs,
+            ReplyMetadata metadata) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("channel", channel);
+        if (threadTs != null) {
+            body.put("thread_ts", threadTs);
+        }
+        body.put("text", text);
+        if (metadata != null) {
+            body.put("metadata", Map.of("event_type", ReplyMetadata.EVENT_TYPE, "event_payload",
+                    Map.of("event_id", metadata.eventId(), "attempt_id", metadata.attemptId())));
+        }
         String json;
         try {
             json = mapper.writeValueAsString(body);
@@ -191,6 +278,17 @@ public class SlackClient {
                 .timeout(Duration.ofMillis(remainingMs)) // 보조 수단. 진짜 취소는 cancel(true)가 한다(M1.5 결론)
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
+    }
+
+    /** {@code Retry-After}는 초 단위 정수다(Slack 문서). 없거나 파싱할 수 없으면 0 — 호출자가 기본 대기로 대체한다. */
+    private static long parseRetryAfterMs(HttpResponse<String> response) {
+        return response.headers().firstValue("Retry-After").map(v -> {
+            try {
+                return Long.parseLong(v.trim()) * 1000;
+            } catch (NumberFormatException e) {
+                return 0L;
+            }
+        }).orElse(0L);
     }
 
     private static long elapsedMs(long startNanos) {

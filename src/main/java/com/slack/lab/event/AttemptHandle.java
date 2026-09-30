@@ -1,11 +1,12 @@
 package com.slack.lab.event;
 
 /**
- * 핸들러가 받는 것은 저장소가 아니라 이 핸들이다. 처리 권한을 가진 시도 하나의 상태 전이만 노출한다.
- * P1에서는 구현체만 공유 저장소 기반으로 바뀐다.
+ * 핸들러가 시도 하나에 대해 갖는 유일한 권한: 발신 직전 SENDING 게이트. M12부터 종료 상태 기록
+ * ({@code markCompleted}/{@code markFailed}/{@code markUnknown})은 워커가 {@code ProcessingStateStore}로
+ * 직접 하고, 핸들러는 결과({@link HandlingResult})만 돌려준다 — 저장소를 몰라도 되게 하기 위해서다.
  *
- * 전이가 거절되면(소유자가 바뀌었거나 이미 종료됨) false를 돌려준다. 특히 {@link #markSending()}이 false면
- * 발신하면 안 된다 — SENDING 기록 없이 나간 메시지는 중복 억제가 추적하지 못한다.
+ * {@link #markSending()}이 false면 발신하면 안 된다 — SENDING 기록 없이 나간 메시지는 중복 억제가
+ * 추적하지 못한다.
  */
 public interface AttemptHandle {
 
@@ -18,11 +19,9 @@ public interface AttemptHandle {
 
     boolean markSending();
 
-    boolean markCompleted();
-
-    /** 전송되지 않았음이 확실한 실패. PROCESSING·SENDING 어디서든 호출할 수 있다. */
-    boolean markFailed(String stage);
-
-    /** 전송 여부를 확인할 수 없음. 자동 재발신 대상이 아니다. */
-    boolean markUnknown(String stage);
+    /**
+     * 단계별 소요(ms)를 워커에 알린다(M17 관측: {@code llm_ms}·{@code send_ms} 등). 워커가 시도 하나의 지표를 한 줄로
+     * 묶어 남기므로 핸들러는 값을 로그에 흩뿌리지 않는다. 기본 구현은 아무것도 하지 않는다.
+     */
+    default void recordPhase(String name, long millis) {}
 }

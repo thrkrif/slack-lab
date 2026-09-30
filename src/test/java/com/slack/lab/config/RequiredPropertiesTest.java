@@ -42,7 +42,6 @@ class RequiredPropertiesTest {
             assertThat(llm.verifyModelOnStartup()).isTrue();
             assertThat(ctx.getBean(ProcessingProperties.class).totalDeadlineMs()).isEqualTo(60000);
             assertThat(ctx.getBean(ExperimentProperties.class).slowModeMs()).isZero();
-            assertThat(ctx.getBean(ExperimentProperties.class).dedupEnabled()).isTrue();
         });
     }
 
