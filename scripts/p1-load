@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""P1 검증 부하 생성기(M18). 서명이 유효한 합성 event_callback을 수신 서버로 보낸다.
+
+실제 테스트 채널에 실제 부모 메시지를 올려 그 ts를 쓰고(스레드 조회·반응이 실제 메시지를 필요로 한다), event_id만 합성한다.
+성능 판정은 이 도구가 아니라 서버 로그(scripts/p1-metrics)로 한다 — 여기서 재는 값은 클라이언트 관점의 참고치다.
+이 도구는 스레드의 봇 답글 수로 유실(0개)·중복(2개 이상)·실패 안내를 센다.
+
+사용:
+  scripts/p1-load warmup            워밍업 2건(콜드 스타트 별도 기록용, 성능 표본 아님)
+  scripts/p1-load seq [N=20]        순차 N건: 답글이 달린 뒤 다음 건을 보낸다
+  scripts/p1-load burst [K=5] [B=2] 서로 다른 K건 동시 × B배치(배치 간에는 모두 끝난 뒤 시작)
+  scripts/p1-load dup               D1 동일 event_id 10회 동시 → D2 완료 뒤 재전달 1회
+  scripts/p1-load distinct [N=10]   D3 서로 다른 N건 동시
+환경: SLACK_SIGNING_SECRET·SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL(.env), P1_URL(기본 http://localhost:8080)
+event_id는 EvP1<모드><실행시각>_<번호> 형식이다 — 로그를 이 접두어로 걸러 p1-metrics에 넘긴다.
+"""
+import hashlib
+import hmac
+import json
+import os
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FAILURE_NOTICE_PREFIX = "죄송해요, 지금 답변을 만들지 못했어요"
+# 같은 질문 세트를 고정 순서로 쓴다(PRD §5 입력 고정). 짧은 답을 유도해 출력 토큰 편차를 줄인다.
+QUESTIONS = [
+    "한 문장으로 자기소개를 해줘.", "오늘 기분을 한 문장으로 표현해줘.", "커피와 차 중 하나를 골라 이유를 한 문장으로 말해줘.",
+    "봄을 주제로 짧은 문장 하나를 써줘.", "숫자 7이 왜 행운의 숫자인지 한 문장으로 설명해줘.", "좋은 아침 인사를 한 문장으로 해줘.",
+    "고양이의 장점을 한 문장으로 말해줘.", "책 읽기의 좋은 점을 한 문장으로 말해줘.", "비 오는 날 하면 좋은 일을 한 문장으로 알려줘.",
+    "가장 쉬운 요리를 한 문장으로 소개해줘.", "산책의 장점을 한 문장으로 말해줘.", "잠을 잘 자는 방법을 한 문장으로 알려줘.",
+    "물을 자주 마셔야 하는 이유를 한 문장으로 말해줘.", "새해 다짐 하나를 한 문장으로 제안해줘.", "친구에게 보낼 응원 메시지를 한 문장으로 써줘.",
+    "달에 대해 한 문장으로 말해줘.", "웃음이 좋은 이유를 한 문장으로 설명해줘.", "여행 가고 싶은 곳 하나를 한 문장으로 말해줘.",
+    "음악이 주는 즐거움을 한 문장으로 표현해줘.", "하루를 마무리하는 인사를 한 문장으로 해줘.",
+]
+
+
+def load_env():
+    env = dict(os.environ)
+    path = os.path.join(ROOT, ".env")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env.setdefault(k, v.strip().strip('"').strip("'"))
+    return env
+
+
+ENV = load_env()
+TOKEN, SECRET, CHANNEL = ENV["SLACK_BOT_TOKEN"], ENV["SLACK_SIGNING_SECRET"], ENV["SLACK_TEST_CHANNEL"]
+URL = ENV.get("P1_URL", "http://localhost:8080").rstrip("/")
+RUN = str(int(time.time()))
+BOT_USER = None
+
+
+def slack(method, payload=None, query=None):
+    if query:
+        req = urllib.request.Request(f"https://slack.com/api/{method}?" + urllib.parse.urlencode(query),
+                                     headers={"Authorization": f"Bearer {TOKEN}"})
+    else:
+        req = urllib.request.Request(f"https://slack.com/api/{method}", data=json.dumps(payload or {}).encode(),
+                                     headers={"Authorization": f"Bearer {TOKEN}",
+                                              "Content-Type": "application/json; charset=utf-8"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def bot_user():
+    global BOT_USER
+    if BOT_USER is None:
+        BOT_USER = slack("auth.test")["user_id"]
+    return BOT_USER
+
+
+def parent(label):
+    res = slack("chat.postMessage", {"channel": CHANNEL, "text": f"[M18 검증] {label}"})
+    if not res.get("ok"):
+        sys.exit(f"부모 메시지 실패: {res.get('error')}")
+    time.sleep(1.1)  # chat.postMessage 속도 제한(약 1건/초)을 피한다
+    return res["ts"]
+
+
+def send(event_id, ts, question):
+    body = json.dumps({"type": "event_callback", "event_id": event_id, "authorizations": [{"user_id": bot_user()}],
+                       "event": {"type": "app_mention", "channel": CHANNEL, "user": "U0TESTUSER",
+                                 "text": f"<@{bot_user()}> {question}", "ts": ts}})
+    stamp = str(int(time.time()))
+    sig = "v0=" + hmac.new(SECRET.encode(), f"v0:{stamp}:{body}".encode(), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(f"{URL}/slack/events", data=body.encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Slack-Request-Timestamp": stamp,
+                                          "X-Slack-Signature": sig})
+    start = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except Exception:
+        code = -1
+    return code, int((time.perf_counter() - start) * 1000)
+
+
+def replies(ts):
+    res = slack("conversations.replies", query={"channel": CHANNEL, "ts": ts, "limit": 200})
+    return [m for m in res.get("messages", [])[1:]] if res.get("ok") else []
+
+
+def wait_replies(tss, timeout):
+    """모든 스레드에 답글이 하나 이상 달릴 때까지(또는 시간 초과까지) 기다린다. 스레드별 ts→걸린 초를 돌려준다."""
+    start = time.time()
+    done = {}
+    while time.time() - start < timeout and len(done) < len(tss):
+        for ts in tss:
+            if ts not in done and replies(ts):
+                done[ts] = round(time.time() - start, 1)
+        time.sleep(2)
+    return done
+
+
+def audit(label, tss, settle=10):
+    """설정 시간을 더 기다린 뒤(늦은 중복 답글 포착) 스레드별 답글 수와 실패 안내 수를 센다."""
+    time.sleep(settle)
+    missing = dup = notice = ok = 0
+    for ts in tss:
+        rs = replies(ts)
+        n = len(rs)
+        n_notice = sum(1 for m in rs if m.get("text", "").startswith(FAILURE_NOTICE_PREFIX))
+        notice += n_notice
+        if n == 0:
+            missing += 1
+        elif n > 1:
+            dup += 1
+        if n == 1 and n_notice == 0:
+            ok += 1
+    print(f"[{label}] 스레드 {len(tss)}개: 정상 답글 1개 {ok}, 유실 {missing}, 중복 {dup}, 실패 안내 {notice}")
+    return {"threads": len(tss), "ok": ok, "missing": missing, "dup": dup, "failure_notice": notice}
+
+
+def run_seq(n, mode="seq"):
+    tss, codes = [], []
+    for i in range(n):
+        ts = parent(f"{mode} {i + 1}/{n}")
+        code, ms = send(f"EvP1{mode}{RUN}_{i + 1}", ts, QUESTIONS[i % len(QUESTIONS)])
+        codes.append(code)
+        tss.append(ts)
+        got = wait_replies([ts], 120)
+        print(f"  {mode} {i + 1}/{n}: http={code} client_ms={ms} 답글까지 {got.get(ts, '시간 초과')}s")
+    return tss, codes
+
+
+def run_burst(k, batches):
+    all_ts, codes = [], []
+    for b in range(batches):
+        tss = [parent(f"burst 배치{b + 1} {i + 1}/{k}") for i in range(k)]
+        results = [None] * k
+
+        def go(i):
+            results[i] = send(f"EvP1burst{RUN}_{b + 1}_{i + 1}", tss[i], QUESTIONS[(b * k + i) % len(QUESTIONS)])
+
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(k)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        codes += [r[0] for r in results]
+        print(f"  배치{b + 1}: http={[r[0] for r in results]} client_ms={[r[1] for r in results]}")
+        got = wait_replies(tss, 900)
+        print(f"  배치{b + 1} 답글까지(s): {sorted(got.values())} (미도착 {k - len(got)})")
+        all_ts += tss
+    return all_ts, codes
+
+
+def run_distinct(n):
+    tss = [parent(f"distinct {i + 1}/{n}") for i in range(n)]
+    results = [None] * n
+
+    def go(i):
+        results[i] = send(f"EvP1distinct{RUN}_{i + 1}", tss[i], QUESTIONS[i % len(QUESTIONS)])
+
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"  http={[r[0] for r in results]}")
+    got = wait_replies(tss, 900)
+    print(f"  답글까지(s): {sorted(got.values())} (미도착 {n - len(got)})")
+    return tss, [r[0] for r in results]
+
+
+def run_dup():
+    ts = parent("dup")
+    event_id = f"EvP1dup{RUN}_1"
+    results = [None] * 10
+
+    def go(i):
+        results[i] = send(event_id, ts, QUESTIONS[0])
+
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"  D1 동시 10회: http={[r[0] for r in results]}")
+    wait_replies([ts], 120)
+    d1 = audit("D1 동일 event_id 10회 동시", [ts], settle=15)
+    code, _ = send(event_id, ts, QUESTIONS[0])
+    print(f"  D2 완료 뒤 재전달: http={code}")
+    d2 = audit("D2 완료 뒤 재전달", [ts], settle=15)
+    return {"D1": d1, "D2": d2}
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    arg = lambda i, d: int(sys.argv[i]) if len(sys.argv) > i else d
+    print(f"실행 {RUN} 모드={mode} 대상={URL}")
+    if mode == "warmup":
+        tss, codes = run_seq(2, "warmup")
+        summary = audit("워밍업", tss, settle=3)
+    elif mode == "seq":
+        tss, codes = run_seq(arg(2, 20))
+        summary = audit("순차", tss)
+    elif mode == "burst":
+        tss, codes = run_burst(arg(2, 5), arg(3, 2))
+        summary = audit("버스트", tss)
+    elif mode == "distinct":
+        tss, codes = run_distinct(arg(2, 10))
+        summary = audit("D3 서로 다른 event_id", tss)
+    elif mode == "dup":
+        summary = run_dup()
+        codes = []
+    else:
+        sys.exit(__doc__)
+    bad = [c for c in codes if c != 200]
+    print(f"HTTP 200이 아닌 응답: {len(bad)}건 {bad}")
+    print("요약 " + json.dumps(summary, ensure_ascii=False))
+
+
+main()
