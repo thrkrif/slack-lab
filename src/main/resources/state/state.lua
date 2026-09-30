@@ -9,6 +9,7 @@
 -- KEYS: 1 상태 해시 slack:evt:{id}  2 이벤트 스트림  3 보존 해시 slack:preserved:{id}
 --       4 DLQ 목록(ZSET)  5 복구 목록(ZSET)  6 재시도 목록(ZSET) slack:retry (M13)
 -- ARGV: 1 op  2 event_id  3 fail_after(테스트 전용 실패 주입, 0이면 끔)  4.. op별 인자
+-- (claim·mark_sending·renew·finalize·retry는 워커, resolve·reprocess는 recovery CLI(M14)가 부른다)
 --
 -- 알려진 한계(M11 codex critic 2회전, 의도적으로 남겨둠):
 -- - 목록(ZSET) 점수는 preserve() 호출 시각이다. 부분 실패 뒤 재전달로 다시 보존되면 점수가
@@ -351,6 +352,84 @@ if op == 'retry' then
   write('PERSIST', KEYS[1])
   ack(group, stream_id)
   return 1
+end
+
+-- M14 복구 전이. 사람이 recovery CLI로 부르므로 소유자(attempt_id)를 묻지 않고 상태만 본다. 자동 경로는 없다.
+-- 결과는 { 상태문자열, ... } 목록이다(claim과 같은 형태).
+--
+-- resolve: 결과 불명·DLQ 건을 사람이 끝낸다. ARGV: 4 to_state(COMPLETED|CLOSED) 5 slack_ts 6 retention_ms
+--   순서: 상태 기록 → 보존 해시·목록 삭제 → TTL. TTL이 마지막인 이유: 중간에 끊기면 "TTL 없는 COMPLETED/CLOSED"가
+--   남아 미완임을 알 수 있고, 같은 명령을 다시 실행하면(이미 to_state여도) 정리를 마저 한다.
+--   삭제는 무조건이다: 사람이 명시적으로 끝낸 건이라 세대 비교로 보존본을 남길 이유가 없다(B18).
+if op == 'resolve' then
+  local to, slack_ts = ARGV[4], ARGV[5]
+  local h, exists = load_state()
+  if not exists then return { 'NOT_FOUND' } end
+  local st = h.state
+  local rerun = (st == to)
+  if not rerun and st ~= 'UNKNOWN' and st ~= 'DEAD' then return { 'BAD_STATE', st or '' } end
+  if rerun and to == 'COMPLETED' and (h.slack_ts or '') ~= slack_ts then
+    return { 'CONFLICT', h.slack_ts or '' }
+  end
+  if not rerun then
+    if to == 'COMPLETED' then
+      write('HSET', KEYS[1], 'state', 'COMPLETED', 'stage', 'manual_resolved', 'slack_ts', slack_ts)
+    else
+      write('HSET', KEYS[1], 'state', 'CLOSED', 'stage', 'manual_closed')
+    end
+  end
+  write('DEL', KEYS[3])
+  write('ZREM', KEYS[4], event_id)
+  write('ZREM', KEYS[5], event_id)
+  write('ZREM', KEYS[6], event_id)
+  write('PEXPIRE', KEYS[1], tonumber(ARGV[6]))
+  return { 'OK' }
+end
+
+-- reprocess: 미전송이 확인된 건을 사람이 1회 재실행하도록 승인한다. 순서는 claim의 불변식(gen은 상태에 먼저
+--   기록된 뒤 투입된다)을 따른다: 상태(RETRY_WAIT, gen+1, manual_gen) → XADD → 목록에서 제거.
+--   목록 제거가 마지막이라, 상태만 쓰이고 끊기면 목록에 그대로 남은 채 RETRY_WAIT+manual_gen이 된다 — 이 모양이면
+--   같은 명령을 다시 실행할 수 있고(같은 gen으로 XADD), 중복 투입은 선점 결과표(BUSY·STALE·DONE)가 하나만 실행시킨다.
+--   보존 해시는 지우지 않는다. 그 승인 실행이 COMPLETED가 될 때 finalize가 지우고, 실패·소실되면 각 종료 경로가
+--   다시 DLQ·복구 목록에 올린다(4'행 포함).
+if op == 'reprocess' then
+  local h, exists = load_state()
+  if not exists then return { 'NOT_FOUND' } end
+  local st = h.state
+  local in_list = redis.call('ZSCORE', KEYS[4], event_id) or redis.call('ZSCORE', KEYS[5], event_id)
+  local rerun = (st == 'RETRY_WAIT' and h.manual_gen ~= nil and in_list ~= false)
+  if st ~= 'UNKNOWN' and st ~= 'DEAD' and not rerun then return { 'BAD_STATE', st or '' } end
+  local flat = redis.call('HGETALL', KEYS[3])
+  if #flat == 0 then return { 'NO_PRESERVED' } end
+
+  local s = tonumber(h.gen or '-1')
+  local next_gen = rerun and s or (s + 1)
+  local args = { 'XADD', KEYS[2], '*' }
+  local gen_written = false
+  for i = 1, #flat, 2 do
+    if flat[i] == 'gen' then
+      args[#args + 1] = 'gen'
+      args[#args + 1] = tostring(next_gen)
+      gen_written = true
+    elseif flat[i] ~= 'preserved_reason' then
+      args[#args + 1] = flat[i]
+      args[#args + 1] = flat[i + 1]
+    end
+  end
+  if not gen_written then
+    args[#args + 1] = 'gen'
+    args[#args + 1] = tostring(next_gen)
+  end
+
+  if not rerun then
+    write('HSET', KEYS[1], 'state', 'RETRY_WAIT', 'gen', next_gen, 'retry_at', now, 'manual_gen', next_gen,
+      'stage', 'manual_reprocess')
+    write('PERSIST', KEYS[1])
+  end
+  write(unpack(args))
+  write('ZREM', KEYS[4], event_id)
+  write('ZREM', KEYS[5], event_id)
+  return { 'OK', tostring(next_gen) }
 end
 
 return redis.error_reply('unknown op ' .. tostring(op))

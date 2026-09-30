@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 결과 불명·DLQ 복구 CLI(M14). 예: scripts/recovery list | check <event_id> | close <event_id>
+# .env의 비밀값을 읽고 recovery 역할로 한 번 실행한다(웹 포트 없음). 자동 재발신 경로는 없다.
+# bootRun 대신 부트 jar를 직접 실행한다 — bootRun은 CLI의 종료 코드(거절 1·사용법 2)를 빌드 실패로 출력한다.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+./gradlew -q bootJar -x test
+JAR=$(ls build/libs/*.jar | grep -v -- '-plain' | head -1)
+set -a; source .env; set +a
+APP_ROLE=recovery exec java -jar "$JAR" --spring.main.banner-mode=off --logging.level.root=WARN \
+  --logging.level.com.slack.lab.recovery=INFO "$@"
