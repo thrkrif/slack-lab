@@ -32,6 +32,7 @@ import org.springframework.stereotype.Component;
 public class SlackEventHandler {
 
     private static final Logger log = LoggerFactory.getLogger(SlackEventHandler.class);
+    private static final String ALERT_FAILURE_NOTICE = "알람 분석을 만들지 못했어요. 원본 알람을 직접 확인해 주세요.";
     private static final String FAILURE_NOTICE = "죄송해요, 지금 답변을 만들지 못했어요. 잠시 후 다시 멘션해 주세요.";
     private static final long NANOS_PER_MS = 1_000_000L;
 
@@ -117,7 +118,8 @@ public class SlackEventHandler {
                 return new HandlingResult.RetryRequested(llmStage, 0);
             }
             kind = "failure_notice";
-            text = FAILURE_NOTICE;
+            // 알람 리포트에는 "다시 멘션" 안내가 맞지 않는다(멘션할 원 메시지가 없다).
+            text = event.ts() == null ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
             log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} stage={} final_attempt={}", event.eventId(),
                     attempt.attemptId(), llmStage, finalAttempt);
         }

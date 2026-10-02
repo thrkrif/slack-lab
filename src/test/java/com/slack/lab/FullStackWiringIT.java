@@ -6,6 +6,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -45,7 +47,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "app.role=all", "llm.client=echo", "llm.model=m",
-        "slack.signing-secret=testsecret", "slack.bot-token=xoxb-test", "recovery.auto-check.enabled=false",
+        "alert.secret=alertsecret", "alert.channel=C-ALERT", "slack.signing-secret=testsecret", "slack.bot-token=xoxb-test", "recovery.auto-check.enabled=false",
         "rabbitmq.eventsQueue=fullstack.events"})
 class FullStackWiringIT {
 
@@ -79,7 +81,7 @@ class FullStackWiringIT {
     void setUp() {
         jdbc = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(PG.getJdbcUrl(),
                 PG.getUsername(), PG.getPassword()));
-        when(chat.postMessage(anyString(), anyString(), anyString(), anyLong(), any(ReplyMetadata.class)))
+        when(chat.postMessage(anyString(), any(), anyString(), anyLong(), any(ReplyMetadata.class)))
                 .thenReturn(new SlackSendResult.Success("2.2"));
         when(chat.addReaction(anyString(), anyString(), anyString())).thenReturn(new ReactionResult(true, "added"));
     }
@@ -158,5 +160,52 @@ class FullStackWiringIT {
                 any(ReplyMetadata.class));
         assertThat(stateOf("EvFS2")).isNull();
         assertThat(stateOf("EvFS3")).isNull();
+    }
+
+    @Test
+    void 알람은_채널에_새_리포트로_올라가고_같은_회차_재전송은_리포트를_늘리지_않으며_재발은_새_리포트다() throws Exception {
+        String first = snsAlarm("web-cpu", "2026-10-02T01:00:00.000+0000");
+        assertThat(postAlert(first, "alertsecret")).isEqualTo(200);
+
+        verify(chat, timeout(15_000)).postMessage(eq("C-ALERT"), isNull(), contains("echo:"), anyLong(),
+                any(ReplyMetadata.class));
+        verify(chat, never()).addReaction(anyString(), anyString(), anyString()); // 반응할 원 메시지가 없다
+        String id = jdbc.queryForObject("SELECT event_id FROM processing_state WHERE event_id LIKE 'alert-%'", String.class);
+        long end = System.currentTimeMillis() + 10_000;
+        while (!"COMPLETED".equals(stateOf(id)) && System.currentTimeMillis() < end) {
+            Thread.sleep(100);
+        }
+        assertThat(stateOf(id)).isEqualTo("COMPLETED");
+
+        // SNS 재전송(같은 회차): 200이지만 리포트는 늘지 않는다
+        assertThat(postAlert(first, "alertsecret")).isEqualTo(200);
+        verify(chat, after(2_500).times(1)).postMessage(eq("C-ALERT"), isNull(), anyString(), anyLong(),
+                any(ReplyMetadata.class));
+
+        // 해결 뒤 재발(다른 상태 변경 시각)은 새 건이다
+        assertThat(postAlert(snsAlarm("web-cpu", "2026-10-02T05:00:00.000+0000"), "alertsecret")).isEqualTo(200);
+        verify(chat, timeout(15_000).times(2)).postMessage(eq("C-ALERT"), isNull(), anyString(), anyLong(),
+                any(ReplyMetadata.class));
+    }
+
+    @Test
+    void 알람_시크릿이_틀리면_401이고_아무것도_발신되지_않는다() throws Exception {
+        assertThat(postAlert(snsAlarm("web-mem", "t9"), "wrong")).isEqualTo(401);
+
+        verify(chat, after(1_000).never()).postMessage(anyString(), any(), anyString(), anyLong(), any(ReplyMetadata.class));
+    }
+
+    static String snsAlarm(String name, String changedAt) throws Exception {
+        var m = new com.fasterxml.jackson.databind.ObjectMapper();
+        String msg = m.writeValueAsString(Map.of("AlarmName", name, "NewStateValue", "ALARM", "StateChangeTime", changedAt,
+                "NewStateReason", "임계치 초과"));
+        return m.writeValueAsString(Map.of("Type", "Notification", "Message", msg));
+    }
+
+    int postAlert(String body, String token) {
+        HttpHeaders h = new HttpHeaders();
+        h.setContentType(MediaType.APPLICATION_JSON);
+        return rest.postForEntity("/alerts/cloudwatch?token=" + token, new HttpEntity<>(body, h), String.class)
+                .getStatusCode().value();
     }
 }

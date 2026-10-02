@@ -6,7 +6,7 @@ import java.util.Optional;
 
 /**
  * 알람 원천(CloudWatch/SNS, Grafana 등)이 보낸 원본 요청을 {@link AlertEvent}로 바꾼다. 원천마다 어댑터가 하나씩 있다(M23).
- * 인증(시크릿 헤더, SNS 서명)은 HTTP 어댑터의 몫이고 이 포트는 검증을 통과한 본문만 받는다. 아직 구현체가 없다.
+ * 인증(시크릿)은 HTTP 어댑터의 몫이고 이 포트는 검증을 통과한 본문만 받는다. 본문이 잘못됐으면 IllegalArgumentException.
  */
 public interface AlertNormalizer {
 

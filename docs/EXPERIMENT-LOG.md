@@ -955,3 +955,16 @@ Redis 어댑터·Lua·의존성·백엔드 스위치를 제거했다(큐=RabbitM
 ### 21.4 리뷰 대응 (code-reviewer: REVISE MAJOR 2·MINOR 7)
 
 `p1-residue-check`가 명령 치환 안의 `exit 3`이 서브셸만 끝내 질의 실패에도 `OK`를 낼 수 있었다 → 질의를 최상위 변수에 담아 즉시 검사 불가(3)로 끝내고 숫자 응답을 검증한다(실패 유도 확인: 컨테이너가 없을 때 3). `p1-metrics`가 프로브 순서에 따라 적체 줄을 놓칠 수 있었다 → `queue_ready=` 포함 여부로 매칭. 그 밖에 `BacklogReporter` 프로브별 예외 격리, `RoleWiringIT` 보강(리포터·프로브는 워커만, 수신·복구에 LLM 없음), `RabbitPipelineIT`의 재시도 루프가 `Unconfirmed`를 덮지 않도록 단언 추가, compose 비밀번호 주의 문구, ARCHITECTURE 상단에 Redis 서술이 역사 기록임을 명시.
+
+## 22. 2단계 후속 M23 알람 입력 어댑터 검증 (2026-10-02)
+
+**구분: 외부 왕복 = 실제 Slack 채널에 알람 리포트 1건(echo LLM, 로컬 RabbitMQ·Postgres 컨테이너). 실제 CloudWatch/SNS 연동은 하지 않았다(AWS 환경 없음) — SNS 봉투 형식의 합성 요청으로 검증했다.**
+
+- 구현: `AlertController`(`/alerts/{source}`, 시크릿), `CloudWatchAlertNormalizer`, `AlertEvent.toMessageEvent()`. 알람은 `ts` 없는 메시지 이벤트로 기존 파이프라인을 탄다(리포트는 채널의 새 메시지, 반응 없음).
+- 단위·통합: 정규화 5, 컨트롤러 6(401·404·200·503·400·구독 확인), `FullStackWiringIT` 알람 2(새 리포트 1건 → 같은 회차 재전송은 리포트 불변 → 다른 상태 변경 시각은 새 리포트, 틀린 시크릿은 아무것도 발신 안 됨), `PostgresRecoveryStoreTest`(스레드 위치 없는 건은 자동 조회 제외).
+- 왕복: 정상 알람 200 → 실제 Slack 발신 성공 1건(`COMPLETED/delivered`), 같은 알람 재전송 200이지만 발신은 여전히 1건. 오류 유도: 틀린 토큰 401, 깨진 본문 400, RabbitMQ 중지 상태 503.
+- 한계: SNS 서명 미검증(시크릿 인증, HTTPS 전제), 알람 리포트의 결과 불명은 자동 조회 대상이 아님, 알람별 채널 라우팅 없음(전역 `alert.channel`), Grafana 어댑터 없음(포트만). 실제 LLM(qwen) 품질·프롬프트는 이번 범위가 아니다.
+
+### 22.1 리뷰 대응 (code-reviewer: REVISE MAJOR 1·MINOR 10)
+
+MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었다 → https의 `sns.<region>.amazonaws.com`일 때만 `SubscribeURL`을 로그에 남긴다(서버는 열지 않음). 반영한 MINOR: 빈 `X-Alert-Secret` 헤더가 토큰을 가리지 않게, 알람 본문 2000자·제목 200자 상한, 알람 데이터를 `<alarm>` 블록으로 감싸 지시와 분리, 알람 리포트 전용 실패 안내("다시 멘션" 문구 제거), 중복 키에 계정·리전 포함, `Unconfirmed → 503` 테스트. 남긴 항목: 요청 본문 크기 제한(인증 전 읽기)은 프록시/서블릿 한도에 맡김, `?token=`이 ngrok 인스펙터·접근 로그에 남는 점(헤더 시크릿 권장), `<!channel>` 방송 문자열 제거, 알람 스레드에서 실제 후속 멘션은 미검증.

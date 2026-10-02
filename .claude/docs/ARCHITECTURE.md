@@ -130,6 +130,7 @@ com.slack.lab
 │  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
 │                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
+│  ├─ alert/                  AlertController(/alerts/{source}, 시크릿 인증), CloudWatchAlertNormalizer(SNS), AlertConfig (M23)
 │  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22)
 │  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
@@ -497,6 +498,10 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 #### ADR-9 이행 결과 (M22-2, 2026-10-02)
 
 Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔드 스위치(`queue.backend`·`state.backend`)도 없앴다 — 큐는 RabbitMQ, 상태는 Postgres 하나뿐이다. 설정은 `queue.enqueue-timeout-ms`(발행 확인 대기)만 남고 스트림 키·소비 그룹·`claim-min-idle-ms` 불변식은 사라졌다. 적체 지표는 `BacklogProbe` 포트(각 어댑터가 수치를 내고 코어 `BacklogReporter`가 한 줄로 합친다): `적체 스냅샷 retry= dlq= recovery= queue_ready= defer= dead=`. Postgres 비밀번호는 기본값이 없다(`POSTGRES_PASSWORD`). compose는 RabbitMQ·Postgres·앱 3역할에 메모리 상한을 둔다. 실측은 `EXPERIMENT-LOG.md` §21.
+
+#### 알람 입력 (M23)
+
+모니터링 도구가 `POST /alerts/{source}`로 직접 보낸다(Slack 메시지를 파싱하지 않는다). 인증은 공유 시크릿(`X-Alert-Secret` 헤더 또는 SNS용 `?token=`, 상수 시간 비교)이고 `alert.secret`·`alert.channel`이 모두 있어야 켜진다(없으면 404). `AlertNormalizer`(원천별 어댑터)가 `AlertEvent`로 바꾸고, `AlertEvent.toMessageEvent()`가 기존 파이프라인(큐 저장 확인 후 200 → 선점 → LLM → 발신)에 `ts` 없는 메시지 이벤트로 태운다 — 리포트는 채널에 새 메시지로 올라가고 반응은 붙지 않으며(원 메시지 없음) 후속 질문은 그 스레드의 멘션으로 이어진다. **"같은 알람" = 알람 이름 + 상태 변경 시각의 해시**(`alert-<hash>`가 event_id): SNS 재전송은 선점 표가 흡수하고 해결 뒤 재발은 시각이 달라 새 건이다. ALARM 이외 전이(OK 등)는 200으로 받고 무시한다. 저장 확인 실패는 503(SNS가 재전송). 한계: SNS 서명은 검증하지 않고(시크릿이 대신, HTTPS 전제), SubscriptionConfirmation의 URL은 서버가 호출하지 않는다(SSRF 방지, 운영자가 한 번 연다). `ts`가 없는 리포트는 스레드 조회 단서가 없어 결과 불명 자동 조회 대상에서 빠진다(사람이 복구 CLI로 처리).
 
 ### ADR-6 · 프로토타입은 폐기하고 지식만 승계한다
 

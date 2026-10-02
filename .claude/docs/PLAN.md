@@ -89,7 +89,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-02)**: 2단계(`v0.2.0`) 위에서 ADR-9 기반 전환 중. M19~M22 병합 완료(큐=RabbitMQ, 상태=Postgres, Redis 제거). 다음은 **M23 알람 입력 어댑터** → 끝나면 3단계(RAG) 착수 전 멈춤(단계 전환은 사용자 요청 시에만).
+- **상태(2026-10-02)**: 2단계(`v0.2.0`) 위에서 ADR-9 기반 전환 중. M19~M22 병합 완료(큐=RabbitMQ, 상태=Postgres, Redis 제거). M23 알람 입력(CloudWatch/SNS) 완료. **다음은 3단계(RAG) 착수 전 멈춤** — 단계 전환·`develop`→`main` 병합·태그는 사용자 요청 시에만.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
@@ -310,7 +310,7 @@
 - [x] **M20 Postgres 작업 상태 어댑터** — 완료 (`EXPERIMENT-LOG.md` §18, 선점 지연 p95 1ms) (M21 전까지 운영에 배선하지 않고 테스트 전용 — 재시도 재투입은 M21에서 코어가 큐 포트의 지연 발행으로 한다): 선점 결과표를 조건부 UPDATE/INSERT ON CONFLICT로 이식, 임대 갱신, 7일 보존 정리, 미해결 목록 조회. Testcontainers로 결과표 각 행, 동시 N 선점 1승, 부분 실패 후 재실행, 24시간 창, 수동 승인(1회 소비)을 다시 검증. **선점 지연 p95를 측정해 기록**한다(수신 경로 밖이어도 기록).
 - [x] **M21 RabbitMQ 큐 어댑터** — 완료 (`EXPERIMENT-LOG.md` §19, 발행 확인 p95 16ms. 재시도는 TTL 큐가 아니라 Postgres 발신함+릴레이) (`QueueDelivery.defer()`를 지연 재발행으로 구현, 재시도 예약·재투입을 `ProcessingStateStore.scheduleRetry`에서 큐 포트의 지연 발행으로 이전): publisher confirm 뒤 200, durable quorum queue, 수동 ack, 전달 횟수 제한 + DLQ, 지연 재시도(TTL 큐 또는 지연 플러그인 중 하나를 측정해 선택), prefetch 1과 소비자 타임아웃을 LLM 처리 시간(최대 50초)에 맞춤. **완료**: 수신 kill·워커 kill에서 유실 0, 재전달이 Slack 재발신으로 이어지지 않음.
 - [x] **M22 Redis 제거와 복구 CLI 전환** — 완료(PR #39 배선, M22-2 제거, `EXPERIMENT-LOG.md` §20·§21):: compose를 RabbitMQ + Postgres로 교체, 복구 CLI(list/check/resolve/reprocess/close)를 Postgres 목록 기반으로, 결과 불명 시 스레드 읽기 전용 자동 조회(발견 시 완료 처리, 미발견은 결과 불명 유지, 자동 재발신 없음). residue-check를 새 저장소에 맞게 재작성. P·D·R 실험을 다시 수행해 B16 재판정.
-- [ ] **M23 알람 입력 어댑터**: 전용 엔드포인트(시크릿 인증), CloudWatch(SNS) 어댑터, "같은 알람" 키(장애 식별자 + 발생 회차)로 중복 억제, 해결 뒤 재발은 새 건. 장애 한 건에 대표 리포트 하나. 반응·스레드 문맥은 알람 스레드에서도 동작.
+- [x] **M23 알람 입력 어댑터** — 완료(`EXPERIMENT-LOG.md` §22):: 전용 엔드포인트(시크릿 인증), CloudWatch(SNS) 어댑터, "같은 알람" 키(장애 식별자 + 발생 회차)로 중복 억제, 해결 뒤 재발은 새 건. 장애 한 건에 대표 리포트 하나. 후속 멘션의 스레드 문맥은 기존 경로를 그대로 쓴다(알람 스레드에서의 실제 멘션은 미검증).
 - 3단계 제약(착수 시 PLAN에 반영): LLM·임베딩 엔드포인트 스위치(기본 사내·로컬), RAG on/off(꺼도 동작), 벡터 저장은 같은 Postgres(pgvector).
 
 ## 4. 리스크와 대응
