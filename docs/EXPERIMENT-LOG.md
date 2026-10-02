@@ -856,3 +856,36 @@ Redis 구현과 달라진 점
 - **LOW**: 행 8이 `stage`를 지우던 것을 이전 값 유지(Lua와 같게), `(Long) rs.getObject` → `getObject(col, Long.class)`. 입력 없는 선점은 `NoInput`으로 입구에서 막는다(입력 없이 실행하면 종료 전이가 보존할 입력이 없어 임대 만료 → 재선점을 24시간 창이 닫힐 때까지 되풀이한다).
 - **알려진 한계(수정하지 않음)**: `application.yml`의 `spring.autoconfigure.exclude`는 같은 키를 설정하는 프로필·환경변수가 있으면 목록 전체가 교체돼 DataSource 자동 구성이 되살아난다. `purgeExpired`는 상태 행만 지우므로 미래 세대 이상 보존본이 고아로 남을 수 있다(Redis도 같음, M22에서 정리). `retryAtMs`는 호출자의 JVM 시계로 계산되므로 "시간은 항상 DB 시계"는 임대·창 판정에 한한다(M21에서 지연 길이를 넘기는 방식을 검토).
 
+## 19. 2단계 후속 M21 RabbitMQ 큐 어댑터 검증 (2026-10-02)
+
+구성: `adapter.rabbitmq`(`RabbitBroker`·`RabbitEventPublisher`·`RabbitConsumer`·`RabbitDelivery`), 코어에 `EventRepublisher`·`RetryOutbox`·`RetryRelay` 추가, Postgres 저장소가 `RetryOutbox` 구현(마이그레이션 V2 `relayed_at`). `queue.backend=rabbitmq`일 때만 켜지고 기본값은 아직 Redis다 — 전체 배선(Postgres 상태 + RabbitMQ + 반응 큐 + 복구 CLI)은 M22.
+
+설계 결정
+- **토폴로지**: 직접 교환기 `<큐>` → quorum 큐(`x-delivery-limit`, 초과분은 `<큐>.dead`로), 지연 큐 `<큐>.defer`(고정 TTL, 만료되면 원래 교환기로), 영속 메시지, 수동 ack, 채널마다 prefetch 1.
+- **발행 확인**: mandatory + 퍼블리셔 컨펌. 브로커 ack일 때만 `Enqueued`, nack·미라우팅은 `Failed`, 시간 초과는 `Unconfirmed`(둘 다 수신 서버가 200을 주지 않음). 확인 대기는 `queue.enqueue-timeout-ms`.
+- **`defer()`**: 지연 큐에 복사본을 넣고(확인 대기) 원본을 ack한다. 즉시 nack(requeue)하면 처리 중인 메시지가 빠르게 맴돌기 때문이다. 복사 실패 시 nack(requeue)하고 전달 횟수 상한이 무한 맴돌기를 막는다.
+- **재시도 지연은 TTL 큐가 아니라 Postgres 발신함(outbox)**: 상태 `RETRY_WAIT`과 보존 입력이 곧 발신함이고 `RetryRelay`가 도래한 건을 재발행한다. 브로커와 DB를 한 트랜잭션으로 묶을 수 없어서, "상태에 먼저 기록 → 나중에 큐에 반영"을 되풀이 가능하게 했다. 순서가 어느 지점에서 끊겨도 입력이 사라지지 않는다(재발행 확인 전에 죽으면 다음 사이클이 다시 넣고, 확인 뒤 반영 기록 전에 죽어도 선점 결과표가 하나만 실행시킨다). TTL 큐는 지연이 큐 하나에 고정돼 5초·30초·120초 백오프를 표현하지 못한다.
+- **소비자 타임아웃**: RabbitMQ 기본 `consumer_timeout` 30분이 LLM 처리 최대 50초보다 훨씬 길어 따로 맞출 필요가 없다. 줄이는 설정은 총 처리 시간(60초)보다 길게 유지해야 한다(Javadoc).
+
+| 검증(Testcontainers RabbitMQ 3.13 + Postgres 16, 코어·핸들러는 실제, LLM·Slack은 가짜) | 결과 |
+|---|---|
+| 정상 왕복 | 발행 확인 → 소비 → 선점 → 발신 1회 → `COMPLETED` → 큐 비움 |
+| 동일 event_id 10회 발행 | 발신 1회, 놓아준 중복이 지연 큐를 돌아와도 추가 발신 0, 큐·지연 큐 모두 비워짐 |
+| **B4 처리 중 소비자 강제 종료** | 첫 워커의 연결을 강제로 끊음(핸들러는 막힌 채 임대 갱신 없음) → 브로커가 되돌림 → 둘째 워커가 BUSY→defer로 기다리다 **임대 만료 뒤 재선점**해 완료, 발신 1회. 죽었던 핸들러가 나중에 깨어나도 소유권이 없어 발신하지 못함 |
+| 지연 재시도 | 첫 호출 시간 초과 → `RETRY_WAIT` 예약 → 릴레이가 다음 세대로 재발행 → 둘째 호출 성공, 발신 1회, 완료 뒤 재시도 보존본 정리 |
+| 릴레이 되풀이 안전 | 브로커에 닿지 않으면 반영 시각을 남기지 않고(다음 사이클이 재시도), 확인되면 기록하고 이후 건너뜀 |
+| 발행 실패 | 브로커에 닿지 못하면 `Failed`(수신 서버는 200을 주지 않음) |
+| 독약 메시지 | 읽을 수 없는 본문은 데드레터 큐로 가고 소비자는 계속 동작. 소비자가 계속 예외를 던지면 전달 횟수 상한 뒤 데드레터 큐로 |
+| **발행 확인 지연** | 순차 100회 p50 **1ms**·p95 **3ms**·max 5ms, 동시 5스레드×20 p50 3ms·p95 **16ms**·max 35ms (퍼블리셔 채널 하나에서 직렬화, 개발 노트북 로컬 컨테이너 — PRD §5 성능 판정 환경이 아님). 수신 p95 200ms 예산 안 |
+| 전체 빌드 | RabbitMQ 통합 테스트 14건·설정 가드 2건·발신함 테스트 4건 추가(리뷰 대응 포함), 전체 310건 통과 |
+
+한계: 퍼블리셔는 채널 하나에서 발행을 직렬화한다(이 규모에서는 충분, 처리량이 문제 되면 채널 풀). 릴레이의 주기 실행과 Spring 배선, 반응 큐(RabbitMQ 버전), 복구 CLI의 Postgres 구현은 M22. 재시도 시각은 호출자 JVM 시계로 계산되고 도래 판정은 DB 시계라 몇 ms 어긋날 수 있다(백오프가 5초 이상이라 실질 영향 없음).
+
+### 19.1 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 3·MINOR 7)
+
+- **MAJOR-1(확인 실패 경로 미검증)**: 오류를 유도해 확인한다. 어느 큐에도 묶이지 않은 라우팅 키 → `Failed("unroutable")`, 용량 1 + `reject-publish` classic 큐로 브로커 nack → `Failed("nack")`, 컨테이너 일시 정지(`docker pause`)로 확인이 늦으면 `Unconfirmed("confirm_timeout")`. 변이 검사: 확인 결과를 무시하게(`|| true`) 바꾸면 nack 테스트가, `mandatory`를 `false`로 바꾸면 미라우팅 테스트가 실패하고 원복하면 통과. 정상 중복·강제 종료 테스트에 데드레터 큐가 비어 있음을 단언 추가.
+- **MAJOR-2(확인 시간 초과 뒤 같은 채널 재사용)**: 늦게 온 ack·nack·return이 다음 발행 결과에 섞인다(재현 시 정상 저장이 `Failed("nack")`로, 늦은 미라우팅 return이 다음 발행을 `unroutable`로 보고). 시간 초과·확인 중 예외·인터럽트에서 채널을 `abort`하고 버려 다음 발행이 새 채널로 시작한다. 테스트: 일시 정지로 `Unconfirmed`를 만든 뒤 풀면 다음 발행이 `Enqueued`.
+- **MAJOR-3(자동 복구 중인 연결을 새 연결로 교체)**: 복구 중 `isOpen()`이 false인 연결을 버리고 새로 만들면 옛 연결이 누수되고, 연결 시도가 락을 쥔 채 최대 5초 걸려 HTTP 스레드가 줄을 서 수신 p95를 깬다. 연결은 처음 한 번만 만들고 이후는 클라이언트 자동 복구에 맡긴다. 열려 있지 않으면 즉시 실패하고(`broker_unavailable`) 헬스 체크도 새 연결을 만들지 않는다. 테스트: 닫힌 연결에서 발행이 1초 안에 `Failed`, 브로커가 연결을 끊으면(`rabbitmqctl close_all_connections`) 자동 복구 뒤 다시 발행.
+- **MINOR**: 확인 대기 중 연결 종료는 `Failed`가 아니라 `Unconfirmed`(규칙 4; 요청이 나간 뒤라 저장 여부를 모름). 지연 발행도 mandatory로 보내 미라우팅이면 원본을 ack하지 않음. 이벤트 큐 데드레터링을 `at-least-once`(+`reject-publish`)로. `queue.backend=rabbitmq`는 `queue.rabbitmq-preview=true` 없이는 기동을 거부(Redis 상태 저장소가 delivery tag를 스트림 ID로 오해하고 재시도가 재투입되지 않는 반쯤 배선된 앱 방지, 테스트). 릴레이 한 사이클의 예외가 주기 실행을 멈추지 않게 격리, 깨진 재시도 입력은 폴링을 막지 않고 DLQ로 격리(테스트). 옛 tag ack 주석 정정(자동 복구 채널은 복구 전 tag의 ack를 조용히 무시), 채널 폐기·토폴로지 선언 실패 시 연결 비움.
+- **알려진 한계(수정하지 않음)**: ① 지연 큐(`.defer`)의 TTL 데드레터링은 classic 큐라 브로커 장애 순간에 at-most-once다(quorum 큐 + at-least-once로 바꾸는 방안은 검토만 함). ② 릴레이 두 개가 같은 행을 동시에 재발행할 수 있고(`FOR UPDATE SKIP LOCKED`·선점 갱신 없음), 워커 백로그가 `republishAfterMs`보다 길면 같은 세대가 반복 재투입될 수 있다 — 선점 결과표가 흡수해 정확성은 유지되고 큐만 부푼다. ③ 퍼블리셔는 수신·지연 발행·릴레이가 한 채널·한 모니터를 공유한다(ALL 역할에서 지연 발행과 릴레이가 수신 지연을 최대 1초씩 늘릴 수 있음). 필요하면 수신용과 워커용 채널을 분리한다.
+

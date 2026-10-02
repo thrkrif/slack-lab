@@ -30,6 +30,8 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
+    // M21: 큐(RabbitMQ). 확인(confirm)·ack·채널을 직접 다루려고 클라이언트 라이브러리를 그대로 쓴다
+    implementation 'com.rabbitmq:amqp-client'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
 
     // 한쪽만 선언하면 컴파일이 실패한다 (ARCHITECTURE §7)
@@ -42,6 +44,7 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.testcontainers:rabbitmq'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 

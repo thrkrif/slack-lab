@@ -56,6 +56,14 @@ final class PreservedInputJson {
         }
     }
 
+    static long readReceivedAt(ObjectMapper mapper, String json) {
+        try {
+            return mapper.readTree(json).path("received_at").asLong(0);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("입력 역직렬화 실패", ex);
+        }
+    }
+
     private static String text(JsonNode n, String field) {
         JsonNode v = n.path(field);
         return v.isNull() || v.isMissingNode() ? null : v.asText();

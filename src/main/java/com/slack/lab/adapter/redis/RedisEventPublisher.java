@@ -21,6 +21,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -30,6 +31,7 @@ import org.springframework.stereotype.Component;
  * 경로로 보낸다. 이 경로는 값 직렬화를 타지 않는 로우레벨 호출이라, 인자를 직접 바이트로 만든다.
  */
 @Component
+@ConditionalOnProperty(name = "queue.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.RECEIVER, AppRole.ALL})
 public class RedisEventPublisher implements EventPublisher {
 

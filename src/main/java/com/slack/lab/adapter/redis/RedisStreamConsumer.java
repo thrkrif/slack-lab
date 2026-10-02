@@ -30,6 +30,7 @@ import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -38,6 +39,7 @@ import org.springframework.stereotype.Component;
  * 스레드가 각자 이름 있는 소비자로 블로킹 read를 반복한다.
  */
 @Component
+@ConditionalOnProperty(name = "queue.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
 public class RedisStreamConsumer {
 

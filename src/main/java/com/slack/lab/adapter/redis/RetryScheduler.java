@@ -16,6 +16,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Component;
  * 중복 실행을 막는다.
  */
 @Component
+@ConditionalOnProperty(name = "queue.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
 public class RetryScheduler {
 

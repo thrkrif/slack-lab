@@ -130,7 +130,8 @@ com.slack.lab
 ├─ adapter/                   구현체 — 서로를 모른다
 │  ├─ redis/                  RedisEventPublisher, RedisStreamConsumer, RedisProcessingStateStore, RedisRecoveryStore,
 │  │                          RetryScheduler, ReactionConsumer, BacklogReporter, RedisHealthProbe  (M22에서 대체)
-│  ├─ postgres/               PostgresProcessingStateStore, PostgresMigrations (M20, 아직 배선 안 함. M22에서 Redis 대체)
+│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresMigrations (M20~M21, 아직 배선 안 함. M22에서 Redis 대체)
+│  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery (M21, queue.backend=rabbitmq)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
 │  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
 │  ├─ cli/                    RecoveryRunner
