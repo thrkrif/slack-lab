@@ -10,9 +10,8 @@ import com.slack.lab.core.model.Finalization;
  *
  * <p><b>이 포트의 계약</b>: 상태를 기록하고 {@code true}/{@code false}로 확정 여부만 알린다. 메시지를 큐에서 제거(ACK)하는
  * 책임은 호출자(코어)가 {@code QueueDelivery.acknowledge()}로 진다. 결과 불명·DLQ·재시도처럼 입력을 보존해야 하는 전이는
- * 선점 때 받은 {@code ClaimRequest.input}을 저장소가 보관했다가 쓴다. Redis 구현은 메시지(스트림 항목)가 곧 입력 원본이고
- * 같은 Lua 스크립트로 ACK까지 원자적으로 하므로 이 계약을 더 강하게 만족할 뿐이다 — 코어는 그것에 기대지 않는다.
- * {@code deliveryToken}은 그런 구현이 쓰는 불투명 값이며 Postgres 같은 구현은 무시해도 된다.
+ * 선점 때 받은 {@code ClaimRequest.input}을 저장소가 보관했다가 쓴다. {@code deliveryToken}은 브로커가 정한 불투명 값이며
+ * 저장소는 해석하지 않아도 된다.
  */
 public interface ProcessingStateStore {
 
@@ -40,8 +39,8 @@ public interface ProcessingStateStore {
      * {@code RETRY_WAIT(nextGen, retries)}로 기록한다. finalizeAttempt와 같은 거절 규약 — 소유권 상실·보존할 입력
      * 없음이면 아무것도 쓰지 않고 false다.
      *
-     * <p>M21 예정: 브로커가 지연 재발행을 직접 지원하므로(RabbitMQ) 예약·재투입은 큐 포트로 옮기고, 이 메서드는 상태 전이만
-     * 남는다. 지금은 Redis 구현이 예약 목록과 재투입 스케줄러를 함께 맡는다.
+     * <p>재투입은 이 메서드가 아니라 재시도 발신함(RetryOutbox)과 RetryRelay가 큐에 다시 넣는다. 여기서는 상태 전이와 입력
+     * 보존만 한다.
      *
      * @param nextGen 재투입할 메시지의 세대(현재 gen + 1)
      * @param retryAtMs 재시도 스케줄러가 재투입할 절대 시각(epoch ms)

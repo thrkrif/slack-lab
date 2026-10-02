@@ -26,7 +26,7 @@ import org.mockito.ArgumentCaptor;
 
 /**
  * 코어의 확정 책임(M19): 브로커 없이 가짜 저장소·가짜 전달만으로 "언제 확정(ACK)하고 언제 놓아주는가"를 검증한다.
- * Redis 통합 테스트는 Lua가 이미 ACK해서 코어의 호출을 지워도 통과했다 — 이 테스트가 그 빈틈을 막는다.
+ * 옛 Redis 통합 테스트는 Lua가 이미 ACK해서 코어의 호출을 지워도 통과했다 — 이 테스트가 그 빈틈을 막는다.
  */
 class EventProcessorTest {
 

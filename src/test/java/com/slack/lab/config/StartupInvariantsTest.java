@@ -15,7 +15,7 @@ class StartupInvariantsTest {
 
     @Configuration
     @EnableConfigurationProperties({SlackProperties.class, LlmProperties.class, ProcessingProperties.class,
-            StateProperties.class, QueueProperties.class, RetryProperties.class})
+            StateProperties.class, RetryProperties.class})
     @Import(StartupInvariants.class)
     static class Config {
     }
@@ -44,13 +44,6 @@ class StartupInvariantsTest {
     void 갱신_주기가_임대의_3분의_1을_넘으면_기동에_실패한다() {
         runner.withPropertyValues("state.renew-ms=10001").run(ctx ->
                 assertThat(ctx.getStartupFailure()).hasStackTraceContaining("state.renew-ms"));
-    }
-
-    @Test
-    void 회수_최소_유휴가_총_기한과_임대의_합보다_작으면_기동에_실패한다() {
-        runner.withPropertyValues("queue.claim-min-idle-ms=89999").run(ctx ->
-                assertThat(ctx.getStartupFailure()).hasStackTraceContaining("queue.claim-min-idle-ms"));
-        runner.withPropertyValues("queue.claim-min-idle-ms=90000").run(ctx -> assertThat(ctx).hasNotFailed());
     }
 
     @Test

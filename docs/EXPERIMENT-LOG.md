@@ -919,3 +919,39 @@ M22를 둘로 나눴다. 이번(M22-1)은 새 구성(`queue.backend=rabbitmq` + 
 - `republishAfterMs`(120초)는 적체 시 재발행을 늘릴 수 있다. 중복은 선점 표가 흡수한다.
 - 자동 조회와 재처리 사이에 좀비 전송이 끼어들 수 있다(결과 불명 정책상 자동 재발신은 하지 않는다).
 - `resolve`가 이상 상태로 보존된 행을 함께 지운다.
+
+## 21. 2단계 후속 M22-2 Redis 제거와 P·D·R 재실험 (2026-10-02)
+
+**구분: 검증 수행 완료 = 예(P·D·R). 합격 판정은 §21.3의 한계 안에서.**
+
+### 21.1 변경과 환경
+
+Redis 어댑터·Lua·의존성·백엔드 스위치를 제거했다(큐=RabbitMQ, 상태=Postgres 고정). 적체 스냅샷은 `BacklogProbe` 포트로 재구성(`retry dlq recovery queue_ready defer dead`), `scripts/p1-residue-check`를 Postgres·RabbitMQ 기준으로 다시 썼다. 환경은 §15.1과 같은 장비(M1 8코어, RAM 16GB)·`qwen2.5:7b`·워커 1개·LLM 동시성 1이고, 컨테이너만 `rabbitmq:3.13-alpine`(512MB)·`postgres:16-alpine`(384MB)·앱 3개(각 512MB)로 바뀌었다. 요청은 §15와 같은 합성 서명 이벤트(실제 테스트 채널). 컨테이너는 포트 18080(호스트 8080을 옛 bootRun이 점유). 빌드: 단위·통합 258건 통과.
+
+### 21.2 결과
+
+| | n | 수신 `recv_ms` p95 | 답변 `answer_ms` p95 | 유실·중복 |
+|---|---|---|---|---|
+| (a) 순차 20건 | 20 | **71ms**(p50 42, max 82) | 6419ms(p50 2532), 표본 18 | 0·0 |
+| (b) 버스트 5×2 | 10 | **129ms**(p50 78) | 17458ms(적체 관측, 판정 제외) | 0·0 |
+
+`enqueue_ms` p95 18~19ms(발행 확인 포함), `reaction_ms` p95 494ms(순차)·1020ms(버스트). 발행·반응 실패 0, 음수 구간 0. 적체 스냅샷은 정상 출력(`queue_ready=0 defer=0 dead=0`). 각 실험 뒤 `p1-residue-check` → `OK: 잔존물 0`.
+
+| 실험 | 결과 |
+|---|---|
+| D1 동일 event_id 10회 동시 / D2 완료 뒤 재전달 | 최종 답글 **1개** / 추가 **0개** |
+| D3 서로 다른 event_id 10건 | 정확히 **10개**, 유실·중복·실패 안내 0 |
+| R1 큐 저장 직후 수신 `kill -9` | 워커가 처리, 답글 1개 |
+| R2 처리 중 워커 `kill -9`(워커 2, 느린 모드 30초) | 남은 워커가 임대 만료를 기다려 인수(`defer`로 재시도), **64초** 만에 새 `attempt_id`로 완료, 답글 1개(Redis 때 153초) |
+| R3 발신 직후 halt(137) → 정상 재기동 | `UNKNOWN(sending_lease_expired)` → `UnknownResolver`가 우리 metadata 답글을 읽기 전용으로 찾아 `COMPLETED/auto_resolved`. 재발신 0, 답글 1개, 잔존물 0 |
+
+### 21.3 관측과 한계
+
+- **언어 방어가 실제로 작동했다.** 순차 20건 중 1건(질문 2번)이 재시도 3회 모두 한자·가나 혼용으로 `llm_failed:language_violation` → 최종 실패 안내로 끝났고(버스트 1건도 같음), 사용자에게 한자가 노출된 건은 0이었다. 방어의 비용은 `재시도 4회 + 지연` — 정상 답변률(event_id별 마지막 결과)은 순차 95%·버스트 90%. 모델이 특정 질문에서 일관되게 위반한다는 뜻이므로 3단계 전에 프롬프트·모델을 점검할 후보다(미해결).
+- 재시도 경로(Postgres 발신함 → `RetryRelay` → RabbitMQ 재투입)가 실제 부하에서 gen 1→2→3으로 동작했다.
+- 한계: 합성 요청(Slack→ngrok 구간 미포함), 표본이 작고 각 실험 1회, 같은 장비에서 Ollama와 경합. 호스트 8080의 옛 bootRun은 건드리지 않았다.
+- 판정: B16(수신 p95 ≤ 200ms, 순차 답변 p95 ≤ 45s) ✓, B3·B4·B5·B6·B7·B15·B18 ✓(R1·R2·R3·D1~D3·residue).
+
+### 21.4 리뷰 대응 (code-reviewer: REVISE MAJOR 2·MINOR 7)
+
+`p1-residue-check`가 명령 치환 안의 `exit 3`이 서브셸만 끝내 질의 실패에도 `OK`를 낼 수 있었다 → 질의를 최상위 변수에 담아 즉시 검사 불가(3)로 끝내고 숫자 응답을 검증한다(실패 유도 확인: 컨테이너가 없을 때 3). `p1-metrics`가 프로브 순서에 따라 적체 줄을 놓칠 수 있었다 → `queue_ready=` 포함 여부로 매칭. 그 밖에 `BacklogReporter` 프로브별 예외 격리, `RoleWiringIT` 보강(리포터·프로브는 워커만, 수신·복구에 LLM 없음), `RabbitPipelineIT`의 재시도 루프가 `Unconfirmed`를 덮지 않도록 단언 추가, compose 비밀번호 주의 문구, ARCHITECTURE 상단에 Redis 서술이 역사 기록임을 명시.

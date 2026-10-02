@@ -23,8 +23,6 @@ ext['testcontainers.version'] = '1.21.4'
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
-    // 2단계 큐(Streams)·공유 처리 상태 (ARCHITECTURE ADR-8)
-    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     // M20: 작업 상태 저장소(Postgres). 연결 풀·마이그레이션은 어댑터가 직접 구성한다(전역 자동 구성은 끈다)
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.flywaydb:flyway-core'
