@@ -44,7 +44,10 @@ public class RabbitEventPublisher implements EventPublisher, EventRepublisher {
         if (result instanceof PublishResult.Enqueued) {
             // 즉시 반응 항목은 보조 기능이다 — 실패해도 이벤트는 이미 안전하게 저장됐으니 수락(200)을 막지 않는다.
             // 재시도·재처리 투입(republish)은 반응을 다시 만들지 않는다.
-            publishReaction(event, receivedAtMs);
+            // 알람처럼 원 메시지(ts)가 없는 이벤트는 반응을 붙일 곳이 없다.
+            if (event.ts() != null) {
+                publishReaction(event, receivedAtMs);
+            }
         }
         return result;
     }

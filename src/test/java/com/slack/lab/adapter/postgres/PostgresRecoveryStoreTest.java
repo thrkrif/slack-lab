@@ -131,6 +131,17 @@ class PostgresRecoveryStoreTest {
         assertThat(recovery.threadRef("없음")).isEmpty();
     }
 
+    @Test
+    void 알람처럼_스레드_위치가_없는_건은_조회_대상이_아니다() {
+        var alert = new com.slack.lab.core.model.SlackMessageEvent("R5a", "C-test", "alert:cloudwatch", "본문", null, null,
+                null, null, null);
+        Claimed c = (Claimed) store.claim(new ClaimRequest("R5a", "t", 0, System.currentTimeMillis(), "C-test", null, alert));
+        store.markSending("R5a", c.attemptId());
+        store.finalizeAttempt("R5a", c.attemptId(), "t", Finalization.unknown("answer", "x"));
+
+        assertThat(recovery.threadRef("R5a")).as("스레드 조회로 확인할 수 없으니 자동 조회는 건너뛰고 사람이 본다").isEmpty();
+    }
+
     // --- resolve · close (B18)
 
     @Test
