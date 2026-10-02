@@ -45,3 +45,7 @@ logs/
 
 # Python 스파이크 캐시
 __pycache__/
+
+# macOS 복제 파일 ("Foo 2.java")
+* [0-9].*
+* [0-9]

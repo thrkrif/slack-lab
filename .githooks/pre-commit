@@ -20,6 +20,14 @@ count=$(printf '%s\n' "$diff" | awk '
   exit 1
 }
 
+# macOS가 만드는 복제 파일("Foo 2.java")이 git add -A에 딸려 올라간 적이 있다(M19·언어 방어 PR). 이름으로 막는다.
+dups=$(git diff --cached --name-only --diff-filter=AM | grep -E ' [0-9]+(\.[A-Za-z]+)?$' || true)
+if [ -n "$dups" ]; then
+  echo "pre-commit: 복제 파일로 보이는 이름이 스테이징돼 있다(예: 'Foo 2.java'). 지우고 다시 커밋한다." >&2
+  printf '%s\n' "$dups" >&2
+  exit 1
+fi
+
 if [ "$count" -gt 0 ]; then
   echo "pre-commit: 토큰 또는 로컬 절대경로로 보이는 줄이 스테이징돼 있다. 값은 출력하지 않고 개수만 표시한다." >&2
   echo "  해당 추가 줄 ${count}개" >&2
