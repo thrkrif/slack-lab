@@ -256,10 +256,10 @@ Slack 전송 장애 시 사용자 안내의 도달까지 보장하지는 않는�
 | 질문 | 언제 정하나 |
 |---|---|
 | 워커를 Java로 둘까, Python(LangGraph)으로 뺄까 | **결정(2026-09-28)**: 2단계는 Java 워커, 4단계에서 재검토 (ARCHITECTURE ADR-5) |
-| 큐는 Redis Streams인가 RabbitMQ인가 | **결정(2026-09-28)**: Redis Streams + 같은 Redis의 공유 상태 (ADR-8) |
-| Vector DB를 pgvector로 할까, 별도로 띄울까 | P2 착수 전 |
+| 큐는 Redis Streams인가 RabbitMQ인가 | **결정(2026-09-28)**: Redis Streams (ADR-8) → **변경(2026-10-02)**: RabbitMQ + Postgres, 오픈소스 self-hosted 도구 (ADR-9) |
+| Vector DB를 pgvector로 할까, 별도로 띄울까 | **방향(2026-10-02)**: 중복 억제용 Postgres에 pgvector를 함께 쓴다. RAG는 on/off 가능, 꺼도 동작 (ADR-9) |
 | 어떤 문서를 색인할까 (과거 장애 스레드? 위키?) | P2 착수 전 |
 | Ollama 모델 크기 — 7B로 충분한가 | P0 실측 후 |
-| Slack 외 인바운드를 n8n으로 고정할지, 서비스별 커스텀 어댑터도 허용할지 | 5단계(P2-7, ARCHITECTURE §5) 착수 전 |
-| OSS self-hosted 배포 시 설치 자동화 수준(App Manifest / 고정 도메인 터널). SaaS 호스팅은 §7 non-goal이라 제외 | 배포용 오픈소스를 실제 목표로 삼기로 결정하는 시점 |
+| Slack 외 인바운드를 n8n으로 고정할지, 서비스별 커스텀 어댑터도 허용할지 | **방향(2026-10-02)**: 알람 원천(CloudWatch/SNS, Grafana)이 전용 엔드포인트로 직접 보낸다. n8n은 선택 어댑터 (ADR-9) |
+| OSS self-hosted 배포 시 설치 자동화 수준(App Manifest / 고정 도메인 터널). SaaS 호스팅은 §7 non-goal이라 제외 | **오픈소스 self-hosted를 목표로 확정(2026-10-02, ADR-9).** 설치 자동화 수준은 미정 |
 | 런타임 LLM 벤더 선택(`/slack-ai codex` 등) 지원 여부 — 로컬 다중 모델(4단계)까지만 할지, 클라우드 opt-in까지 열지 | 회사 도입을 실제로 검토하기로 결정하는 시점, Slash Command 인바운드 설계와 함께 |
