@@ -375,6 +375,9 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 // 깨진 입력 하나가 폴링 전체를 막지 않게 DLQ로 격리한다(사람이 복구 목록에서 보고 처리).
                 jdbc.update("UPDATE preserved_input SET list_name = 'dlq', reason = 'corrupt_payload' WHERE event_id = ?",
                         r.eventId);
+                // 상태도 DEAD로 내린다: RETRY_WAIT로 두면 복구 CLI의 close·reprocess가 모두 BAD_STATE로 막혀 영구히 남는다.
+                jdbc.update("UPDATE processing_state SET state = 'DEAD', stage = 'corrupt_payload', expires_at = NULL "
+                        + "WHERE event_id = ? AND state = 'RETRY_WAIT'", r.eventId);
             }
         }
         return out;

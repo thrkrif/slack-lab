@@ -27,6 +27,14 @@ public interface RecoveryStore {
     /** 스레드에서 답글이 실제로 있었음을 사람이 확인한 뒤 호출한다. 보존 입력과 목록 항목을 함께 지운다(B18). */
     RecoveryOutcome resolveCompleted(String eventId, String slackTs);
 
+    /**
+     * 읽기 전용 자동 조회가 답글을 찾아 완료 처리한다. 사람의 조치와 기록에서 구분할 수 있게 구현체가 단계(stage)를
+     * 달리 남길 수 있다. 기본 구현은 사람의 완료와 같다.
+     */
+    default RecoveryOutcome resolveCompletedAutomatically(String eventId, String slackTs) {
+        return resolveCompleted(eventId, slackTs);
+    }
+
     /** 더 처리하지 않기로 닫는다. */
     RecoveryOutcome close(String eventId);
 

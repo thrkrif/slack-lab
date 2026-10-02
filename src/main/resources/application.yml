@@ -21,6 +21,12 @@ spring:
       # 않게 한다.
       timeout: 1s
 
+# 큐·상태 백엔드: 기본은 redis(M22-2에서 제거 예정). 새 구성은 queue.backend=rabbitmq + state.backend=postgres를 함께 준다.
+queue:
+  backend: ${QUEUE_BACKEND:redis}
+state:
+  backend: ${STATE_BACKEND:redis}
+
 # 역할: receiver | worker | reactor | recovery | all(개발 기본값). 컨테이너는 APP_ROLE로 지정한다.
 app:
   role: ${APP_ROLE:all}

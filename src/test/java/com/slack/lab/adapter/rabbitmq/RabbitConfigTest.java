@@ -11,7 +11,7 @@ import com.slack.lab.core.service.EventProcessor;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
-/** RabbitMQ 백엔드는 M22 배선이 끝나기 전까지 실수로 켜지지 않는다(반쯤 배선된 앱이 조용히 재시도를 잃는 것을 막는다). */
+/** RabbitMQ 백엔드는 Postgres 상태 저장소와 함께일 때만 켜진다(반쯤 배선된 앱이 조용히 재시도를 잃는 것을 막는다). */
 class RabbitConfigTest {
 
     ApplicationContextRunner runner() {
@@ -34,10 +34,10 @@ class RabbitConfigTest {
     }
 
     @Test
-    void 프리뷰_표시_없이_RabbitMQ_백엔드를_켜면_기동을_거부한다() {
+    void Postgres_상태_저장소_없이_RabbitMQ_백엔드를_켜면_기동을_거부한다() {
         runner().withPropertyValues("queue.backend=rabbitmq").run(ctx -> {
             assertThat(ctx).hasFailed();
-            assertThat(ctx.getStartupFailure()).hasStackTraceContaining("queue.rabbitmq-preview");
+            assertThat(ctx.getStartupFailure()).hasStackTraceContaining("state.backend=postgres");
         });
     }
 }

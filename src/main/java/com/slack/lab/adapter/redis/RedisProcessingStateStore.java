@@ -15,10 +15,12 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /** {@code state/state.lua} 한 스크립트가 선점 결과표와 모든 전이를 수행한다. 여기서는 인자만 맞춘다. */
 @Component
+@ConditionalOnProperty(name = "state.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
 public class RedisProcessingStateStore implements ProcessingStateStore {
 

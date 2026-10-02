@@ -40,7 +40,41 @@ public class RabbitEventPublisher implements EventPublisher, EventRepublisher {
 
     @Override
     public PublishResult publish(SlackMessageEvent event, long receivedAtMs, String retryNum) {
-        return send(event, 0, receivedAtMs, retryNum);
+        PublishResult result = send(event, 0, receivedAtMs, retryNum);
+        if (result instanceof PublishResult.Enqueued) {
+            // 즉시 반응 항목은 보조 기능이다 — 실패해도 이벤트는 이미 안전하게 저장됐으니 수락(200)을 막지 않는다.
+            // 재시도·재처리 투입(republish)은 반응을 다시 만들지 않는다.
+            publishReaction(event, receivedAtMs);
+        }
+        return result;
+    }
+
+    private synchronized void publishReaction(SlackMessageEvent event, long receivedAtMs) {
+        long start = System.nanoTime();
+        try {
+            var node = mapper.createObjectNode();
+            node.put("event_id", event.eventId());
+            node.put("channel", event.channel());
+            node.put("ts", event.ts());
+            node.put("received_at", receivedAtMs);
+            Channel ch = confirmChannel();
+            returned.set(false);
+            ch.basicPublish("", broker.reactionsQueue(), true,
+                    RabbitBroker.persistent(event.eventId(), Map.of()), mapper.writeValueAsBytes(node));
+            // 수락(200) 경로에 더하는 대기다 — 이벤트 저장 예산(enqueue-timeout-ms)을 넘기지 않는다.
+            if (!ch.waitForConfirms(confirmTimeoutMs) || returned.get()) {
+                log.warn("반응 항목 저장 확인 실패(반응이 누락될 수 있음) event_id={}", event.eventId());
+            }
+            log.info("반응 항목 저장 event_id={} reaction_enqueue_ms={}", event.eventId(),
+                    (System.nanoTime() - start) / 1_000_000);
+        } catch (InterruptedException e) {
+            discardChannel();
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            discardChannel();
+            log.warn("반응 항목 발행 실패(반응이 누락될 수 있음) event_id={} reason={}", event.eventId(),
+                    e.getClass().getSimpleName());
+        }
     }
 
     @Override

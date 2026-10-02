@@ -28,6 +28,7 @@ import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -36,6 +37,7 @@ import org.springframework.stereotype.Component;
  * 항목을 지운다. 소비자가 죽으면 짧은 min-idle의 회수가 다른 소비자에게 넘긴다.
  */
 @Component
+@ConditionalOnProperty(name = "queue.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.REACTOR, AppRole.WORKER, AppRole.ALL})
 public class ReactionConsumer {
 
