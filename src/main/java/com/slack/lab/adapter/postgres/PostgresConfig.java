@@ -6,40 +6,31 @@ import com.slack.lab.config.AutoCheckProperties;
 import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.config.PostgresProperties;
 import com.slack.lab.config.StateProperties;
+import com.slack.lab.core.port.BacklogProbe;
 import com.slack.lab.core.port.EventRepublisher;
 import com.slack.lab.core.port.RecoveryStore;
 import com.slack.lab.core.port.ThreadLookup;
+import com.slack.lab.core.service.BacklogReporter;
 import com.slack.lab.core.service.RetryRelay;
 import com.slack.lab.core.service.UnknownResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 
 /**
- * Postgres 작업 상태 저장소 배선(ADR-9, M22). {@code state.backend=postgres}일 때만 켜진다. 수신 서버는 상태 저장소가 필요
+ * Postgres 작업 상태 저장소 배선(ADR-9, M22). 수신 서버는 상태 저장소가 필요
  * 없다(큐에 저장만 확인하고 200을 준다) — 워커·복구 역할만 DB에 연결한다. 전역 DataSource 자동 구성은 꺼져 있다.
  */
 @Configuration
-@ConditionalOnProperty(name = "state.backend", havingValue = "postgres")
 class PostgresConfig {
-
-    /** 한쪽만 바꾼 반쯤 배선된 앱이 뜨지 않게 한다: Redis 큐의 전달 식별자와 Postgres 상태는 서로를 모른다. */
-    @Bean
-    ConsistencyGuard postgresConsistencyGuard(Environment env) {
-        if (!"rabbitmq".equals(env.getProperty("queue.backend"))) {
-            throw new IllegalStateException("state.backend=postgres는 queue.backend=rabbitmq와 함께 써야 한다.");
-        }
-        return new ConsistencyGuard();
-    }
-
-    static final class ConsistencyGuard {}
 
     @Bean(destroyMethod = "close")
     @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
     HikariDataSource postgresDataSource(PostgresProperties props) {
+        if (props.password().isBlank()) {
+            throw new IllegalStateException("postgres.password(POSTGRES_PASSWORD)가 비어 있다. .env에 값을 넣는다.");
+        }
         HikariConfig c = new HikariConfig();
         c.setJdbcUrl(props.url());
         c.setUsername(props.username());
@@ -68,6 +59,18 @@ class PostgresConfig {
     @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
     RecoveryStore recoveryStore(HikariDataSource ds, StateProperties state, ObjectMapper mapper) {
         return new PostgresRecoveryStore(ds, state, mapper);
+    }
+
+    @Bean
+    @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
+    PostgresBacklogProbe postgresBacklogProbe(HikariDataSource ds) {
+        return new PostgresBacklogProbe(ds);
+    }
+
+    @Bean(initMethod = "start", destroyMethod = "close")
+    @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
+    BacklogReporter backlogReporter(java.util.List<BacklogProbe> probes) {
+        return new BacklogReporter(probes);
     }
 
     @Bean

@@ -1,7 +1,9 @@
-# 2단계 실행 환경 (2026-09-28 결정, PLAN 2단계 M10)
-# - 개발: docker compose up -d redis 후 호스트에서 bootRun
+# 2단계 후속 실행 환경 (ADR-9): RabbitMQ(큐) + Postgres(작업 상태). Redis는 쓰지 않는다.
+# - 개발: docker compose up -d rabbitmq postgres 후 호스트에서 bootRun (POSTGRES_PASSWORD는 .env에서 읽는다)
 # - 통합 검증·실험: docker compose --profile app up --build
 # Ollama는 컨테이너로 띄우지 않는다. 호스트의 ollama serve를 host.docker.internal로 호출한다.
+# 주의: POSTGRES_PASSWORD가 .env에 없으면 어떤 compose 명령도 실패한다(파일 전체를 보간한다).
+# 메모리 상한은 노트북 한 대에서 LLM과 함께 돌릴 때를 가정한 값이다(laptop 부하 정책).
 
 x-app: &app
   # 세 역할이 같은 이미지를 쓴다 — 한 번만 빌드된다.
@@ -10,29 +12,50 @@ x-app: &app
   profiles: ["app"]
   env_file: .env
   depends_on:
-    redis:
+    rabbitmq:
+      condition: service_healthy
+    postgres:
       condition: service_healthy
   extra_hosts:
     - "host.docker.internal:host-gateway"
+  mem_limit: 512m
 
 x-app-env: &app-env
-  REDIS_HOST: redis
+  RABBITMQ_HOST: rabbitmq
+  POSTGRES_URL: jdbc:postgresql://postgres:5432/slacklab
   LLM_BASE_URL: http://host.docker.internal:11434/v1
 
 services:
-  redis:
-    image: redis:8.2-alpine
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
-    volumes:
-      - ./infra/redis.conf:/usr/local/etc/redis/redis.conf:ro
-      - redis-data:/data
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:5672:5672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 2s
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
       retries: 15
+    mem_limit: 512m
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: slacklab
+      POSTGRES_USER: slacklab
+      # 기본값을 두지 않는다. .env에 POSTGRES_PASSWORD를 넣는다.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정한다}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slacklab -d slacklab"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    mem_limit: 384m
 
   receiver:
     <<: *app
@@ -55,4 +78,5 @@ services:
       APP_ROLE: reactor
 
 volumes:
-  redis-data:
+  rabbitmq-data:
+  postgres-data:

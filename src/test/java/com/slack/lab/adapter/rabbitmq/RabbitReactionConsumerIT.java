@@ -33,7 +33,7 @@ class RabbitReactionConsumerIT {
     static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3.13-alpine");
 
     static final ObjectMapper MAPPER = new ObjectMapper();
-    static final QueueProperties QUEUE = new QueueProperties("unused", "unused", 1_000, 100_000);
+    static final QueueProperties QUEUE = new QueueProperties(1_000);
 
     RabbitProperties props;
     final List<AutoCloseable> closeables = new ArrayList<>();
@@ -132,7 +132,7 @@ class RabbitReactionConsumerIT {
         RabbitBroker broker = track(new RabbitBroker(props, 2));
         RabbitEventPublisher publisher = new RabbitEventPublisher(broker, MAPPER, QUEUE);
         var consumer = track(new RabbitReactionConsumer(broker, MAPPER, notifier(),
-                new ReactionProperties("s", "g", "eyes", 10_000, 0)));
+                new ReactionProperties("eyes", 0)));
         consumer.start();
 
         publisher.publish(event("Ev3"), System.currentTimeMillis(), "0");
@@ -153,7 +153,7 @@ class RabbitReactionConsumerIT {
         next = new ReactionResult(false, "missing_scope");
         RabbitBroker broker = track(new RabbitBroker(props, 2));
         RabbitEventPublisher publisher = new RabbitEventPublisher(broker, MAPPER, QUEUE);
-        track(new RabbitReactionConsumer(broker, MAPPER, notifier(), new ReactionProperties("s", "g", "eyes", 10_000, 0)))
+        track(new RabbitReactionConsumer(broker, MAPPER, notifier(), new ReactionProperties("eyes", 0)))
                 .start();
 
         publisher.publish(event("Ev4"), System.currentTimeMillis(), "0");

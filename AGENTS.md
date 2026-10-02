@@ -64,7 +64,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 set -a && source .env && set +a && ./gradlew bootRun
 ngrok http 8080                                   # 별도 터미널
 ollama serve                                      # 별도 터미널 (Ollama는 호스트에서 실행, 컨테이너 X)
-docker compose up -d redis                        # 2단계: Redis(8.2, AOF always) — M10부터
+docker compose up -d rabbitmq postgres            # 큐(RabbitMQ)·작업 상태(Postgres). .env에 POSTGRES_PASSWORD 필요
 docker compose --profile app up --build           # 2단계: 수신·워커·반응 컨테이너 (호스트 Ollama 사용)
 scripts/recovery list                             # 2단계: 결과 불명·DLQ 복구 CLI (check·resolve-completed·reprocess·close)
 scripts/p1-residue-check                          # 2단계: 해결된 건의 본문 잔존 검사(B18)

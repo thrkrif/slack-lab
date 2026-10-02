@@ -72,7 +72,7 @@ for line in read_lines(sys.argv[1:]):
             series["reaction_ms"].append(v)
     elif "반응 실패" in line:
         reaction_fail += 1
-    elif "적체 스냅샷 stream_len=" in line:
+    elif "적체 스냅샷 " in line and "queue_ready=" in line:
         backlog.append(kv(line))
     elif "적체 스냅샷 실패" in line:
         snapshot_fail += 1
@@ -96,5 +96,5 @@ if backlog:
     def mx(key):
         return max(int(b[key]) for b in backlog)
     last = backlog[-1]
-    print(f"적체(스냅샷 {len(backlog)}줄, 워커 수만큼 중복): stream_len 최대 {mx('stream_len')}, pending 최대 {mx('pending')}, "
+    print(f"적체(스냅샷 {len(backlog)}줄, 워커 수만큼 중복): queue_ready 최대 {mx('queue_ready')}, defer 최대 {mx('defer')}, dead 최대 {mx('dead')}, "
           f"마지막 retry={last['retry']} dlq={last['dlq']} recovery={last['recovery']}")

@@ -38,13 +38,13 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * 실제 스프링 컨텍스트 전체(역할 all)를 RabbitMQ·Postgres 컨테이너에 붙이고 Redis는 쓰지 않는 종단 테스트(M22).
+ * 실제 스프링 컨텍스트 전체(역할 all)를 RabbitMQ·Postgres 컨테이너에 붙이고 Redis 없는 종단 테스트(M22).
  * 서명된 이벤트가 수신 → 큐 저장 확인 → 워커 → 선점 → LLM(echo) → 발신(가짜 Slack) → 확정 → ack까지 흐르고, 즉시 반응이
  * 붙으며, 같은 이벤트의 재전송은 답글을 늘리지 않는다. Slack 호출만 가짜다.
  */
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "app.role=all", "queue.backend=rabbitmq", "state.backend=postgres", "llm.client=echo", "llm.model=m",
+        "app.role=all", "llm.client=echo", "llm.model=m",
         "slack.signing-secret=testsecret", "slack.bot-token=xoxb-test", "recovery.auto-check.enabled=false",
         "rabbitmq.eventsQueue=fullstack.events"})
 class FullStackWiringIT {
@@ -69,6 +69,9 @@ class FullStackWiringIT {
 
     @Autowired
     TestRestTemplate rest;
+
+    @Autowired
+    java.util.List<com.slack.lab.core.port.BacklogProbe> probes;
 
     JdbcTemplate jdbc;
 
@@ -110,6 +113,14 @@ class FullStackWiringIT {
     String stateOf(String id) {
         return jdbc.queryForList("SELECT state FROM processing_state WHERE event_id = ?", String.class, id).stream()
                 .findFirst().orElse(null);
+    }
+
+    @Test
+    void 적체_스냅샷은_큐와_저장소의_수치를_모두_내놓는다() {
+        java.util.Map<String, Long> all = new java.util.LinkedHashMap<>();
+        probes.forEach(p -> all.putAll(p.snapshot()));
+
+        assertThat(all.keySet()).containsExactlyInAnyOrder("queue_ready", "defer", "dead", "retry", "dlq", "recovery");
     }
 
     @Test

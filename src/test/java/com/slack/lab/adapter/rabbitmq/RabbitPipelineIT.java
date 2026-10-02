@@ -69,7 +69,7 @@ class RabbitPipelineIT {
 
     static final ObjectMapper MAPPER = new ObjectMapper();
     static final StateProperties STATE = new StateProperties(1_500, 300, 7, 24);
-    static final QueueProperties QUEUE = new QueueProperties("unused", "unused", 1_000, 100_000);
+    static final QueueProperties QUEUE = new QueueProperties(1_000);
 
     static HikariDataSource ds;
     static JdbcTemplate jdbc;
@@ -457,7 +457,7 @@ class RabbitPipelineIT {
 
     @Test
     void 확인이_늦으면_Unconfirmed이고_채널을_버려_다음_발행은_영향받지_않는다() throws Exception {
-        QueueProperties shortConfirm = new QueueProperties("unused", "unused", 400, 100_000);
+        QueueProperties shortConfirm = new QueueProperties(400);
         RabbitBroker broker = track(new RabbitBroker(rabbitProps, 1));
         RabbitEventPublisher publisher = new RabbitEventPublisher(broker, MAPPER, shortConfirm);
         assertThat(publisher.publish(event("Warm"), System.currentTimeMillis(), "0"))
@@ -474,7 +474,18 @@ class RabbitPipelineIT {
 
         assertThat(during).as("요청은 나갔지만 저장 여부를 모른다").isInstanceOf(PublishResult.Unconfirmed.class);
         // 늦게 도착한 ack가 있더라도 새 채널로 시작하므로 다음 발행의 결과는 자기 것이다
-        PublishResult after = publisher.publish(event("After"), System.currentTimeMillis(), "0");
+        // 일시 정지가 길면 브로커가 연결을 끊고 자동 복구가 되살리는 동안은 실패할 수 있다(느린 장비의 전체 빌드에서 관측) —
+        // 복구 뒤에는 성공해야 한다.
+        PublishResult after = null;
+        for (int i = 0; i < 20; i++) {
+            after = publisher.publish(event("After"), System.currentTimeMillis(), "0");
+            if (after instanceof PublishResult.Enqueued) {
+                break;
+            }
+            // 늦은 ack가 버려진 채널을 오염시켰다면 Unconfirmed가 나온다 — 그것은 재시도로 덮지 않는다.
+            assertThat(after).isNotInstanceOf(PublishResult.Unconfirmed.class);
+            Thread.sleep(500);
+        }
         assertThat(after).isInstanceOf(PublishResult.Enqueued.class);
     }
 

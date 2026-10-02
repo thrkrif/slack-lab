@@ -10,22 +10,6 @@ spring:
       - org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration
       - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
       - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
-  data:
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      # Lettuce 기본 명령 타임아웃(60초)을 그대로 두면 Redis가 끊겨도 연결이 재연결될 때까지 명령이 버퍼링돼
-      # 최대 60초 응답이 없다(B1 위반 — MAJOR-2). queue.enqueue-timeout-ms(150ms, WAITAOF 서버측 타임아웃)보다
-      # 넉넉하되 Slack의 3초 예산 안에 들어오게 1초로 둔다. EventWorker의 블로킹 XREADGROUP은 이 값보다 짧은
-      # block(900ms)을 쓰도록 맞춰, 정상 상황에서 이 명령 타임아웃과 충돌해 조기 QueryTimeoutException이 나지
-      # 않게 한다.
-      timeout: 1s
-
-# 큐·상태 백엔드: 기본은 redis(M22-2에서 제거 예정). 새 구성은 queue.backend=rabbitmq + state.backend=postgres를 함께 준다.
-queue:
-  backend: ${QUEUE_BACKEND:redis}
-state:
-  backend: ${STATE_BACKEND:redis}
 
 # 역할: receiver | worker | reactor | recovery | all(개발 기본값). 컨테이너는 APP_ROLE로 지정한다.
 app:

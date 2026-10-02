@@ -12,15 +12,15 @@ import org.springframework.stereotype.Component;
 public class StartupInvariants {
 
     public StartupInvariants(LlmProperties llm, SlackProperties slack, ProcessingProperties processing,
-            StateProperties state, QueueProperties queue, RetryProperties retry) {
-        List<String> violations = check(llm, slack, processing, state, queue, retry);
+            StateProperties state, RetryProperties retry) {
+        List<String> violations = check(llm, slack, processing, state, retry);
         if (!violations.isEmpty()) {
             throw new IllegalStateException("설정 불변식 위반: " + String.join("; ", violations));
         }
     }
 
     static List<String> check(LlmProperties llm, SlackProperties slack, ProcessingProperties processing,
-            StateProperties state, QueueProperties queue, RetryProperties retry) {
+            StateProperties state, RetryProperties retry) {
         List<String> v = new ArrayList<>();
         // 큰 값의 합이 넘쳐 음수가 되면 불변식을 우회하므로 넘침도 위반으로 본다.
         if (sumExceeds(llm.deadlineMs(), slack.sendDeadlineMs(), processing.totalDeadlineMs())) {
@@ -29,10 +29,6 @@ public class StartupInvariants {
         // 갱신 한 번이 실패해도 임대를 잃지 않게 임대 안에 갱신 기회를 세 번 둔다.
         if (state.renewMs() > state.leaseMs() / 3) {
             v.add("state.renew-ms <= state.lease-ms / 3 이어야 한다");
-        }
-        // 정상 처리 중(최대 총 기한)인 메시지를 XAUTOCLAIM이 가로채지 않게 한다.
-        if (sumExceeds(processing.totalDeadlineMs(), state.leaseMs(), queue.claimMinIdleMs())) {
-            v.add("queue.claim-min-idle-ms >= processing.total-deadline-ms + state.lease-ms 이어야 한다");
         }
         if (retry.backoffMs().size() < retry.maxRetries()) {
             v.add("retry.backoff-ms 항목 수 >= retry.max-retries 이어야 한다");

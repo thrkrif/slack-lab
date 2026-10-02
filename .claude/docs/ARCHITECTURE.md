@@ -1,4 +1,6 @@
-# ARCHITECTURE.md — slack-ai-lab
+# ARCHITECTURE
+
+> **M22-2(2026-10-02) 이후 Redis는 없다.** 아래 §3~§5의 Redis Streams·Lua·`/health` Redis·compose redis 서술은 2단계(`v0.2.0`)의 역사 기록이며 현재 구조는 "패키지 구조"와 ADR-9(이행 결과)가 정본이다. 프로토콜(선점 결과표·임대·세대·보존→상태→ACK 순서)은 Postgres·RabbitMQ 어댑터가 그대로 승계한다..md — slack-ai-lab
 
 **목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`AGENTS.md`](../../AGENTS.md).
 
@@ -123,15 +125,13 @@ com.slack.lab
 ├─ core/                      코어 — 인프라를 모른다 (ArchitectureTest가 강제)
 │  ├─ model/                  값 객체·결과 타입 (SlackMessageEvent, HandlingResult, ClaimOutcome, ...)
 │  ├─ port/                   인터페이스: EventPublisher, ProcessingStateStore, QueueDelivery, ChatNotifier,
-│  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe,
+│  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe, BacklogProbe,
 │  │                          EmbeddingClient·VectorStore (3단계 자리만 잡음)
 │  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
-│                             RecoveryService, SlackThreadContext
+│                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
-│  ├─ redis/                  RedisEventPublisher, RedisStreamConsumer, RedisProcessingStateStore, RedisRecoveryStore,
-│  │                          RetryScheduler, ReactionConsumer, BacklogReporter, RedisHealthProbe  (M22에서 대체)
-│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresConfig (M20~M22, state.backend=postgres)
-│  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer (M21~M22, queue.backend=rabbitmq)
+│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22)
+│  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
 │  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
 │  ├─ cli/                    RecoveryRunner
@@ -141,7 +141,7 @@ com.slack.lab
 
 의존 규칙(`ArchitectureTest`): ① `core`는 `adapter`를 import하지 않는다. ② `core`는 Redis·HTTP·JSON·JDBC·AMQP 같은 인프라 라이브러리를 import하지 않는다(규칙 2를 코어 전체로 넓힌 것). ③ `core`는 `config`에서 자기가 실제로 쓰는 설정 값(`Processing/Experiment/Llm/Slack/State/Retry/Worker/ContextProperties`)과 역할 표시만 참조한다(브로커 전용 `QueueProperties` 등은 금지). ④ `core.model`은 JDK와 모델만, `core.port`는 모델만 안다. ⑤ 어댑터끼리는 서로를 모른다. 코어에 Redis import를 넣으면 이 테스트가 실패함을 확인했다(변이 검사).
 
-메시지 확정은 코어의 책임이다: 확정하면 `QueueDelivery.acknowledge()`, 확정하지 못했거나 지금 처리할 수 없으면 `QueueDelivery.defer()`를 부른다("ack하지 않으면 브로커가 알아서 다시 준다"는 가정은 하지 않는다 — RabbitMQ는 주지 않는다). Redis 어댑터는 `defer()`가 no-op이고 pending 회수가 맡는다. M19 시점의 타협: `acknowledge()`는 Redis 어댑터에서는 상태 저장소의 Lua(`finalize`)가 이미 ACK를 했으므로 이 호출은 멱등 no-op이다. 상태 저장소와 큐가 분리되는 M20·M21에서 이 호출이 실제 확정이 된다. `ProcessingStateStore`의 `deliveryToken`도 지금은 Redis 스트림 항목 ID다.
+메시지 확정은 코어의 책임이다: 확정하면 `QueueDelivery.acknowledge()`, 확정하지 못했거나 지금 처리할 수 없으면 `QueueDelivery.defer()`를 부른다("ack하지 않으면 브로커가 알아서 다시 준다"는 가정은 하지 않는다 — RabbitMQ는 주지 않는다). `ProcessingStateStore`의 `deliveryToken`은 브로커가 정한 불투명 값(RabbitMQ delivery tag)이고 Postgres 저장소는 해석하지 않는다. (M22-2에서 Redis 어댑터를 제거해 확정 책임은 코어의 `acknowledge()`/`defer()` 호출 하나로 정리됐다.)
 
 ### 절대 경계
 
@@ -493,6 +493,10 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 - **대안**: SQS(AWS 한정), Kafka(이 규모와 메시지별 재시도·DLQ 요구에 과함), Redis 유지(별도 인프라와 자체 Lua 유지 부담), 저장소 없음(같은 알람의 중복 리포트는 UX 문제라 받아들일 수 없음).
 - **대가**: 2단계의 Redis 구현(Lua, 스케줄러, 복구 CLI의 Redis 부분)을 폐기하고 새 어댑터로 다시 만든다. 검증된 것은 **프로토콜**(멱등 키, 선점·임대, 보존 → 상태 → ACK 순서, 결과 불명 처리, 24시간 창)과 실험 설계이며 승계한다. 기반이 바뀌므로 성능·중복·복구 실험(P·D·R)을 다시 수행한다. Postgres가 필수 인프라가 된다. RabbitMQ에는 메시지별 임대가 없어 처리 시간이 길면(LLM 최대 50초) 소비자 타임아웃과 prefetch 설정을 맞춰야 한다.
 - **미결**: CloudWatch 알람 SNS 메시지의 식별 필드 확인, 대표 리포트 갱신(`chat.update`) 시점, Postgres 선점의 실제 지연 측정, 지연 재시도를 TTL 큐로 할지 플러그인으로 할지.
+
+#### ADR-9 이행 결과 (M22-2, 2026-10-02)
+
+Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔드 스위치(`queue.backend`·`state.backend`)도 없앴다 — 큐는 RabbitMQ, 상태는 Postgres 하나뿐이다. 설정은 `queue.enqueue-timeout-ms`(발행 확인 대기)만 남고 스트림 키·소비 그룹·`claim-min-idle-ms` 불변식은 사라졌다. 적체 지표는 `BacklogProbe` 포트(각 어댑터가 수치를 내고 코어 `BacklogReporter`가 한 줄로 합친다): `적체 스냅샷 retry= dlq= recovery= queue_ready= defer= dead=`. Postgres 비밀번호는 기본값이 없다(`POSTGRES_PASSWORD`). compose는 RabbitMQ·Postgres·앱 3역할에 메모리 상한을 둔다. 실측은 `EXPERIMENT-LOG.md` §21.
 
 ### ADR-6 · 프로토타입은 폐기하고 지식만 승계한다
 
