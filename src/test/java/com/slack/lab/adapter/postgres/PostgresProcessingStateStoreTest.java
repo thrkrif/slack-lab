@@ -688,6 +688,7 @@ class PostgresProcessingStateStoreTest {
 
         assertThat(due).extracting(d -> d.event().eventId()).containsExactly("O5");
         assertThat(listOf("O4")).isEqualTo("dlq");
+        assertThat(stateOf("O4")).as("복구 CLI로 지울 수 있게 RETRY_WAIT로 두지 않는다").containsEntry("state", "DEAD");
     }
 
     @Test

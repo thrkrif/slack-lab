@@ -67,6 +67,11 @@ public class RabbitBroker implements AutoCloseable {
         return props.eventsQueue() + ".dead";
     }
 
+    /** 즉시 반응 큐. 본문 없는 최소 항목(event_id·channel·ts·received_at)만 싣는다. 처리 큐와 분리돼 있다. */
+    String reactionsQueue() {
+        return props.eventsQueue() + ".reactions";
+    }
+
     String deadExchange() {
         return props.eventsQueue() + ".dlx";
     }
@@ -140,6 +145,10 @@ public class RabbitBroker implements AutoCloseable {
         events.put("x-overflow", "reject-publish");
         ch.queueDeclare(eventsQueue(), true, false, false, events);
         ch.queueBind(eventsQueue(), exchange(), eventsQueue());
+
+        // 반응은 보조 기능이라 가볍게: 영속이지만 재시도·DLQ는 두지 않는다(소비자가 죽으면 브로커가 다시 전달한다).
+        // 한참 지난 반응은 의미가 없다 — 소비자가 오래 내려가 있다 올라와도 이미 끝난 질문에 일괄로 붙이지 않는다.
+        ch.queueDeclare(reactionsQueue(), true, false, false, Map.of("x-message-ttl", 60_000));
 
         // 놓아준 메시지는 TTL 뒤 기본 교환기가 아니라 이벤트 교환기로 돌아간다.
         Map<String, Object> defer = new HashMap<>();

@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
  * 집계한다. 워커가 여럿이면 각자 남기지만 값은 모두 Redis 전체 기준이라 어느 것을 봐도 같다.
  */
 @Component
+@ConditionalOnProperty(name = "queue.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
 public class BacklogReporter {
 

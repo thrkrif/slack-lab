@@ -889,3 +889,33 @@ Redis 구현과 달라진 점
 - **MINOR**: 확인 대기 중 연결 종료는 `Failed`가 아니라 `Unconfirmed`(규칙 4; 요청이 나간 뒤라 저장 여부를 모름). 지연 발행도 mandatory로 보내 미라우팅이면 원본을 ack하지 않음. 이벤트 큐 데드레터링을 `at-least-once`(+`reject-publish`)로. `queue.backend=rabbitmq`는 `queue.rabbitmq-preview=true` 없이는 기동을 거부(Redis 상태 저장소가 delivery tag를 스트림 ID로 오해하고 재시도가 재투입되지 않는 반쯤 배선된 앱 방지, 테스트). 릴레이 한 사이클의 예외가 주기 실행을 멈추지 않게 격리, 깨진 재시도 입력은 폴링을 막지 않고 DLQ로 격리(테스트). 옛 tag ack 주석 정정(자동 복구 채널은 복구 전 tag의 ack를 조용히 무시), 채널 폐기·토폴로지 선언 실패 시 연결 비움.
 - **알려진 한계(수정하지 않음)**: ① 지연 큐(`.defer`)의 TTL 데드레터링은 classic 큐라 브로커 장애 순간에 at-most-once다(quorum 큐 + at-least-once로 바꾸는 방안은 검토만 함). ② 릴레이 두 개가 같은 행을 동시에 재발행할 수 있고(`FOR UPDATE SKIP LOCKED`·선점 갱신 없음), 워커 백로그가 `republishAfterMs`보다 길면 같은 세대가 반복 재투입될 수 있다 — 선점 결과표가 흡수해 정확성은 유지되고 큐만 부푼다. ③ 퍼블리셔는 수신·지연 발행·릴레이가 한 채널·한 모니터를 공유한다(ALL 역할에서 지연 발행과 릴레이가 수신 지연을 최대 1초씩 늘릴 수 있음). 필요하면 수신용과 워커용 채널을 분리한다.
 
+## 20. 2단계 후속 M22-1 Postgres·RabbitMQ 전체 배선 검증 (2026-10-02)
+
+M22를 둘로 나눴다. 이번(M22-1)은 새 구성(`queue.backend=rabbitmq` + `state.backend=postgres`)을 끝까지 배선하고 검증하는 일이고, Redis 제거·compose·스크립트·P·D·R 재실험은 M22-2다. 기본값은 아직 Redis라 기존 동작은 그대로다.
+
+추가한 것
+- `PostgresRecoveryStore`(복구 CLI의 Postgres 구현: 목록·조회·`resolve-completed`·`close`·`reprocess`). `reprocess`는 재시도 예약과 같은 경로다: 상태를 `RETRY_WAIT(gen+1, manual_gen)`로 올리고 보존 입력을 즉시 도래하는 재시도로 옮기면 릴레이가 큐에 다시 넣는다. 승인은 그 세대의 첫 선점에서 소비된다(B11).
+- `UnknownResolver`(코어): 복구 목록의 `UNKNOWN`을 읽기 전용으로 스레드 조회해, 우리 메타데이터 답글이 있으면 완료 처리한다. 없거나 조회가 실패하거나 방금 불명이 된 건은 건드리지 않는다. **자동 재발신은 하지 않는다**(규칙 11).
+- `PostgresConfig`·`PostgresMaintenance`: 워커·복구 역할만 DB에 연결(수신은 큐 저장 확인만 하므로 DB가 필요 없음), 재시도 릴레이(5초)·결과 불명 자동 조회(30초)·만료 건 삭제(10분)를 주기 실행. 한쪽 백엔드만 바꾼 반쯤 배선된 앱은 기동을 거부한다(양방향 가드).
+- RabbitMQ 반응 큐: 최초 발행이 확인되면 본문 없는 항목(`event_id`·`channel`·`ts`·`received_at`)을 반응 큐에 넣고(최선 노력 — 실패해도 수락을 막지 않음), `RabbitReactionConsumer`가 이모지를 붙인다. 재투입은 반응을 다시 만들지 않는다. Redis 때의 "처리·반응을 한 스크립트로 원자 기록"은 두 번의 발행으로 바뀌었다.
+
+| 검증 | 결과 |
+|---|---|
+| Postgres 복구 저장소(Testcontainers) | 14건: 목록 정렬·본문 없음, 재시도 예약은 미해결이 아님, 스레드 위치, resolve 멱등·충돌·거절, close 뒤 재전송 무시, reprocess 승인·원래 수신 시각 보존·재실행 멱등·첫 선점 소비·소실 시 DEAD와 다음 세대 승인·24시간 창 초과 건의 수동 실행·보존본 없음 |
+| 결과 불명 자동 조회 | 6건: 답글 발견 시 그 ts로 완료, 미발견·조회 실패·방금 불명·DLQ·UNKNOWN 아님은 변경 없음, 재발신·재처리·닫기 호출 0, 사이클 예외 격리 |
+| 반응 큐(RabbitMQ) | 4건: 최초 발행만 반응 항목 생성(본문 없음), 재투입은 만들지 않음, 이모지 부착 후 삭제, 실패해도 재시도 없이 삭제 |
+| **전체 배선 종단 테스트** | 실제 스프링 컨텍스트(역할 all) + RabbitMQ·Postgres 컨테이너, **Redis 없음**: `/health`가 `rabbitmq`만 보고, 서명된 이벤트가 수신→큐→워커→echo LLM→(가짜 Slack) 답글 1회·반응 1회→`COMPLETED`, 같은 event_id 재전송은 200이고 답글이 늘지 않음, 서명 오류는 401·봇 메시지는 큐에 넣지 않음 |
+
+한계: Slack 호출만 가짜이고 실제 Slack·Ollama와의 왕복은 M22-2의 P·D·R 재실험에서 한다.
+
+
+### 20.1 M22-1 리뷰 반영과 알려진 한계
+
+리뷰(APPROVE, MINOR 위주)를 반영했다. 반응 발행 대기를 수락 타임아웃 이내로 제한하고 `reaction_enqueue_ms`를 남긴다. `.reactions` 큐에 TTL 60초를 둔다. `UnknownResolver`는 건별 예외를 격리하고 사이클당 10건으로 제한한다. 자동 조회로 완료한 건은 단계 `auto_resolved`로 사람의 `manual_resolved`와 구분한다. 깨진 재시도 payload는 `preserved_input`을 dlq로 격리하고 상태도 `DEAD`로 바꿔 복구 CLI로 닫을 수 있다. 마이그레이션 실패 시 DataSource를 닫는다. 검증: `RoleWiringIT`(역할별 빈 구성 4), 복구·해결기·반응 테스트 추가, 전체 빌드 통과.
+
+알려진 한계(M22-2 이후 재검토):
+- Slack 속도 제한은 반응과 답글이 같은 토큰을 공유해 서로 영향을 준다.
+- 반응 발행 확인 왕복이 수락 경로에 들어 있다(상한: 수락 타임아웃).
+- `republishAfterMs`(120초)는 적체 시 재발행을 늘릴 수 있다. 중복은 선점 표가 흡수한다.
+- 자동 조회와 재처리 사이에 좀비 전송이 끼어들 수 있다(결과 불명 정책상 자동 재발신은 하지 않는다).
+- `resolve`가 이상 상태로 보존된 행을 함께 지운다.

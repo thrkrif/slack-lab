@@ -1,5 +1,7 @@
 package com.slack.lab.adapter.rabbitmq;
 
+import com.slack.lab.core.port.ChatNotifier;
+import com.slack.lab.config.ReactionProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.slack.lab.config.AppRole;
 import com.slack.lab.config.ConditionalOnRole;
@@ -12,23 +14,21 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * RabbitMQ 큐 어댑터 배선(M21). {@code queue.backend=rabbitmq}일 때만 켜진다. 기본값은 아직 Redis다 — Postgres 상태 저장소와
- * 함께 쓰는 전체 배선(재시도 릴레이, 반응 큐, 복구 CLI)은 M22에서 완성한다. 지금은 이 어댑터와 코어를 직접 이어 붙인
- * 통합 테스트({@code RabbitPipelineIT})가 동작을 검증한다.
+ * RabbitMQ 큐 어댑터 배선(M21~M22). {@code queue.backend=rabbitmq}일 때만 켜지고, Postgres 상태 저장소
+ * ({@code state.backend=postgres})와 함께 써야 한다. 기본값은 아직 Redis다(M22-2에서 Redis를 제거한다).
  */
 @Configuration
 @ConditionalOnProperty(name = "queue.backend", havingValue = "rabbitmq")
 class RabbitConfig {
 
     /**
-     * Postgres 상태 저장소 배선은 M22에서 완성한다. 지금 이 백엔드를 켜면 Redis 상태 저장소가 RabbitMQ의 delivery tag를
-     * 스트림 ID로 오해하고, 재시도는 재투입되지 않는다(조용한 실패). 개발자가 의도를 밝혀야만 켜진다.
+     * Redis 상태 저장소는 RabbitMQ의 delivery tag를 스트림 ID로 오해하고, 재시도는 재투입되지 않는다(조용한 실패). 한쪽만 바꾼
+     * 반쯤 배선된 앱이 뜨지 않게 Postgres 상태 저장소와 함께 쓰도록 강제한다.
      */
     @Bean
     RabbitWiringGuard rabbitWiringGuard(org.springframework.core.env.Environment env) {
-        if (!env.getProperty("queue.rabbitmq-preview", Boolean.class, false)) {
-            throw new IllegalStateException("queue.backend=rabbitmq는 M22(Postgres 상태 저장소 배선)가 끝나기 전까지 지원하지 "
-                    + "않는다. 어댑터를 시험하려면 queue.rabbitmq-preview=true를 함께 준다.");
+        if (!"postgres".equals(env.getProperty("state.backend"))) {
+            throw new IllegalStateException("queue.backend=rabbitmq는 state.backend=postgres와 함께 써야 한다.");
         }
         return new RabbitWiringGuard();
     }
@@ -36,7 +36,7 @@ class RabbitConfig {
     static final class RabbitWiringGuard {}
 
     @Bean(destroyMethod = "close")
-    @ConditionalOnRole({AppRole.RECEIVER, AppRole.WORKER, AppRole.ALL})
+    @ConditionalOnRole({AppRole.RECEIVER, AppRole.WORKER, AppRole.REACTOR, AppRole.ALL})
     RabbitBroker rabbitBroker(RabbitProperties props, WorkerProperties worker) {
         return new RabbitBroker(props, worker.concurrency() + 1);
     }
@@ -58,5 +58,12 @@ class RabbitConfig {
     RabbitConsumer rabbitConsumer(RabbitBroker broker, RabbitEventPublisher publisher, EventProcessor processor,
             ObjectMapper mapper, WorkerProperties worker) {
         return new RabbitConsumer(broker, publisher, processor, mapper, worker.concurrency());
+    }
+
+    @Bean(initMethod = "start", destroyMethod = "close")
+    @ConditionalOnRole({AppRole.REACTOR, AppRole.WORKER, AppRole.ALL})
+    RabbitReactionConsumer rabbitReactionConsumer(RabbitBroker broker, ObjectMapper mapper,
+            com.slack.lab.core.port.ChatNotifier notifier, com.slack.lab.config.ReactionProperties reaction) {
+        return new RabbitReactionConsumer(broker, mapper, notifier, reaction);
     }
 }

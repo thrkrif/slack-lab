@@ -18,6 +18,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations.TypedTuple;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Component;
  * 소유자 없이 사람이 부르는 전이({@code resolve}·{@code reprocess})만 노출한다. 자동 재발신 경로는 없다.
  */
 @Component
+@ConditionalOnProperty(name = "state.backend", havingValue = "redis", matchIfMissing = true)
 @ConditionalOnRole(AppRole.RECOVERY)
 public class RedisRecoveryStore implements RecoveryStore {
 
