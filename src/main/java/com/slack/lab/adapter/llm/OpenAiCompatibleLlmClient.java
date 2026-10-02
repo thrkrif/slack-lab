@@ -37,10 +37,25 @@ import org.slf4j.LoggerFactory;
 public class OpenAiCompatibleLlmClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);
-    // qwen2.5:7b가 느슨한 지시에서는 중국어·영어를 섞어 답하는 경우가 있어(실측), 금지 조건을 명시적으로 반복한다.
+    // qwen2.5:7b는 한국어 지시만으로는 중국어를 섞는다(M1 실측, M19 후 재발: 12건 중 1건이 중국어로 시작). 영어 지시가 더 잘 듣고,
+    // 허용 범위(영어는 에러·명령어·기술 용어에만)를 구체적으로 적어야 "한국어로만"이 기술 설명을 망치지 않는다. 그래도 새므로
+    // 응답을 검사해 한 번 다시 묻는 방어(아래 containsForeignScript)를 함께 둔다 — 프롬프트는 확률을 낮출 뿐 보장이 아니다.
     private static final String SYSTEM_PROMPT =
-            "너는 한국어로만 답하는 챗봇이다. 어떤 경우에도 중국어·영어·다른 언어 단어를 섞지 마라. "
-                    + "모든 문장을 한국어로만 작성하라. 간결하게 500자 이내로 답하라.";
+            "You are an on-call assistant in a Korean engineering team's Slack. Reply in Korean (한국어) only. "
+                    + "English is allowed ONLY for error messages, exception/class names, log lines, commands, code, "
+                    + "config keys and standard technical terms (e.g. NullPointerException, HTTP 503, connection pool, OOM). "
+                    + "NEVER write Chinese (Hanzi / 汉字 / 中文) or Japanese, not even a single character, and never switch "
+                    + "language mid-answer. Keep the answer concise, within 500 characters.\n"
+                    + "한국어로만 답하라. 영어는 에러 메시지·예외/클래스명·로그·명령어·코드·설정 키·표준 기술 용어에만 허용한다. "
+                    + "중국어(한자)와 일본어는 한 글자도 쓰지 마라.";
+    // 다시 물을 때 문맥 끝에 붙이는 짧은 재강조.
+    private static final String LANGUAGE_REMINDER =
+            "Reply in Korean only. Do not use any Chinese or Japanese characters. 한국어로만 답하라.";
+    // 두 번째 시도에 최소로 필요한 남은 시간. 이보다 적으면 다시 묻지 않고 재시도 가능한 실패로 돌려보낸다.
+    private static final long MIN_LANGUAGE_RETRY_MS = 3_000;
+    // 한자(CJK 통합·확장 A)와 일본어 가나. 한글·영문·숫자·기호는 해당 없다.
+    private static final java.util.regex.Pattern FOREIGN_SCRIPT =
+            java.util.regex.Pattern.compile("[\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff]");
 
     private final LlmProperties props;
     private final HttpClient httpClient;
@@ -64,13 +79,43 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
     @Override
     public LlmResult chat(List<LlmMessage> messages, long remainingMs) {
+        long start = System.nanoTime();
+        LlmResult first = attempt(messages, remainingMs, false);
+        if (!(first instanceof LlmResult.Success ok) || !containsForeignScript(ok.text())) {
+            return first;
+        }
+        // 한국어·영어만 허용한다. 중국어·일본어가 섞인 답은 Slack에 보내지 않고 한 번 다시 묻는다.
+        long left = remainingMs - elapsedMs(start);
+        if (left < MIN_LANGUAGE_RETRY_MS) {
+            log.warn("LLM 응답 언어 위반, 남은 시간 부족으로 다시 묻지 못함 left_ms={}", left);
+            return new LlmResult.Failed("language_violation", elapsedMs(start), true);
+        }
+        log.warn("LLM 응답에 한자·가나가 섞임 — 언어 재강조 후 한 번 다시 묻는다 left_ms={}", left);
+        LlmResult second = attempt(messages, left, true);
+        long total = elapsedMs(start);
+        if (second instanceof LlmResult.Success ok2) {
+            if (containsForeignScript(ok2.text())) {
+                log.warn("재시도 응답도 언어 위반 — 실패(재시도 가능)로 처리 total_ms={}", total);
+                return new LlmResult.Failed("language_violation", total, true);
+            }
+            return new LlmResult.Success(ok2.text(), total);
+        }
+        return second;
+    }
+
+    /** 한자·가나가 한 글자라도 있으면 true. */
+    static boolean containsForeignScript(String text) {
+        return text != null && FOREIGN_SCRIPT.matcher(text).find();
+    }
+
+    private LlmResult attempt(List<LlmMessage> messages, long remainingMs, boolean reinforceLanguage) {
         if (remainingMs <= 0) {
             return new LlmResult.Failed("남은 기한 없음", 0, false);
         }
         long start = System.nanoTime();
         HttpRequest request;
         try {
-            request = buildRequest(messages, remainingMs);
+            request = buildRequest(messages, remainingMs, reinforceLanguage);
         } catch (Exception e) {
             // 요청 준비 단계에서 예외가 나면 호출자(SlackEventHandler)까지 전파시키지 않는다 — LlmClient 계약은
             // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙). 입력 직렬화 실패는
@@ -238,11 +283,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return new LlmResult.Success(content.asText(), elapsed);
     }
 
-    private HttpRequest buildRequest(List<LlmMessage> messages, long remainingMs) {
+    private HttpRequest buildRequest(List<LlmMessage> messages, long remainingMs, boolean reinforceLanguage) {
         List<Map<String, String>> wire = new java.util.ArrayList<>();
         wire.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
         for (LlmMessage m : messages) {
             wire.add(Map.of("role", m.role(), "content", m.content()));
+        }
+        if (reinforceLanguage) {
+            wire.add(Map.of("role", "system", "content", LANGUAGE_REMINDER));
         }
         Map<String, Object> body = Map.of(
                 "model", props.model(),

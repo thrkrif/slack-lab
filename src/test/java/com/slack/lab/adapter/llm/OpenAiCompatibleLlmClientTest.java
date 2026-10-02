@@ -221,4 +221,70 @@ class OpenAiCompatibleLlmClientTest {
             assertThat(messages.get(3).path("content").asText()).isEqualTo("두 번째 질문");
         }
     }
+
+    // --- 언어 방어: 한국어·영어(기술 용어)만 허용, 중국어·일본어는 보내지 않는다
+
+    static String reply(String content) {
+        return "{\"choices\":[{\"message\":{\"content\":\"" + content + "\"}}]}";
+    }
+
+    @Test
+    void 영어_기술_용어가_섞인_한국어_답은_다시_묻지_않는다() throws Exception {
+        try (var stub = StubOpenAiServer.chatSequence(java.util.List.of(
+                reply("NullPointerException은 null 참조에서 발생합니다. HTTP 503이면 connection pool을 확인하세요.")))) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.chat("질문", 10_000);
+
+            assertThat(result).isInstanceOf(LlmResult.Success.class);
+            assertThat(stub.requestCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void 중국어가_섞이면_언어를_재강조해_한_번_다시_묻고_두_번째_정상_답을_돌려준다() throws Exception {
+        try (var stub = StubOpenAiServer.chatSequence(java.util.List.of(
+                reply("专业的中文翻译如下 메모리 누수를 확인하세요."), reply("힙 덤프를 확인하세요.")))) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.chat("질문", 10_000);
+
+            assertThat(result).isInstanceOf(LlmResult.Success.class);
+            assertThat(((LlmResult.Success) result).text()).isEqualTo("힙 덤프를 확인하세요.");
+            assertThat(stub.requestCount()).isEqualTo(2);
+            assertThat(stub.lastBody()).contains("Do not use any Chinese or Japanese characters");
+        }
+    }
+
+    @Test
+    void 다시_물어도_중국어면_재시도_가능한_실패로_돌려준다() throws Exception {
+        try (var stub = StubOpenAiServer.chatSequence(java.util.List.of(reply("中文回答"), reply("またです")))) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.chat("질문", 10_000);
+
+            assertThat(result).isInstanceOf(LlmResult.Failed.class);
+            var failed = (LlmResult.Failed) result;
+            assertThat(failed.reason()).isEqualTo("language_violation");
+            assertThat(failed.retryable()).isTrue();
+            assertThat(stub.requestCount()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void 남은_시간이_부족하면_다시_묻지_않고_재시도_가능한_실패로_돌려준다() throws Exception {
+        try (var stub = StubOpenAiServer.chatSequence(java.util.List.of(reply("中文回答"), reply("정상")))) {
+            var client = new OpenAiCompatibleLlmClient(props(stub.baseUrl()), new ObjectMapper());
+            var result = client.chat("질문", 2_500);
+
+            assertThat(result).isInstanceOf(LlmResult.Failed.class);
+            assertThat(((LlmResult.Failed) result).reason()).isEqualTo("language_violation");
+            assertThat(stub.requestCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void 한자와_가나만_위반으로_본다() {
+        assertThat(OpenAiCompatibleLlmClient.containsForeignScript("漢字")).isTrue();
+        assertThat(OpenAiCompatibleLlmClient.containsForeignScript("これは")).isTrue();
+        assertThat(OpenAiCompatibleLlmClient.containsForeignScript("한글 English 123 !?")).isFalse();
+        assertThat(OpenAiCompatibleLlmClient.containsForeignScript(null)).isFalse();
+    }
 }
