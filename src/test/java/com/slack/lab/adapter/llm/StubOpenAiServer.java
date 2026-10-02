@@ -23,6 +23,23 @@ final class StubOpenAiServer implements AutoCloseable {
         this.server = server;
     }
 
+    /** 요청마다 목록의 다음 응답을 돌려준다(마지막 응답은 반복). 받은 요청 수는 {@link #requestCount()}. */
+    static StubOpenAiServer chatSequence(java.util.List<String> bodies) throws IOException {
+        java.util.concurrent.atomic.AtomicInteger i = new java.util.concurrent.atomic.AtomicInteger();
+        StubOpenAiServer[] self = new StubOpenAiServer[1];
+        self[0] = start("/v1/chat/completions", ex -> {
+            self[0].requests.incrementAndGet();
+            return bodies.get(Math.min(i.getAndIncrement(), bodies.size() - 1));
+        }, 200);
+        return self[0];
+    }
+
+    private final java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+
+    int requestCount() {
+        return requests.get();
+    }
+
     static StubOpenAiServer chatRespondsWith(String json, int statusCode) throws IOException {
         return start("/v1/chat/completions", ex -> json, statusCode);
     }
