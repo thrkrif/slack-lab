@@ -1,6 +1,15 @@
 spring:
   application:
     name: slack-lab
+  # Postgres는 어댑터가 DataSource를 직접 만든다(M20~M22). 자동 구성이 켜지면 접속 정보가 없는 역할(수신·복구)도
+  # DataSource 생성에 실패한다.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration
   data:
     redis:
       host: ${REDIS_HOST:localhost}
