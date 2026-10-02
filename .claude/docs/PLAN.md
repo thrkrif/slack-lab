@@ -89,7 +89,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **2단계 완료(`v0.2.0`, 2026-09-30).** 다음은 3단계(RAG: 임베딩·Vector DB) 계획 수립 — 착수 전에 `PLAN.md`에 3단계 절을 새로 쓴다. 사람이 실제로 Slack에서 봇을 멘션하는 경로는 사용자가 직접 확인했다(2026-09-30).
+- **2단계 완료(`v0.2.0`, 2026-09-30).** 2026-10-02 사용자와 합의해 **ADR-9**로 방향을 바꿨다: 오픈소스 self-hosted 도구, RabbitMQ + Postgres(Redis 제거), 포트/어댑터(DIP), 알람은 원천에서 직접 수신. 다음은 **M19~M23(기반 전환)** 후 3단계(RAG). 결과 불명은 자동 재발신 금지(규칙 11) 유지 + 읽기 전용 자동 조회만 추가. 사람이 실제로 Slack에서 봇을 멘션하는 경로는 사용자가 직접 확인했다(2026-09-30).
 - M15·M16 산출물: `ReactionConsumer`(worker)·`publish.lua`, `SlackThreadContext`. LLM 클라이언트의 간헐 실패는 원인(기한 취소가 `ExecutionException`으로 도착)을 찾아 M15에서 고쳤다.
 - M14 산출물: `RecoveryStore`(state)·`RecoveryService`/`RecoveryRunner`(recovery)·`SlackThreadClient`(slack)·`ReplyMetadata`, `state.lua`의 `resolve`·`reprocess` op. CLI는 `scripts/recovery <list|check|resolve-completed|reprocess <id> confirm-unsent|close>`(부트 jar 실행), 잔존물 검사는 `scripts/p1-residue-check`.
 - 실험 재현용 합성 서명 요청은 세션 스크래치 스크립트였다(커밋 안 함). 필요하면 EXPERIMENT-LOG §11의 절차를 따라 다시 만든다. 실제 스레드 조회에는 실제 부모 메시지(`chat.postMessage`)의 ts가 필요하다.
@@ -305,6 +305,17 @@
 - **R(복구)**: R1 큐 저장 후 수신 컨테이너 `docker kill -s KILL`, R2 처리 중 워커 컨테이너 kill, R3 발신 직후 halt로 B3·B4·B5를 판정한다. 성능 측정과 분리하고, ngrok은 켜 둔 채로 진행한다.
 - 결과는 `EXPERIMENT-LOG.md`에 남긴다. **"검증 수행 완료"와 "P1 합격"을 구분해 적는다.** 합격한 항목만 PRD §6 2단계 체크박스에 체크한다. 미달이면 원인 단계(큐 대기·LLM·발신·429)를 특정하고 개선안 또는 목표 변경안을 사용자에게 올린다.
 - **완료**: 세 실험을 모두 수행하고 판정을 기록한다. 2단계 완료는 합격 이후에만 가능하다.
+
+### 2단계 후속 — 기반 전환 (ADR-9, 2026-10-02)
+
+3단계(RAG) 전에 기반을 먼저 바꾼다. 3~5단계가 Redis 구현 위에 쌓이면 교체 비용이 커진다. 프로토콜과 실험 설계는 승계하고, Redis/Lua 구현만 어댑터로 교체한다. 각 마일스톤은 기존과 같은 규칙(완료 = 외부 왕복 + 오류 유도, 리뷰 1회 이상)을 따른다.
+
+- [ ] **M19 포트/어댑터 분리 (DIP)**: 코어 포트 정의 — 메시지 큐(발행/소비), 작업 상태 저장소(선점·임대·종료·미해결 목록), LLM, 임베딩, 벡터 저장소, 채팅 알림, 알람 입력. 현재 Redis·Slack 구현을 어댑터 패키지로 옮기되 동작은 그대로 둔다. 코어→어댑터 import 금지 아키텍처 테스트 추가. **완료**: 기존 테스트 전부 통과 + 새 테스트로 코어가 어댑터를 모름을 확인.
+- [ ] **M20 Postgres 작업 상태 어댑터**: 선점 결과표를 조건부 UPDATE/INSERT ON CONFLICT로 이식, 임대 갱신, 7일 보존 정리, 미해결 목록 조회. Testcontainers로 결과표 각 행, 동시 N 선점 1승, 부분 실패 후 재실행, 24시간 창, 수동 승인(1회 소비)을 다시 검증. **선점 지연 p95를 측정해 기록**한다(수신 경로 밖이어도 기록).
+- [ ] **M21 RabbitMQ 큐 어댑터**: publisher confirm 뒤 200, durable quorum queue, 수동 ack, 전달 횟수 제한 + DLQ, 지연 재시도(TTL 큐 또는 지연 플러그인 중 하나를 측정해 선택), prefetch 1과 소비자 타임아웃을 LLM 처리 시간(최대 50초)에 맞춤. **완료**: 수신 kill·워커 kill에서 유실 0, 재전달이 Slack 재발신으로 이어지지 않음.
+- [ ] **M22 Redis 제거와 복구 CLI 전환**: compose를 RabbitMQ + Postgres로 교체, 복구 CLI(list/check/resolve/reprocess/close)를 Postgres 목록 기반으로, 결과 불명 시 스레드 읽기 전용 자동 조회(발견 시 완료 처리, 미발견은 결과 불명 유지, 자동 재발신 없음). residue-check를 새 저장소에 맞게 재작성. P·D·R 실험을 다시 수행해 B16 재판정.
+- [ ] **M23 알람 입력 어댑터**: 전용 엔드포인트(시크릿 인증), CloudWatch(SNS) 어댑터, "같은 알람" 키(장애 식별자 + 발생 회차)로 중복 억제, 해결 뒤 재발은 새 건. 장애 한 건에 대표 리포트 하나. 반응·스레드 문맥은 알람 스레드에서도 동작.
+- 3단계 제약(착수 시 PLAN에 반영): LLM·임베딩 엔드포인트 스위치(기본 사내·로컬), RAG on/off(꺼도 동작), 벡터 저장은 같은 Postgres(pgvector).
 
 ## 4. 리스크와 대응
 
