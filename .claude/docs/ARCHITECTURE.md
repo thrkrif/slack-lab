@@ -116,6 +116,31 @@ flowchart LR
 - 새 설정: `queue.*`·`state.*`·`retry.*`·`worker.concurrency`(기본 1, M9). `StartupInvariants`가 기동할 때 조합 불변식을 검사한다: 기한 합 ≤ 총 기한, 갱신 ≤ 임대/3, 회수 유휴 ≥ 총 기한 + 임대, 재시도 대기 수 ≥ 재시도 횟수. 위반하면 기동이 실패한다.
 - `/health`는 Redis ping 결과를 포함하고, Redis가 없으면 503을 준다.
 
+### 패키지 구조 (M19, ADR-9 포트/어댑터)
+
+```
+com.slack.lab
+├─ core/                      코어 — 인프라를 모른다 (ArchitectureTest가 강제)
+│  ├─ model/                  값 객체·결과 타입 (SlackMessageEvent, HandlingResult, ClaimOutcome, ...)
+│  ├─ port/                   인터페이스: EventPublisher, ProcessingStateStore, QueueDelivery, ChatNotifier,
+│  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe,
+│  │                          EmbeddingClient·VectorStore (3단계 자리만 잡음)
+│  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
+│                             RecoveryService, SlackThreadContext
+├─ adapter/                   구현체 — 서로를 모른다
+│  ├─ redis/                  RedisEventPublisher, RedisStreamConsumer, RedisProcessingStateStore, RedisRecoveryStore,
+│  │                          RetryScheduler, ReactionConsumer, BacklogReporter, RedisHealthProbe  (M22에서 대체)
+│  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
+│  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
+│  ├─ cli/                    RecoveryRunner
+│  └─ web/                    HealthController
+└─ config/                    역할(app.role)·설정 속성
+```
+
+의존 규칙(`ArchitectureTest`): ① `core`는 `adapter`를 import하지 않는다. ② `core`는 Redis·HTTP·JSON·JDBC·AMQP 같은 인프라 라이브러리를 import하지 않는다(규칙 2를 코어 전체로 넓힌 것). ③ `core`는 `config`에서 자기가 실제로 쓰는 설정 값(`Processing/Experiment/Llm/Slack/State/Retry/Worker/ContextProperties`)과 역할 표시만 참조한다(브로커 전용 `QueueProperties` 등은 금지). ④ `core.model`은 JDK와 모델만, `core.port`는 모델만 안다. ⑤ 어댑터끼리는 서로를 모른다. 코어에 Redis import를 넣으면 이 테스트가 실패함을 확인했다(변이 검사).
+
+메시지 확정은 코어의 책임이다: 확정하면 `QueueDelivery.acknowledge()`, 확정하지 못했거나 지금 처리할 수 없으면 `QueueDelivery.defer()`를 부른다("ack하지 않으면 브로커가 알아서 다시 준다"는 가정은 하지 않는다 — RabbitMQ는 주지 않는다). Redis 어댑터는 `defer()`가 no-op이고 pending 회수가 맡는다. M19 시점의 타협: `acknowledge()`는 Redis 어댑터에서는 상태 저장소의 Lua(`finalize`)가 이미 ACK를 했으므로 이 호출은 멱등 no-op이다. 상태 저장소와 큐가 분리되는 M20·M21에서 이 호출이 실제 확정이 된다. `ProcessingStateStore`의 `deliveryToken`도 지금은 Redis 스트림 항목 ID다.
+
 ### 절대 경계
 
 **`SlackEventHandler`는 HTTP를 모른다.** `HttpServletRequest`도, 응답 코드도 들어오지 않는다.

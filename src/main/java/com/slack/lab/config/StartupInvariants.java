@@ -1,10 +1,5 @@
 package com.slack.lab.config;
 
-import com.slack.lab.llm.LlmProperties;
-import com.slack.lab.queue.QueueProperties;
-import com.slack.lab.slack.SlackProperties;
-import com.slack.lab.state.StateProperties;
-import com.slack.lab.worker.RetryProperties;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.stereotype.Component;

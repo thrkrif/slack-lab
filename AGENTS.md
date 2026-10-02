@@ -18,6 +18,7 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 2. **`SlackEventHandler`는 HTTP를 모른다.** `HttpServletRequest`·응답 코드가 들어오면 안 된다.
    2단계에서도 HTTP·큐 ACK와 분리한다. 워커 연동을 위한 결과 타입·호출부 변경은 허용한다.
    `SENDING` 기록을 위해 상태 저장소 **인터페이스**에 의존하는 것은 허용하며, `jakarta.servlet`·`HttpStatus` import 여부로 검사한다.
+   M19부터 `core/` 패키지 전체(모델·포트·서비스)가 어댑터와 인프라 라이브러리를 모르며, `ArchitectureTest`가 빌드에서 강제한다.
 3. **LLM 벤더를 코드에 박지 않는다.** OpenAI 호환 스키마로만 호출하고, 교체는 `llm.base-url`로 한다.
 4. **`ARCHITECTURE.md` §8의 함정 10가지를 처음부터 피한다.** 특히 1·2·3번(dedup 확정 시점,
    발신 실패 누출, 조용한 실패)은 1단계에서 바로 지킨다. 구체적인 단계별 보장 범위는 PRD §5를 따른다.
