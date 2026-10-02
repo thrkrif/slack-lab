@@ -780,3 +780,34 @@ B11(24시간 자동 차단·수동 승인 1회)은 §11에서 실측했고, 이�
 
 **한계(합격 주장의 범위)**: (1) 요청이 합성이라 **사람이 실제로 멘션하는 Slack→ngrok→수신 구간은 M9~M18 어디서도 검증하지 않았다** — "수신 p95"는 서버 HTTP 진입부터 응답 완료까지이며 ngrok·Slack 구간은 포함하지 않는다. (2) 표본이 작다(순차 20·버스트 10). 버스트 수신 p95는 171ms로 한도(200ms)에 근접해 여유가 크지 않고, M17 소규모 버스트에서는 p50 464ms까지 나온 적이 있다(부하 생성 스크립트·Ollama와 같은 장비 경합 후보, 원인 미규명). 각 실험은 한 번씩만 실행했다. (3) 중복 억제 보장 범위는 `COMPLETED` 보존 7일이다(PRD §5) — 7일 뒤 같은 event_id가 다시 오면 새로 실행된다. (4) 죽은 워커 회수에는 최대 약 100초가 걸린다(R2 153초). (5) 코드 리뷰는 M9~M17 각 마일스톤에서 거쳤고, M18의 산출물은 부하 생성기(`scripts/p1-load`)와 문서뿐이라 별도 리뷰를 하지 않았다.
 
+## 16. 2단계 후속 M19 포트/어댑터 분리 검증 (2026-10-02)
+
+목적: 큐·저장소·LLM·채팅 서비스를 인터페이스(포트) 뒤로 옮겨 코어가 구현체를 모르게 한다(ADR-9). **동작은 바꾸지 않는다.**
+
+| 확인 | 결과 |
+|---|---|
+| 구조 | `core/{model,port,service}` + `adapter/{redis,slack,llm,cli,web}` (ARCHITECTURE "패키지 구조"). `EventWorker`를 코어 `EventProcessor`(선점→처리→확정→ACK)와 `RedisStreamConsumer`(읽기·회수)로 분리 |
+| 회귀 | 기존 232건 + `ArchitectureTest` 5건 + `EventProcessorTest` 11건, 전체 249건 통과 |
+| 컨테이너 스모크 | 새 이미지로 `docker compose --profile app up`(수신·워커·반응·Redis), `/health` `{"status":"UP","redis":"UP"}`, `scripts/p1-load warmup` 2건 → 답글 2개(유실·중복 0), `scripts/recovery list` 정상, `p1-residue-check` OK. 워밍업 직후라 `llm_ms=11065`·`send_ms=2710`로 느렸지만 장시간 쉬다 처음 호출한 모델 적재 지연이다(코드 동작과 무관) |
+| 아키텍처 규칙 | 코어→어댑터 금지, 코어의 인프라 라이브러리(Redis·Lettuce·Servlet·HTTP·Jackson·AMQP·JDBC·`javax.sql`·`HttpURLConnection` 등) 금지, 코어는 `config`의 `…Properties`·역할 표시만 참조, `core.model`은 JDK만, `core.port`는 모델만, 어댑터끼리 금지 |
+| 변이 검사 | 코어에 `StringRedisTemplate`을 넣으면, `javax.sql.DataSource` 필드를 넣으면, 코어가 `config`의 비설정 클래스를 참조하면 각각 `ArchitectureTest`가 실패. 원복하면 통과 |
+
+### 16.1 리뷰 대응 (codex 1회전 REVISE: MAJOR 2·MINOR 3)
+
+- **MAJOR-1(상태 저장소 포트에 Redis식 계약이 샘)**: `ProcessingStateStore` Javadoc의 계약을 "상태를 기록하고 확정 여부만 알림, ACK는 호출자(코어)가 `QueueDelivery`로"로 고쳤다. 입력을 보존해야 하는 전이(결과 불명·DLQ·재시도)를 Postgres가 하려면 입력 본문이 필요하므로 `ClaimRequest`에 `input`(이벤트 전체)을 추가했다. Redis 구현은 스트림 항목이 입력 원본이라 쓰지 않는다. `deliveryToken`은 그런 구현이 쓰는 불투명 값이다. **`scheduleRetry`는 아직 Redis 방식(상태 저장소가 예약 목록까지 관리)이다** — 브로커가 지연 재발행을 직접 지원하는 M21에서 큐 포트의 지연 발행으로 옮기고 상태 저장소에는 전이만 남긴다(Javadoc과 ARCHITECTURE에 표시).
+- **MAJOR-2(아키텍처 테스트 허점)**: 금지 목록에 `javax.sql`·`HttpURLConnection`·`jms`·`kafka`·AWS SDK를 추가하고 `config` 참조를 설정 값·역할 표시로 제한했다. 변이 검사로 확인.
+- **MINOR-3(확정 뒤 추가 ACK 실패가 지표를 지움)**: `EventProcessor`가 ACK 예외를 잡아 경고만 남기고 지표 줄은 항상 남긴다. 상태는 이미 기록됐으므로 재전달 때 선점 결과표가 종료로 판정한다.
+- MINOR-4(증빙 참조 없음)는 이 절로 해소, MINOR-5(미사용 import·`ACKDEL` 상수)는 전체 정리.
+- **알려진 한계**: Redis 어댑터에서 `acknowledge()`는 상태 저장소의 Lua가 이미 ACK한 뒤 한 번 더 도는 멱등 호출이라 Redis 왕복이 한 번 늘어난다(M22에서 Redis 제거 시 사라짐). 사람이 읽기 쉽게 하려고 정리하지 않은 임시 타협이다.
+
+### 16.2 2회전 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 1·MINOR 6, 동작 보존은 통과)
+
+- **MAJOR-1(`QueueDelivery`가 "ACK하지 않으면 브로커가 다시 전달한다"는 Redis 가정을 계약으로 박음)**: RabbitMQ는 채널이 살아 있는 동안 ack하지 않은 메시지를 다시 주지 않고 prefetch 슬롯만 차지한다(consumer_timeout 기본 30분). `QueueDelivery.defer()`를 추가해, 코어가 확정하지 못했거나 지금 처리할 수 없는 모든 분기(BUSY·NoInput·선점 예외·발신 게이트 거절·종료 기록 거절/예외)에서 놓아주는 방법을 어댑터에 위임한다. Redis 구현은 no-op(pending+회수가 그 역할)이고 RabbitMQ 구현은 지연을 둔 재발행이어야 한다(M21 등록). RabbitMQ 어댑터 지침(같은 tag 이중 ack 시 채널 종료, 원래 채널로만 ack, `process`를 부른 스레드에서만 호출)을 Javadoc에 명시.
+- **MINOR-1**: `claim()` Javadoc을 추가하고 `ClaimOutcome` 주석을 브로커 중립으로 바꿨다. `Settled` 전에 필요한 보존은 커밋까지 끝나야 하고, 보존할 입력이 없으면 `NoInput`.
+- **MINOR-2(M20 시점에 Postgres 상태 + Redis 큐 배선에서 재시도 재투입 주체가 없음)**: PLAN M20에 "Postgres 상태 어댑터는 M21 전까지 운영 배선하지 않고 테스트 전용"으로 명시하고, M21에서 재투입을 코어(`RetryPolicy`)가 큐 포트 지연 발행으로 하는 것으로 정했다.
+- **MINOR-3(코어의 ACK 책임을 지키는 테스트 없음)**: `EventProcessorTest` 11건. 가짜 저장소·가짜 전달로 확정/놓아주기 분기, `ClaimRequest.input` 채움, ACK 예외 격리, 종료 기록 예외 격리를 검증. `acknowledgeQuietly` 호출을 지우는 변이를 넣으면 실패하고 원복하면 통과.
+- **MINOR-5(알람 입력 포트 없음)**: `AlertEvent`·`AlertNormalizer` 자리 포트 추가(M23에서 구체화).
+- **MINOR-6(종료 기록이 예외로 끝나면 지표 줄 없음)**: `finalizeResult` 예외를 잡아 `finalized=false`로 지표를 남기고 놓아준다.
+- LOW: `Enqueued(streamId)`→`messageId`, 통합 테스트 이름 `EventWorkerTest`→`RedisStreamConsumerIT`, `RedisStreamConsumer` 낡은 주석·중복 Javadoc 정리(회수 스케줄러는 스레드 1개), `ArchitectureTest` 금지 목록 확대(`redis.clients`·HTTP 클라이언트·JPA·netty·`URL`·`Socket`)와 `config` 허용을 **코어가 실제 쓰는 설정 값 이름 목록**으로 제한(브로커 전용 `QueueProperties`·`ReactionProperties` 차단).
+- 정정/한계: 로그 키 `stream_id=`가 `delivery=`로 바뀌었다(스크립트가 grep하는 곳은 없음). Redis 어댑터의 추가 ACK 왕복 한 번(약 1ms)이 `answer_ms`에 더해진다.
+
