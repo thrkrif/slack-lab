@@ -647,4 +647,61 @@ class PostgresProcessingStateStoreTest {
 
         assertThat(store.claim(req("R5"))).isEqualTo(new Settled(Reason.UNKNOWN));
     }
+
+    // --- 재시도 발신함 (M21)
+
+    @Test
+    void 도래한_재시도만_돌려주고_반영하면_창이_지날_때까지_건너뛴다() {
+        Claimed c = claimOk(req("O1"));
+        store.scheduleRetry("O1", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        Claimed later = claimOk(req("O2"));
+        store.scheduleRetry("O2", later.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+
+        var due = store.pollDueRetries(10, 60_000);
+        assertThat(due).extracting(d -> d.event().eventId()).containsExactly("O1");
+        assertThat(due.get(0).gen()).isEqualTo(1);
+        assertThat(due.get(0).event().text()).isEqualTo("질문 본문");
+
+        store.markRelayed("O1", 1);
+        assertThat(store.pollDueRetries(10, 60_000)).isEmpty();
+        assertThat(store.pollDueRetries(10, 0)).as("창(0ms)이 지나면 선점되지 않은 건은 다시 돌려준다").hasSize(1);
+    }
+
+    @Test
+    void 이미_선점돼_진행_중이거나_다른_세대인_재시도는_돌려주지_않는다() {
+        Claimed c = claimOk(req("O3"));
+        store.scheduleRetry("O3", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        claimOk(req("O3", 1, System.currentTimeMillis())); // 재투입 메시지가 선점됐다
+
+        assertThat(store.pollDueRetries(10, 0)).isEmpty();
+    }
+
+    @Test
+    void 깨진_재시도_입력은_폴링을_막지_않고_DLQ로_격리된다() {
+        Claimed c = claimOk(req("O4"));
+        store.scheduleRetry("O4", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        jdbc.update("UPDATE preserved_input SET payload = '깨진{' WHERE event_id = 'O4'");
+        Claimed ok = claimOk(req("O5"));
+        store.scheduleRetry("O5", ok.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+
+        var due = store.pollDueRetries(10, 0);
+
+        assertThat(due).extracting(d -> d.event().eventId()).containsExactly("O5");
+        assertThat(listOf("O4")).isEqualTo("dlq");
+    }
+
+    @Test
+    void 재예약하면_반영_기록이_초기화된다() {
+        Claimed c = claimOk(req("O6"));
+        store.scheduleRetry("O6", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.markRelayed("O6", 1);
+        assertThat(jdbc.queryForObject("SELECT relayed_at FROM preserved_input WHERE event_id = 'O6'", Long.class))
+                .isNotNull();
+        // 재투입이 선점돼 다시 실패해 다음 세대로 재예약된다
+        Claimed again = claimOk(req("O6", 1, System.currentTimeMillis()));
+        store.scheduleRetry("O6", again.attemptId(), "t", 2, System.currentTimeMillis() - 60_000, 2, "x");
+
+        assertThat(jdbc.queryForObject("SELECT relayed_at FROM preserved_input WHERE event_id = 'O6'", Long.class))
+                .as("gen+2 재예약이 gen+1 반영 기록에 가려지지 않는다").isNull();
+    }
 }

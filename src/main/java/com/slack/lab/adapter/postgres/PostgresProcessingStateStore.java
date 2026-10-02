@@ -6,6 +6,7 @@ import com.slack.lab.core.model.ClaimOutcome;
 import com.slack.lab.core.model.ClaimRequest;
 import com.slack.lab.core.model.Finalization;
 import com.slack.lab.core.port.ProcessingStateStore;
+import com.slack.lab.core.port.RetryOutbox;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -24,7 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <p>ACK는 이 저장소의 일이 아니다(포트 계약). 입력은 선점 때 받은 {@code ClaimRequest.input}을 상태 행에 보관했다가
  * 결과 불명·DLQ·재시도 전이에서 보존한다. 아직 운영에 배선하지 않는다 — 재시도 재투입은 M21(큐 어댑터)과 함께 한다.
  */
-public class PostgresProcessingStateStore implements ProcessingStateStore {
+public class PostgresProcessingStateStore implements ProcessingStateStore, RetryOutbox {
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
@@ -108,7 +109,7 @@ public class PostgresProcessingStateStore implements ProcessingStateStore {
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (event_id) DO UPDATE SET list_name = EXCLUDED.list_name, reason = EXCLUDED.reason,
                     gen = EXCLUDED.gen, due_at = EXCLUDED.due_at, payload = EXCLUDED.payload,
-                    preserved_at = EXCLUDED.preserved_at
+                    preserved_at = EXCLUDED.preserved_at, relayed_at = NULL
                 WHERE ? OR preserved_input.list_name = EXCLUDED.list_name""",
                 eventId, list, reason, gen, dueAt, payload, now, overwriteOtherList);
     }
@@ -347,6 +348,42 @@ public class PostgresProcessingStateStore implements ProcessingStateStore {
                     nextGen, retryAtMs, retries, nz(stage), now, eventId);
             return true;
         }));
+    }
+
+    // ---- 재시도 발신함 (M21)
+
+    @Override
+    public List<DueRetry> pollDueRetries(int limit, long republishAfterMs) {
+        long now = now();
+        // 상태가 아직 그 세대의 RETRY_WAIT인 것만: 이미 선점돼 진행 중이거나 끝난 건은 재투입할 이유가 없다
+        // (retry_scheduler.lua가 XADD 전에 상태를 확인하던 것과 같은 이유).
+        record Raw(String eventId, long gen, String payload) {}
+        List<Raw> rows = jdbc.query("""
+                SELECT p.event_id, p.gen, p.payload
+                FROM preserved_input p JOIN processing_state s ON s.event_id = p.event_id
+                WHERE p.list_name = 'retry' AND p.due_at <= ? AND s.state = 'RETRY_WAIT' AND s.gen = p.gen
+                  AND (p.relayed_at IS NULL OR p.relayed_at <= ?)
+                ORDER BY p.due_at LIMIT ?""",
+                (rs, i) -> new Raw(rs.getString("event_id"), rs.getLong("gen"), rs.getString("payload")),
+                now, now - republishAfterMs, limit);
+        List<DueRetry> out = new java.util.ArrayList<>();
+        for (Raw r : rows) {
+            try {
+                out.add(new DueRetry(PreservedInputJson.readEvent(mapper, r.payload), r.gen,
+                        PreservedInputJson.readReceivedAt(mapper, r.payload)));
+            } catch (RuntimeException e) {
+                // 깨진 입력 하나가 폴링 전체를 막지 않게 DLQ로 격리한다(사람이 복구 목록에서 보고 처리).
+                jdbc.update("UPDATE preserved_input SET list_name = 'dlq', reason = 'corrupt_payload' WHERE event_id = ?",
+                        r.eventId);
+            }
+        }
+        return out;
+    }
+
+    @Override
+    public void markRelayed(String eventId, long gen) {
+        jdbc.update("UPDATE preserved_input SET relayed_at = ? WHERE event_id = ? AND list_name = 'retry' AND gen = ?",
+                now(), eventId, gen);
     }
 
     // ---- 운영 보조 (M22에서 스케줄러·복구 CLI가 쓴다)
