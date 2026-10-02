@@ -25,6 +25,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     // 2단계 큐(Streams)·공유 처리 상태 (ARCHITECTURE ADR-8)
     implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    // M20: 작업 상태 저장소(Postgres). 연결 풀·마이그레이션은 어댑터가 직접 구성한다(전역 자동 구성은 끈다)
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
 
     // 한쪽만 선언하면 컴파일이 실패한다 (ARCHITECTURE §7)
@@ -36,6 +41,7 @@ dependencies {
     testImplementation 'com.tngtech.archunit:archunit-junit5:1.4.1'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 

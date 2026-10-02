@@ -823,3 +823,36 @@ B11(24시간 자동 차단·수동 승인 1회)은 §11에서 실측했고, 이�
 
 한계: 한자를 한 글자라도 쓰면 위반이므로 한국어 답변에 한자어 병기(예: `漢字`)가 정상적으로 들어가도 막힌다(재질문 후 실패하면 안내로 간다). 방어는 한자·가나만 보며, 다른 외국 문자(키릴 등)는 보지 않는다.
 
+## 18. 2단계 후속 M20 Postgres 작업 상태 어댑터 검증 (2026-10-02)
+
+목적: Redis 구현(`state.lua`)의 선점 결과표·임대·세대·보존을 같은 의미로 Postgres에 옮긴다(ADR-9). **운영에는 아직 배선하지 않는다** — 재시도 재투입은 M21(큐 어댑터)에서 코어가 큐 포트의 지연 발행으로 하기로 했다.
+
+구성: Flyway 마이그레이션 `V1__processing_state.sql`(`processing_state`, `preserved_input`), `PostgresProcessingStateStore`(JdbcTemplate + 트랜잭션), 전역 DataSource 자동 구성은 끄고 어댑터가 직접 만든다. 이벤트 단위 어드바이저리 락(`pg_advisory_xact_lock`)으로 같은 이벤트의 동시 전이를 직렬화한다(첫 선점처럼 행이 아직 없는 경합도 같은 락). "지금"은 DB 시계다(Redis `TIME`과 같은 이유).
+
+Redis 구현과 달라진 점
+- 한 연산이 한 트랜잭션이라 "검증 → 멱등 보존 → 상태 → ACK" 순서 규율과 `fail_after` 부분 실패 복구가 필요 없다. 중간 실패는 전부 롤백된다.
+- 보존 입력은 이벤트당 한 행(`list_name`: dlq·recovery·retry)이라 Redis에서 옛 목록 멤버십이 남던 틈이 없다.
+- 선점 때 받은 `ClaimRequest.input`을 상태 행에 보관해 두었다가 결과 불명·DLQ·재시도 전이에서 보존한다(포트 계약, M19).
+- ACK는 이 저장소의 일이 아니다.
+
+| 검증 | 결과 |
+|---|---|
+| 선점 결과표 | 새 이벤트, 소유자 아닌 전이 거절, 완료·닫힘 재전달(DONE), 같은 세대 UNKNOWN/DEAD 재전달(멱등 재보존)·이전 세대(보존 없음), 이전 세대·예약 전 재시도(STALE), 발신 중 임대 만료(UNKNOWN+복구 목록), 늦은 UNKNOWN→COMPLETED(보존 삭제), 임대 만료 후 재선점과 이전 소유자 거절, 갱신, 24시간 초과(DLQ), 우선순위 조합(만료 SENDING+24h→UNKNOWN, COMPLETED+24h→DONE, 이전 세대+24h→STALE), 수동 승인 1회 소비와 소실 시 DEAD(B11), ANOMALY, 재시도 예약·도래 후 선점·횟수 상속, 재시도 보존이 다음 세대 번호로 기록, 완료 시 보존 정리, 더 최근 세대 보존본 유지 |
+| 동시성 | 10 스레드 동시 선점 → 1승·9 BUSY |
+| 입력 보존 계약 | 보존이 필요한데 입력이 없으면 `NoInput`이고 아무것도 쓰지 않음, 입력 없이 선점하면 보존이 필요한 종료 전이 거절, 허용되지 않는 전이 거절, 자가 재완료 멱등 |
+| 보존 기간 | 만료된 완료 건만 삭제, 미해결(UNKNOWN)은 유지 |
+| 원자성 | SQL 중간에 실패를 주입(`finalize`·`claim`)하면 상태와 보존이 모두 원래대로이고, 같은 호출을 다시 하면 정상 종료 |
+| **선점 지연** | 순차 200회 `claim` p50 **1ms**, p95 **1ms**, max 4ms (Testcontainers `postgres:16-alpine`, 로컬 컨테이너·단일 연결, 개발 노트북 — PRD §5 성능 판정 환경이 아니다). 수신 경로 밖(워커)이라 p95 200ms 목표와 무관하며 Redis(`XADD+WAITAOF` p95 3ms)와 같은 자릿수다 |
+| 전체 빌드 | 테스트 36건 추가(리뷰 대응 포함), 전체 통과 |
+
+발견·주의: (1) 임대 만료를 JVM `sleep`으로 기다리는 테스트는 Docker VM 시계와 어긋나면 흔들렸다(전체 빌드 중 1회 실패). 임대 만료는 DB에서 `lease_until`을 직접 과거로 돌려 결정적으로 만들고, 실제 시간 경과 만료는 한 테스트만 여유 있게 남겼다. **운영에서도 DB 시계가 판정 기준이므로 워커와 DB 시계가 크게 어긋나도 임대 판정은 DB 기준으로 일관된다.** (2) 스키마는 Flyway로 관리하며, 전역 자동 구성을 끄지 않으면 접속 정보가 없는 수신·복구 역할이 DataSource 생성에 실패한다.
+
+한계: 미해결 목록 조회·`resolve`·`reprocess`·`close`는 아직 Redis 복구 저장소에만 있다(M22에서 `RecoveryStore`의 Postgres 구현). 재시도 재투입(스케줄러)도 M21.
+
+### 18.1 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 1·MINOR 7·LOW 6)
+
+- **MAJOR(B18 회귀: 종료된 건의 입력 본문이 상태 행에 남음)**: Redis는 상태 해시에 본문이 없고 `XACKDEL`이 스트림 항목을 지웠지만, Postgres는 `processing_state.input`에 선점 입력을 들고 있다가 종료 뒤에도 남겨 완료 건은 7일간 질문 본문이 DB에 있었다. 모든 종료 전이(`finalize`, 행 4·4'·7)에서 `input = NULL`로 비운다 — 본문은 `preserved_input`에만 있다. 테스트가 COMPLETED·UNKNOWN·DEAD(finalize)·UNKNOWN(행 4)·DEAD(행 7)·DEAD(행 4')에서 `input IS NULL`을 확인한다. `finalize`의 `input = NULL`을 지우는 변이를 넣으면 실패하고 원복하면 통과.
+- **MINOR**: ① 이상 메시지(행 1)가 재시도 예약 보존본을 덮어 이벤트가 재시도 목록에서 사라지는 문제 → 이상 경로는 다른 목록의 보존본을 덮지 않는다(테스트). ② 락 대기 무한 → `SET LOCAL lock_timeout`·트랜잭션 타임아웃. ③ READ COMMITTED 의존 → 명시하고 이유를 주석으로. ④ 테스트 훅의 공유 가변 상태 → 스레드별 카운터. ⑤ 시간 의존 테스트 → 재시도 도래는 DB에서 `retry_at`을 직접 0으로, 임대 만료는 `expireLease`로 결정적으로 만들고 실제 시간 경과 케이스(발신 중 만료 → UNKNOWN)를 하나 남김. ⑥ 2'의 DEAD 경로·B11 보강(승인 세대 불일치는 소비·수동 실행으로 보지 않음, 24시간 뒤 승인 실행 소실도 DEAD) 테스트 추가.
+- **LOW**: 행 8이 `stage`를 지우던 것을 이전 값 유지(Lua와 같게), `(Long) rs.getObject` → `getObject(col, Long.class)`. 입력 없는 선점은 `NoInput`으로 입구에서 막는다(입력 없이 실행하면 종료 전이가 보존할 입력이 없어 임대 만료 → 재선점을 24시간 창이 닫힐 때까지 되풀이한다).
+- **알려진 한계(수정하지 않음)**: `application.yml`의 `spring.autoconfigure.exclude`는 같은 키를 설정하는 프로필·환경변수가 있으면 목록 전체가 교체돼 DataSource 자동 구성이 되살아난다. `purgeExpired`는 상태 행만 지우므로 미래 세대 이상 보존본이 고아로 남을 수 있다(Redis도 같음, M22에서 정리). `retryAtMs`는 호출자의 JVM 시계로 계산되므로 "시간은 항상 DB 시계"는 임대·창 판정에 한한다(M21에서 지연 길이를 넘기는 방식을 검토).
+
