@@ -61,11 +61,13 @@ Slack 이벤트를 트리거로 AI가 답하는 구조를 단계적으로 만드
 
 ```bash
 ./gradlew build                                   # 컴파일 + 테스트
+# 실행 방식: 평소 개발은 인프라만 컨테이너(아래 rabbitmq·postgres)로 올리고 Spring은 호스트 bootRun으로 돌린다(증분 컴파일이라 빠르다).
+# 마일스톤 끝의 통합 검증·실험과 사용자 안내용 기본 실행법은 전체 스택(--profile app)이다. 이미지 재빌드는 느려 반복 개발에는 쓰지 않는다.
 set -a && source .env && set +a && ./gradlew bootRun
 ngrok http 8080                                   # 별도 터미널
 ollama serve                                      # 별도 터미널 (Ollama는 호스트에서 실행, 컨테이너 X)
 docker compose up -d rabbitmq postgres            # 큐(RabbitMQ)·작업 상태(Postgres). .env에 POSTGRES_PASSWORD 필요
-docker compose --profile app up --build           # 2단계: 수신·워커·반응 컨테이너 (호스트 Ollama 사용)
+docker compose --profile app up --build           # 전체 스택: 수신·워커·반응 컨테이너 (호스트 Ollama 사용). 코드를 바꿨으면 --build 필수(옛 이미지 주의)
 scripts/recovery list                             # 2단계: 결과 불명·DLQ 복구 CLI (check·resolve-completed·reprocess·close)
 scripts/p1-residue-check                          # 2단계: 해결된 건의 본문 잔존 검사(B18)
 scripts/p1-metrics <로그...>                      # 2단계: 로그 집계 (p50/p95·결과별 건수·적체, B14)
