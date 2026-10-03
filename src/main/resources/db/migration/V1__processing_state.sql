@@ -15,7 +15,10 @@ CREATE TABLE processing_state (
     manual_gen       bigint,
     retries          integer NOT NULL DEFAULT 0,
     retry_at         bigint,
+    -- 처리 단계(ProcessingStage 코드)와 실패 원인(ErrorCode 코드 + 외부 상세). 완료면 error_*는 비어 있다.
     stage            text,
+    error_code       text,
+    error_detail     text,
     kind             text,
     slack_ts         text,
     -- 이번 시도의 입력(JSON). 결과 불명·DLQ·재시도처럼 입력을 보존해야 하는 전이가 쓴다.

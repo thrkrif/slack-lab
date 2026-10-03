@@ -2,6 +2,9 @@ package com.slack.lab.core.service;
 
 import com.slack.lab.core.port.ChatNotifier;
 import com.slack.lab.core.port.AttemptHandle;
+import com.slack.lab.core.model.ErrorCode;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.Failure;
 import com.slack.lab.core.model.HandlingResult;
 import com.slack.lab.core.model.SlackMessageEvent;
 import com.slack.lab.core.port.ThreadContextSource;
@@ -13,6 +16,8 @@ import com.slack.lab.core.port.LlmClient;
 import com.slack.lab.core.model.LlmMessage;
 import com.slack.lab.config.LlmProperties;
 import com.slack.lab.core.model.LlmResult;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ProcessingStage;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.config.SlackProperties;
 import com.slack.lab.core.model.SlackSendResult;
@@ -97,9 +102,9 @@ public class SlackEventHandler {
         attempt.recordPhase("llm_ms", elapsedMs(llmStart));
 
         String text;
-        String kind;
+        MessageKind kind;
         if (llmResult instanceof LlmResult.Success success) {
-            kind = "answer";
+            kind = MessageKind.ANSWER;
             text = success.text();
             log.info("LLM 성공 event_id={} attempt_id={} elapsed_ms={}", event.eventId(), attempt.attemptId(),
                     success.elapsedMs());
@@ -109,24 +114,25 @@ public class SlackEventHandler {
             // 재시도하지 않고 바로 최종 안내로 간다 — 안내는 재시도 사슬을 만들지 않는다.
             boolean retryable = llmResult instanceof LlmResult.TimedOut
                     || ((LlmResult.Failed) llmResult).retryable();
-            String llmStage = llmResult instanceof LlmResult.TimedOut timedOut
-                    ? "llm_timeout(elapsed_ms=" + timedOut.elapsedMs() + ")"
-                    : "llm_failed:" + ((LlmResult.Failed) llmResult).reason();
+            ErrorInfo llmError = llmResult instanceof LlmResult.TimedOut timedOut
+                    ? ErrorInfo.of(ErrorCode.LLM_TIMEOUT, "elapsed_ms=" + timedOut.elapsedMs())
+                    : ((LlmResult.Failed) llmResult).error();
             if (retryable && !finalAttempt) {
-                log.warn("LLM 재시도 가능한 실패 → 재시도 예약 event_id={} attempt_id={} stage={}", event.eventId(),
-                        attempt.attemptId(), llmStage);
-                return new HandlingResult.RetryRequested(llmStage, 0);
+                log.warn("LLM 재시도 가능한 실패 → 재시도 예약 event_id={} attempt_id={} error={}", event.eventId(),
+                        attempt.attemptId(), llmError.text());
+                return new HandlingResult.RetryRequested(
+                        new Failure(ProcessingStage.LLM, MessageKind.ANSWER, llmError), 0);
             }
-            kind = "failure_notice";
+            kind = MessageKind.FAILURE_NOTICE;
             // 알람 리포트에는 "다시 멘션" 안내가 맞지 않는다(멘션할 원 메시지가 없다).
             text = event.ts() == null ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
-            log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} stage={} final_attempt={}", event.eventId(),
-                    attempt.attemptId(), llmStage, finalAttempt);
+            log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} error={} final_attempt={}", event.eventId(),
+                    attempt.attemptId(), llmError.text(), finalAttempt);
         }
 
         HandlingResult result = send(event, attempt, t0, text, kind, finalAttempt);
         log.info("처리 종료 event_id={} attempt_id={} kind={} result={} 총_소요_ms={}",
-                event.eventId(), attempt.attemptId(), kind, result.getClass().getSimpleName(), elapsedMs(t0));
+                event.eventId(), attempt.attemptId(), kind.code(), result.getClass().getSimpleName(), elapsedMs(t0));
         return result;
     }
 
@@ -139,12 +145,13 @@ public class SlackEventHandler {
         return Math.min(llmProps.deadlineMs() - elapsedMs(t0), totalRemainingMs(t0) - slackProps.sendDeadlineMs());
     }
 
-    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, String kind,
+    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, MessageKind kind,
             boolean finalAttempt) {
+        attempt.recordKind(kind);
         if (!attempt.markSending()) {
             // 소유권을 잃었다는 뜻이다 — 이미 다른 시도가 처리 중이거나 끝났으므로 발신하지 않는다.
             log.warn("SENDING 기록 거절 — 발신 안 함 event_id={} attempt_id={}", event.eventId(), attempt.attemptId());
-            return new HandlingResult.Rejected("mark_sending_rejected");
+            return new HandlingResult.Rejected(ErrorInfo.of(ErrorCode.SEND_REJECTED, "mark_sending"));
         }
 
         long remainingMs = Math.min(slackProps.sendDeadlineMs(), totalRemainingMs(t0));
@@ -166,23 +173,23 @@ public class SlackEventHandler {
                 yield new HandlingResult.Delivered(kind, s.ts());
             }
             case SlackSendResult.Failed failed -> {
-                String stage = kind + "_send:" + failed.reason();
+                Failure failure = new Failure(ProcessingStage.SEND, kind, failed.error());
                 // M13 전이표: 답변(kind=answer) 발신의 재시도 가능한 실패는 마지막 시도가 아니면 안내 없이
                 // 재시도만 예약한다. 안내(kind=failure_notice) 발신 실패는 재시도 가능 여부와 무관하게 항상
                 // 종료다 — 안내가 안내를 또 낳지 않는다("안내 연쇄 없음").
-                if ("answer".equals(kind) && failed.retryable() && !finalAttempt) {
-                    log.warn("답변 발신 재시도 가능한 실패 → 재시도 예약 event_id={} attempt_id={} stage={}", event.eventId(),
-                            attempt.attemptId(), stage);
-                    yield new HandlingResult.RetryRequested(stage, failed.retryAfterMs());
+                if (kind == MessageKind.ANSWER && failed.retryable() && !finalAttempt) {
+                    log.warn("답변 발신 재시도 가능한 실패 → 재시도 예약 event_id={} attempt_id={} error={}", event.eventId(),
+                            attempt.attemptId(), failed.error().text());
+                    yield new HandlingResult.RetryRequested(failure, failed.retryAfterMs());
                 }
-                log.warn("발신 실패 event_id={} attempt_id={} stage={} final_attempt={}", event.eventId(),
-                        attempt.attemptId(), stage, finalAttempt);
-                yield new HandlingResult.Failed(stage, false);
+                log.warn("발신 실패 event_id={} attempt_id={} kind={} error={} final_attempt={}", event.eventId(),
+                        attempt.attemptId(), kind.code(), failed.error().text(), finalAttempt);
+                yield new HandlingResult.Failed(failure);
             }
             case SlackSendResult.Unknown unknown -> {
-                String stage = kind + "_send:" + unknown.reason();
-                log.warn("발신 결과 불명 event_id={} attempt_id={} stage={}", event.eventId(), attempt.attemptId(), stage);
-                yield new HandlingResult.Unknown(stage);
+                log.warn("발신 결과 불명 event_id={} attempt_id={} kind={} error={}", event.eventId(), attempt.attemptId(),
+                        kind.code(), unknown.error().text());
+                yield new HandlingResult.Unknown(new Failure(ProcessingStage.SEND, kind, unknown.error()));
             }
         };
     }

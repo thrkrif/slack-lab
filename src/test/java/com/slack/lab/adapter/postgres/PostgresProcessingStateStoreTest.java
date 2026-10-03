@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.postgres;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -134,7 +138,7 @@ class PostgresProcessingStateStoreTest {
         assertThat(c.manualRun()).isFalse();
 
         assertThat(store.markSending("E1", c.attemptId())).isTrue();
-        assertThat(store.finalizeAttempt("E1", c.attemptId(), "tok", Finalization.completed("300.1", "answer"))).isTrue();
+        assertThat(store.finalizeAttempt("E1", c.attemptId(), "tok", Finalization.completed("300.1", MessageKind.ANSWER))).isTrue();
 
         assertThat(stateOf("E1")).containsEntry("state", "COMPLETED").containsEntry("slack_ts", "300.1")
                 .containsEntry("kind", "answer");
@@ -177,8 +181,8 @@ class PostgresProcessingStateStoreTest {
 
         assertThat(store.markSending("E3", "다른-시도")).isFalse();
         assertThat(store.renew("E3", "다른-시도")).isFalse();
-        assertThat(store.finalizeAttempt("E3", "다른-시도", "t", Finalization.dead("answer", "x"))).isFalse();
-        assertThat(store.scheduleRetry("E3", "다른-시도", "t", 1, System.currentTimeMillis(), 1, "x")).isFalse();
+        assertThat(store.finalizeAttempt("E3", "다른-시도", "t", Finalization.dead(TestFailures.send("x")))).isFalse();
+        assertThat(store.scheduleRetry("E3", "다른-시도", "t", 1, System.currentTimeMillis(), 1, TestFailures.send("x"))).isFalse();
         assertThat(store.markSending("없는-이벤트", c.attemptId())).isFalse();
         assertThat(stateOf("E3")).containsEntry("state", "PROCESSING");
         assertThat(preserved("E3")).isFalse();
@@ -189,7 +193,7 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 완료된_이벤트의_재전달은_실행하지_않고_종료로_판정한다() {
         Claimed c = toSending("E4");
-        store.finalizeAttempt("E4", c.attemptId(), "t", Finalization.completed("1.1", "answer"));
+        store.finalizeAttempt("E4", c.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER));
 
         assertThat(store.claim(req("E4"))).isEqualTo(new Settled(Reason.DONE));
         assertThat(stateOf("E4")).containsEntry("state", "COMPLETED");
@@ -199,7 +203,7 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 사람이_닫은_건에_늦은_재전송이_와도_다시_보존하지_않는다() {
         Claimed c = claimOk(req("E5"));
-        store.finalizeAttempt("E5", c.attemptId(), "t", Finalization.dead("answer", "x"));
+        store.finalizeAttempt("E5", c.attemptId(), "t", Finalization.dead(TestFailures.send("x")));
         jdbc.update("UPDATE processing_state SET state = 'CLOSED' WHERE event_id = 'E5'");
         jdbc.update("DELETE FROM preserved_input WHERE event_id = 'E5'");
 
@@ -212,7 +216,7 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 같은_세대_UNKNOWN_재전달은_멱등하게_다시_보존하고_이전_세대는_보존하지_않는다() {
         Claimed c = toSending("E6");
-        store.finalizeAttempt("E6", c.attemptId(), "t", Finalization.unknown("answer", "answer_send:x"));
+        store.finalizeAttempt("E6", c.attemptId(), "t", Finalization.unknown(TestFailures.send("answer_send:x")));
         assertThat(listOf("E6")).isEqualTo("recovery");
         jdbc.update("DELETE FROM preserved_input WHERE event_id = 'E6'");
 
@@ -231,7 +235,7 @@ class PostgresProcessingStateStoreTest {
     void 이전_세대와_예약된_재시도보다_이른_메시지는_STALE이다() {
         Claimed c = claimOk(req("E7"));
         long retryAt = System.currentTimeMillis() + 60_000;
-        assertThat(store.scheduleRetry("E7", c.attemptId(), "t", 1, retryAt, 1, "llm_timeout")).isTrue();
+        assertThat(store.scheduleRetry("E7", c.attemptId(), "t", 1, retryAt, 1, TestFailures.llmTimeout())).isTrue();
 
         assertThat(store.claim(req("E7", 0, System.currentTimeMillis()))).isEqualTo(new Settled(Reason.STALE));
         assertThat(store.claim(req("E7", 1, System.currentTimeMillis()))).as("예약 시각 전").isEqualTo(
@@ -246,7 +250,8 @@ class PostgresProcessingStateStoreTest {
         expireLease("E8");
 
         assertThat(store.claim(req("E8"))).isEqualTo(new Settled(Reason.UNKNOWN));
-        assertThat(stateOf("E8")).containsEntry("state", "UNKNOWN").containsEntry("stage", "sending_lease_expired");
+        assertThat(stateOf("E8")).containsEntry("state", "UNKNOWN").containsEntry("stage", "send")
+                .containsEntry("error_code", "sending_lease_expired");
         assertThat(listOf("E8")).isEqualTo("recovery");
         assertThat(stateOf("E8").get("expires_at")).as("미해결 건은 만료되지 않는다").isNull();
     }
@@ -258,7 +263,7 @@ class PostgresProcessingStateStoreTest {
         store.claim(req("E9"));
         assertThat(stateOf("E9")).containsEntry("state", "UNKNOWN");
 
-        assertThat(store.finalizeAttempt("E9", c.attemptId(), "t", Finalization.completed("9.9", "answer"))).isTrue();
+        assertThat(store.finalizeAttempt("E9", c.attemptId(), "t", Finalization.completed("9.9", MessageKind.ANSWER))).isTrue();
 
         assertThat(stateOf("E9")).containsEntry("state", "COMPLETED").containsEntry("slack_ts", "9.9");
         assertThat(preserved("E9")).isFalse();
@@ -304,7 +309,7 @@ class PostgresProcessingStateStoreTest {
         long old = System.currentTimeMillis() - DAY_MS - 60_000;
 
         assertThat(store.claim(req("E13", 0, old))).isEqualTo(new Settled(Reason.EXPIRED));
-        assertThat(stateOf("E13")).containsEntry("state", "DEAD").containsEntry("stage", "window_expired");
+        assertThat(stateOf("E13")).containsEntry("state", "DEAD").containsEntry("stage", "state").containsEntry("error_code", "window_expired");
         assertThat(listOf("E13")).isEqualTo("dlq");
     }
 
@@ -321,13 +326,13 @@ class PostgresProcessingStateStoreTest {
 
         // COMPLETED + 24시간 초과 → DONE
         Claimed p2 = toSending("P2");
-        store.finalizeAttempt("P2", p2.attemptId(), "t", Finalization.completed("1.1", "answer"));
+        store.finalizeAttempt("P2", p2.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER));
         jdbc.update("UPDATE processing_state SET first_received_at = ? WHERE event_id = 'P2'", old);
         assertThat(store.claim(req("P2", 0, old))).isEqualTo(new Settled(Reason.DONE));
 
         // 이전 세대 + 24시간 초과 → STALE(3행)
         Claimed p3 = claimOk(req("P3"));
-        store.scheduleRetry("P3", p3.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("P3", p3.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
         jdbc.update("UPDATE processing_state SET first_received_at = ? WHERE event_id = 'P3'", old);
         assertThat(store.claim(req("P3", 0, old))).isEqualTo(new Settled(Reason.STALE));
     }
@@ -356,7 +361,7 @@ class PostgresProcessingStateStoreTest {
         jdbc.update("DELETE FROM preserved_input WHERE event_id = 'E15'");
         // 사람이 승인한 gen=1 실행을 만든다
         Claimed seed = claimOk(req("E15", 0, recent));
-        store.finalizeAttempt("E15", seed.attemptId(), "t", Finalization.dead("answer", "x"));
+        store.finalizeAttempt("E15", seed.attemptId(), "t", Finalization.dead(TestFailures.send("x")));
         jdbc.update("UPDATE processing_state SET state = 'RETRY_WAIT', gen = 1, retry_at = 0, manual_gen = 1 "
                 + "WHERE event_id = 'E15'");
         Claimed manual = claimOk(req("E15", 1, recent));
@@ -364,7 +369,7 @@ class PostgresProcessingStateStoreTest {
         expireLease("E15");
 
         assertThat(store.claim(req("E15", 1, recent))).isEqualTo(new Settled(Reason.DEAD));
-        assertThat(stateOf("E15")).containsEntry("state", "DEAD").containsEntry("stage", "manual_attempt_lost");
+        assertThat(stateOf("E15")).containsEntry("state", "DEAD").containsEntry("stage", "state").containsEntry("error_code", "manual_attempt_lost");
         assertThat(listOf("E15")).isEqualTo("dlq");
     }
 
@@ -391,7 +396,7 @@ class PostgresProcessingStateStoreTest {
     void 재시도_예약은_RETRY_WAIT으로_기록하고_도래하면_다음_세대로_선점하며_횟수를_물려받는다() throws Exception {
         Claimed c = claimOk(req("E18"));
         long retryAt = System.currentTimeMillis() + 60_000;
-        assertThat(store.scheduleRetry("E18", c.attemptId(), "t", 1, retryAt, 1, "llm_timeout")).isTrue();
+        assertThat(store.scheduleRetry("E18", c.attemptId(), "t", 1, retryAt, 1, TestFailures.llmTimeout())).isTrue();
         assertThat(stateOf("E18")).containsEntry("state", "RETRY_WAIT").containsEntry("gen", 1L)
                 .containsEntry("retries", 1);
         assertThat(listOf("E18")).isEqualTo("retry");
@@ -409,7 +414,7 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 재시도_예약된_입력은_다음_세대_번호로_보존된다() {
         Claimed c = claimOk(req("E19"));
-        store.scheduleRetry("E19", c.attemptId(), "t", 1, System.currentTimeMillis(), 1, "x");
+        store.scheduleRetry("E19", c.attemptId(), "t", 1, System.currentTimeMillis(), 1, TestFailures.send("x"));
 
         String payload = jdbc.queryForObject("SELECT payload FROM preserved_input WHERE event_id = 'E19'", String.class);
         assertThat(PreservedInputJson.readGen(new ObjectMapper(), payload)).isEqualTo(1);
@@ -419,12 +424,12 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 재시도_뒤_완료되면_재시도_보존본이_정리된다() throws Exception {
         Claimed c = claimOk(req("E20"));
-        store.scheduleRetry("E20", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("E20", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
         jdbc.update("UPDATE processing_state SET retry_at = 0 WHERE event_id = 'E20'");
         Claimed again = claimOk(req("E20", 1, System.currentTimeMillis()));
         store.markSending("E20", again.attemptId());
 
-        store.finalizeAttempt("E20", again.attemptId(), "t", Finalization.completed("2.2", "answer"));
+        store.finalizeAttempt("E20", again.attemptId(), "t", Finalization.completed("2.2", MessageKind.ANSWER));
 
         assertThat(preserved("E20")).isFalse();
     }
@@ -435,7 +440,7 @@ class PostgresProcessingStateStoreTest {
         // 다른 경로가 더 미래 세대(gen=3)의 DLQ 보존본을 남겼다
         jdbc.update("INSERT INTO preserved_input VALUES ('E21','dlq','anomaly_gen',3,0,'{}',0)");
 
-        store.finalizeAttempt("E21", c.attemptId(), "t", Finalization.completed("1.1", "answer"));
+        store.finalizeAttempt("E21", c.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER));
 
         assertThat(listOf("E21")).isEqualTo("dlq");
     }
@@ -467,18 +472,18 @@ class PostgresProcessingStateStoreTest {
     void 허용되지_않는_전이는_거절된다() {
         Claimed c = claimOk(req("E24"));
         // PROCESSING에서 바로 COMPLETED·UNKNOWN은 불가(발신 게이트를 거쳐야 한다)
-        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.completed("1", "answer"))).isFalse();
-        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.unknown("answer", "x"))).isFalse();
+        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.completed("1", MessageKind.ANSWER))).isFalse();
+        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x")))).isFalse();
         // DEAD는 가능
-        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.dead("answer", "x"))).isTrue();
+        assertThat(store.finalizeAttempt("E24", c.attemptId(), "t", Finalization.dead(TestFailures.send("x")))).isTrue();
         assertThat(listOf("E24")).isEqualTo("dlq");
     }
 
     @Test
     void 자가_재완료는_멱등이다() {
         Claimed c = toSending("E25");
-        assertThat(store.finalizeAttempt("E25", c.attemptId(), "t", Finalization.completed("1.1", "answer"))).isTrue();
-        assertThat(store.finalizeAttempt("E25", c.attemptId(), "t", Finalization.completed("1.1", "answer"))).isTrue();
+        assertThat(store.finalizeAttempt("E25", c.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER))).isTrue();
+        assertThat(store.finalizeAttempt("E25", c.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER))).isTrue();
         assertThat(stateOf("E25")).containsEntry("state", "COMPLETED");
     }
 
@@ -487,9 +492,9 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 보존_기한이_지난_완료_건만_삭제하고_미해결_건은_남긴다() {
         Claimed done = toSending("D1");
-        store.finalizeAttempt("D1", done.attemptId(), "t", Finalization.completed("1.1", "answer"));
+        store.finalizeAttempt("D1", done.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER));
         Claimed unknown = toSending("D2");
-        store.finalizeAttempt("D2", unknown.attemptId(), "t", Finalization.unknown("answer", "x"));
+        store.finalizeAttempt("D2", unknown.attemptId(), "t", Finalization.unknown(TestFailures.send("x")));
         jdbc.update("UPDATE processing_state SET expires_at = 1 WHERE event_id = 'D1'");
 
         assertThat(store.purgeExpired()).isEqualTo(1);
@@ -506,14 +511,14 @@ class PostgresProcessingStateStoreTest {
         Claimed c = toSending("A1");
         // finalize(UNKNOWN)는 보존 INSERT 뒤 상태 UPDATE가 이어진다 — 첫 SQL 뒤에 실패를 주입한다
         store.injectFailureAfterStatements(1);
-        assertThatThrownBy(() -> store.finalizeAttempt("A1", c.attemptId(), "t", Finalization.unknown("answer", "x")))
+        assertThatThrownBy(() -> store.finalizeAttempt("A1", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x"))))
                 .hasMessageContaining("INJECTED_FAILURE");
         store.injectFailureAfterStatements(0);
 
         assertThat(stateOf("A1")).containsEntry("state", "SENDING");
         assertThat(preserved("A1")).isFalse();
         // 같은 호출을 다시 하면 정상 종료된다
-        assertThat(store.finalizeAttempt("A1", c.attemptId(), "t", Finalization.unknown("answer", "x"))).isTrue();
+        assertThat(store.finalizeAttempt("A1", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x")))).isTrue();
         assertThat(listOf("A1")).isEqualTo("recovery");
     }
 
@@ -560,16 +565,16 @@ class PostgresProcessingStateStoreTest {
         // COMPLETED
         Claimed c1 = toSending("B1");
         assertThat(inputOf("B1")).as("처리 중에는 입력을 들고 있다").isNotNull();
-        store.finalizeAttempt("B1", c1.attemptId(), "t", Finalization.completed("1.1", "answer"));
+        store.finalizeAttempt("B1", c1.attemptId(), "t", Finalization.completed("1.1", MessageKind.ANSWER));
         assertThat(inputOf("B1")).isNull();
         // UNKNOWN(finalize)
         Claimed c2 = toSending("B2");
-        store.finalizeAttempt("B2", c2.attemptId(), "t", Finalization.unknown("answer", "x"));
+        store.finalizeAttempt("B2", c2.attemptId(), "t", Finalization.unknown(TestFailures.send("x")));
         assertThat(inputOf("B2")).isNull();
         assertThat(preserved("B2")).as("본문은 보존 테이블에만 있다").isTrue();
         // DEAD(finalize)
         Claimed c3 = claimOk(req("B3"));
-        store.finalizeAttempt("B3", c3.attemptId(), "t", Finalization.dead("answer", "x"));
+        store.finalizeAttempt("B3", c3.attemptId(), "t", Finalization.dead(TestFailures.send("x")));
         assertThat(inputOf("B3")).isNull();
         // UNKNOWN(임대 만료, 행 4)
         toSending("B4");
@@ -581,7 +586,7 @@ class PostgresProcessingStateStoreTest {
         assertThat(inputOf("B5")).isNull();
         // DEAD(승인 실행 소실, 행 4')
         Claimed seed = claimOk(req("B6"));
-        store.finalizeAttempt("B6", seed.attemptId(), "t", Finalization.dead("answer", "x"));
+        store.finalizeAttempt("B6", seed.attemptId(), "t", Finalization.dead(TestFailures.send("x")));
         jdbc.update("UPDATE processing_state SET state = 'RETRY_WAIT', gen = 1, retry_at = 0, manual_gen = 1 "
                 + "WHERE event_id = 'B6'");
         claimOk(req("B6", 1, System.currentTimeMillis()));
@@ -590,14 +595,14 @@ class PostgresProcessingStateStoreTest {
         assertThat(inputOf("B6")).isNull();
         // 재시도 예약 중에는 보존 테이블이 입력을 들고 상태 행은 비어 있어도 된다 — 다시 선점되면 채워진다
         Claimed c7 = claimOk(req("B7"));
-        store.scheduleRetry("B7", c7.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("B7", c7.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
         assertThat(preserved("B7")).isTrue();
     }
 
     @Test
     void 같은_세대_DEAD_재전달은_DLQ에_다시_보존한다() {
         Claimed c = claimOk(req("R1"));
-        store.finalizeAttempt("R1", c.attemptId(), "t", Finalization.dead("answer", "x"));
+        store.finalizeAttempt("R1", c.attemptId(), "t", Finalization.dead(TestFailures.send("x")));
         jdbc.update("DELETE FROM preserved_input WHERE event_id = 'R1'");
 
         assertThat(store.claim(req("R1"))).isEqualTo(new Settled(Reason.DONE));
@@ -627,13 +632,13 @@ class PostgresProcessingStateStoreTest {
         expireLease("R3");
 
         assertThat(store.claim(req("R3", 1, old))).isEqualTo(new Settled(Reason.DEAD));
-        assertThat(stateOf("R3")).containsEntry("stage", "manual_attempt_lost");
+        assertThat(stateOf("R3")).containsEntry("stage", "state").containsEntry("error_code", "manual_attempt_lost");
     }
 
     @Test
     void 상태보다_큰_세대의_이상_메시지는_재시도_예약_보존본을_덮어쓰지_않는다() {
         Claimed c = claimOk(req("R4"));
-        store.scheduleRetry("R4", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("R4", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
 
         assertThat(store.claim(req("R4", 5, System.currentTimeMillis()))).isEqualTo(new Settled(Reason.ANOMALY));
 
@@ -653,9 +658,9 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 도래한_재시도만_돌려주고_반영하면_창이_지날_때까지_건너뛴다() {
         Claimed c = claimOk(req("O1"));
-        store.scheduleRetry("O1", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("O1", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
         Claimed later = claimOk(req("O2"));
-        store.scheduleRetry("O2", later.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("O2", later.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
 
         var due = store.pollDueRetries(10, 60_000);
         assertThat(due).extracting(d -> d.event().eventId()).containsExactly("O1");
@@ -670,7 +675,7 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 이미_선점돼_진행_중이거나_다른_세대인_재시도는_돌려주지_않는다() {
         Claimed c = claimOk(req("O3"));
-        store.scheduleRetry("O3", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("O3", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
         claimOk(req("O3", 1, System.currentTimeMillis())); // 재투입 메시지가 선점됐다
 
         assertThat(store.pollDueRetries(10, 0)).isEmpty();
@@ -679,10 +684,10 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 깨진_재시도_입력은_폴링을_막지_않고_DLQ로_격리된다() {
         Claimed c = claimOk(req("O4"));
-        store.scheduleRetry("O4", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("O4", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
         jdbc.update("UPDATE preserved_input SET payload = '깨진{' WHERE event_id = 'O4'");
         Claimed ok = claimOk(req("O5"));
-        store.scheduleRetry("O5", ok.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("O5", ok.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
 
         var due = store.pollDueRetries(10, 0);
 
@@ -694,15 +699,51 @@ class PostgresProcessingStateStoreTest {
     @Test
     void 재예약하면_반영_기록이_초기화된다() {
         Claimed c = claimOk(req("O6"));
-        store.scheduleRetry("O6", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("O6", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
         store.markRelayed("O6", 1);
         assertThat(jdbc.queryForObject("SELECT relayed_at FROM preserved_input WHERE event_id = 'O6'", Long.class))
                 .isNotNull();
         // 재투입이 선점돼 다시 실패해 다음 세대로 재예약된다
         Claimed again = claimOk(req("O6", 1, System.currentTimeMillis()));
-        store.scheduleRetry("O6", again.attemptId(), "t", 2, System.currentTimeMillis() - 60_000, 2, "x");
+        store.scheduleRetry("O6", again.attemptId(), "t", 2, System.currentTimeMillis() - 60_000, 2, TestFailures.send("x"));
 
         assertThat(jdbc.queryForObject("SELECT relayed_at FROM preserved_input WHERE event_id = 'O6'", Long.class))
                 .as("gen+2 재예약이 gen+1 반영 기록에 가려지지 않는다").isNull();
+    }
+
+    @Test
+    void 종료와_재시도_기록은_단계_오류_코드_외부_상세_메시지_종류를_따로_저장한다() {
+        Claimed c = (Claimed) store.claim(req("T1", 0, System.currentTimeMillis()));
+        store.markSending("T1", c.attemptId());
+        store.finalizeAttempt("T1", c.attemptId(), "t", Finalization.unknown(TestFailures.send(
+                MessageKind.FAILURE_NOTICE, ErrorCode.SLACK_TIMEOUT, "read_timeout")));
+
+        assertThat(stateOf("T1")).containsEntry("state", "UNKNOWN").containsEntry("stage", "send")
+                .containsEntry("error_code", "slack_timeout").containsEntry("error_detail", "read_timeout")
+                .containsEntry("kind", "failure_notice");
+
+        Claimed r = (Claimed) store.claim(req("T2", 0, System.currentTimeMillis()));
+        store.scheduleRetry("T2", r.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1,
+                TestFailures.llm(ErrorCode.LLM_HTTP_ERROR, "503"));
+
+        assertThat(stateOf("T2")).containsEntry("state", "RETRY_WAIT").containsEntry("stage", "llm")
+                .containsEntry("error_code", "llm_http_error").containsEntry("error_detail", "503")
+                .containsEntry("kind", "answer");
+        assertThat(listOf("T2")).isEqualTo("retry");
+    }
+
+    @Test
+    void 완료하면_이전_시도의_오류_기록이_남지_않는다() {
+        Claimed c = (Claimed) store.claim(req("T3", 0, System.currentTimeMillis()));
+        store.scheduleRetry("T3", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1,
+                TestFailures.llm(ErrorCode.LLM_TIMEOUT, "elapsed_ms=1"));
+        Claimed again = (Claimed) store.claim(new ClaimRequest("T3", "t", 1, System.currentTimeMillis(), "C-test", null,
+                event("T3")));
+        store.markSending("T3", again.attemptId());
+        store.finalizeAttempt("T3", again.attemptId(), "t", Finalization.completed("9.9", MessageKind.ANSWER));
+
+        assertThat(stateOf("T3")).containsEntry("state", "COMPLETED").containsEntry("stage", "delivered")
+                .containsEntry("kind", "answer");
+        assertThat(stateOf("T3").get("error_code")).isNull();
     }
 }

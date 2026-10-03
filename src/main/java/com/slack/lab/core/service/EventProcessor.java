@@ -7,6 +7,11 @@ import com.slack.lab.config.WorkerProperties;
 import com.slack.lab.core.model.ClaimOutcome;
 import com.slack.lab.core.model.ClaimRequest;
 import com.slack.lab.core.model.Finalization;
+import com.slack.lab.core.model.ProcessingStage;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.Failure;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.model.HandlingResult;
 import com.slack.lab.core.model.SlackMessageEvent;
 import com.slack.lab.core.port.ProcessingStateStore;
@@ -116,10 +121,11 @@ public class EventProcessor {
             result = handler.handle(event, handle, finalAttempt);
         } catch (Exception e) {
             // markSending 이전의 예외는 발신되지 않았음이 확실하니 Failed, 이후는 발신 여부를 알 수 없어 Unknown이다.
-            String stage = "unexpected_exception:" + e.getClass().getSimpleName();
+            Failure failure = new Failure(handle.sendingMarked() ? ProcessingStage.SEND : ProcessingStage.PROCESSING,
+                    handle.kind(), ErrorInfo.of(ErrorCode.UNEXPECTED_EXCEPTION, e));
             log.error("처리 중 예상 못한 예외 event_id={} attempt_id={} sending_marked={}", eventId, claimed.attemptId(),
                     handle.sendingMarked(), e);
-            result = handle.sendingMarked() ? new HandlingResult.Unknown(stage) : new HandlingResult.Failed(stage, false);
+            result = handle.sendingMarked() ? new HandlingResult.Unknown(failure) : new HandlingResult.Failed(failure);
         } finally {
             renewal.cancel(false);
         }
@@ -169,7 +175,7 @@ public class EventProcessor {
     private void logMetrics(String eventId, ClaimOutcome.Claimed claimed, HandlingResult result, boolean finalized,
             WorkerAttemptHandle handle, long receivedAt, long queueWaitMs, boolean receivedAtMissing) {
         long answerMs = System.currentTimeMillis() - receivedAt;
-        String kind = result instanceof HandlingResult.Delivered d ? d.kind() : "-";
+        String kind = result instanceof HandlingResult.Delivered d ? d.kind().code() : "-";
         // gen>0·retries>0·manual_run은 앞선 시도와 재시도 대기가 구간에 섞인 시도다 — 집계는 첫 시도만 성능 표본으로 쓴다.
         log.info("처리 지표 event_id={} attempt_id={} gen={} retries={} manual_run={} result={} kind={} finalized={} "
                         + "queue_wait_ms={} llm_ms={} send_ms={} answer_ms={} received_at_missing={} negative_interval={}",
@@ -204,16 +210,16 @@ public class EventProcessor {
             case HandlingResult.Delivered d -> store.finalizeAttempt(eventId, attemptId, token,
                     Finalization.completed(d.slackTs(), d.kind()));
             case HandlingResult.Unknown u -> store.finalizeAttempt(eventId, attemptId, token,
-                    Finalization.unknown(kindFromStage(u.stage()), u.stage()));
+                    Finalization.unknown(u.failure()));
             case HandlingResult.Failed f -> store.finalizeAttempt(eventId, attemptId, token,
-                    Finalization.dead(kindFromStage(f.stage()), f.stage()));
+                    Finalization.dead(f.failure()));
             case HandlingResult.RetryRequested r -> retryPolicy.scheduleRetry(eventId, attemptId, token,
-                    claimed.gen(), claimed.retries(), r.retryAfterMsOverride(), r.stage());
+                    claimed.gen(), claimed.retries(), r.retryAfterMsOverride(), r.failure());
             case HandlingResult.Rejected r -> false;
         };
         if (result instanceof HandlingResult.Rejected r) {
             log.warn("SENDING 거절— 상태 유지, ACK 안 함 event_id={} attempt_id={} reason={}", eventId, attemptId,
-                    r.reason());
+                    r.error().text());
         } else if (!finalized) {
             // 저장 실패·소유권 상실 — ACK하지 않는다(B10). 재전달이 finalize/retry를 다시 시도하게 둔다.
             log.warn("종료 기록 거절 또는 실패 — ACK 보류 event_id={} attempt_id={} result={}", eventId, attemptId,
@@ -223,10 +229,5 @@ public class EventProcessor {
                     result.getClass().getSimpleName());
         }
         return finalized;
-    }
-
-    private static String kindFromStage(String stage) {
-        int i = stage.indexOf("_send:");
-        return i > 0 ? stage.substring(0, i) : "unknown";
     }
 }

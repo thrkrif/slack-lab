@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.postgres;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -86,12 +90,12 @@ class PostgresRecoveryStoreTest {
     void makeUnknown(String id) {
         Claimed c = (Claimed) store.claim(req(id, 0, System.currentTimeMillis()));
         store.markSending(id, c.attemptId());
-        store.finalizeAttempt(id, c.attemptId(), "t", Finalization.unknown("answer", "answer_send:read_timeout"));
+        store.finalizeAttempt(id, c.attemptId(), "t", Finalization.unknown(TestFailures.send("answer_send:read_timeout")));
     }
 
     void makeDead(String id) {
         Claimed c = (Claimed) store.claim(req(id, 0, System.currentTimeMillis()));
-        store.finalizeAttempt(id, c.attemptId(), "t", Finalization.dead("answer", "answer_send:invalid_auth"));
+        store.finalizeAttempt(id, c.attemptId(), "t", Finalization.dead(TestFailures.send("answer_send:invalid_auth")));
     }
 
     // --- list · stateOf · threadRef
@@ -113,7 +117,7 @@ class PostgresRecoveryStoreTest {
     @Test
     void 재시도_예약_중인_건은_미해결_목록에_나오지_않는다() {
         Claimed c = (Claimed) store.claim(req("R3", 0, System.currentTimeMillis()));
-        store.scheduleRetry("R3", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("R3", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
 
         assertThat(recovery.list()).isEmpty();
     }
@@ -126,7 +130,7 @@ class PostgresRecoveryStoreTest {
         Claimed c = (Claimed) store.claim(new ClaimRequest("R5", "t", 0, System.currentTimeMillis(), "C-test", "50.5",
                 event("R5", "50.5")));
         store.markSending("R5", c.attemptId());
-        store.finalizeAttempt("R5", c.attemptId(), "t", Finalization.unknown("answer", "x"));
+        store.finalizeAttempt("R5", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x")));
         assertThat(recovery.threadRef("R5")).contains(new RecoveryStore.ThreadRef("C-test", "50.5"));
         assertThat(recovery.threadRef("없음")).isEmpty();
     }
@@ -137,7 +141,7 @@ class PostgresRecoveryStoreTest {
                 null, null, null);
         Claimed c = (Claimed) store.claim(new ClaimRequest("R5a", "t", 0, System.currentTimeMillis(), "C-test", null, alert));
         store.markSending("R5a", c.attemptId());
-        store.finalizeAttempt("R5a", c.attemptId(), "t", Finalization.unknown("answer", "x"));
+        store.finalizeAttempt("R5a", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x")));
 
         assertThat(recovery.threadRef("R5a")).as("스레드 조회로 확인할 수 없으니 자동 조회는 건너뛰고 사람이 본다").isEmpty();
     }
@@ -204,7 +208,7 @@ class PostgresRecoveryStoreTest {
         long received = System.currentTimeMillis() - 5_000;
         Claimed c = (Claimed) store.claim(req("P1", 0, received));
         store.markSending("P1", c.attemptId());
-        store.finalizeAttempt("P1", c.attemptId(), "t", Finalization.unknown("answer", "x"));
+        store.finalizeAttempt("P1", c.attemptId(), "t", Finalization.unknown(TestFailures.send("x")));
 
         var out = recovery.reprocess("P1");
 
@@ -212,7 +216,7 @@ class PostgresRecoveryStoreTest {
         assertThat(out.detail()).isEqualTo("1");
         assertThat(jdbc.queryForMap("SELECT state, gen, manual_gen, stage FROM processing_state WHERE event_id='P1'"))
                 .containsEntry("state", "RETRY_WAIT").containsEntry("gen", 1L).containsEntry("manual_gen", 1L)
-                .containsEntry("stage", "manual_reprocess");
+                .containsEntry("stage", "reprocess_manual");
         var due = store.pollDueRetries(10, 60_000);
         assertThat(due).hasSize(1);
         assertThat(due.get(0).gen()).isEqualTo(1);
@@ -244,7 +248,7 @@ class PostgresRecoveryStoreTest {
         assertThat(jdbc.queryForObject("SELECT manual_gen FROM processing_state WHERE event_id='P3'", Long.class))
                 .isNull();
         store.markSending("P3", c.attemptId());
-        store.finalizeAttempt("P3", c.attemptId(), "t", Finalization.completed("400.1", "answer"));
+        store.finalizeAttempt("P3", c.attemptId(), "t", Finalization.completed("400.1", MessageKind.ANSWER));
         assertThat(preserved("P3")).isFalse();
         assertThat(stateOf("P3")).isEqualTo("COMPLETED");
     }
@@ -297,7 +301,7 @@ class PostgresRecoveryStoreTest {
     @Test
     void 일반_재시도_대기_건은_수동_재처리할_수_없다() {
         Claimed c = (Claimed) store.claim(req("Q1", 0, System.currentTimeMillis()));
-        store.scheduleRetry("Q1", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, "x");
+        store.scheduleRetry("Q1", c.attemptId(), "t", 1, System.currentTimeMillis() + 60_000, 1, TestFailures.send("x"));
 
         assertThat(recovery.reprocess("Q1").status()).isEqualTo("BAD_STATE");
         assertThat(jdbc.queryForObject("SELECT manual_gen FROM processing_state WHERE event_id='Q1'", Long.class)).isNull();
@@ -312,15 +316,17 @@ class PostgresRecoveryStoreTest {
         assertThat(recovery.resolveCompleted("Q3", "6.6").ok()).isTrue();
 
         assertThat(jdbc.queryForObject("SELECT stage FROM processing_state WHERE event_id='Q2'", String.class))
-                .isEqualTo("auto_resolved");
+                .isEqualTo("resolved_auto");
+        assertThat(jdbc.queryForObject("SELECT error_code FROM processing_state WHERE event_id='Q2'", String.class))
+                .as("해결됐으니 이전 실패 원인은 남지 않는다").isNull();
         assertThat(jdbc.queryForObject("SELECT stage FROM processing_state WHERE event_id='Q3'", String.class))
-                .isEqualTo("manual_resolved");
+                .isEqualTo("resolved_manual");
     }
 
     @Test
     void 깨진_재시도_입력으로_격리된_건은_복구_CLI로_닫을_수_있다() {
         Claimed c = (Claimed) store.claim(req("Q4", 0, System.currentTimeMillis()));
-        store.scheduleRetry("Q4", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x");
+        store.scheduleRetry("Q4", c.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x"));
         jdbc.update("UPDATE preserved_input SET payload = '깨진{' WHERE event_id = 'Q4'");
         store.pollDueRetries(10, 0); // 격리된다
 

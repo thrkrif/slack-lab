@@ -115,11 +115,11 @@ public class SlackEventController {
                 yield ResponseEntity.ok().build();
             }
             case PublishResult.Failed failed -> {
-                log.error("발행 실패 event_id={} reason={}", event.eventId(), failed.reason());
+                log.error("발행 실패 event_id={} reason={}", event.eventId(), failed.error().text());
                 yield ResponseEntity.status(503).build();
             }
             case PublishResult.Unconfirmed unconfirmed -> {
-                log.error("발행 확인 불가 event_id={} reason={}", event.eventId(), unconfirmed.reason());
+                log.error("발행 확인 불가 event_id={} reason={}", event.eventId(), unconfirmed.error().text());
                 yield ResponseEntity.status(503).build();
             }
         };

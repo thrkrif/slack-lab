@@ -968,3 +968,16 @@ Redis 어댑터·Lua·의존성·백엔드 스위치를 제거했다(큐=RabbitM
 ### 22.1 리뷰 대응 (code-reviewer: REVISE MAJOR 1·MINOR 10)
 
 MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었다 → https의 `sns.<region>.amazonaws.com`일 때만 `SubscribeURL`을 로그에 남긴다(서버는 열지 않음). 반영한 MINOR: 빈 `X-Alert-Secret` 헤더가 토큰을 가리지 않게, 알람 본문 2000자·제목 200자 상한, 알람 데이터를 `<alarm>` 블록으로 감싸 지시와 분리, 알람 리포트 전용 실패 안내("다시 멘션" 문구 제거), 중복 키에 계정·리전 포함, `Unconfirmed → 503` 테스트. 남긴 항목: 요청 본문 크기 제한(인증 전 읽기)은 프록시/서블릿 한도에 맡김, `?token=`이 ngrok 인스펙터·접근 로그에 남는 점(헤더 시크릿 권장), `<!channel>` 방송 문자열 제거, 알람 스레드에서 실제 후속 멘션은 미검증.
+
+## 23. 2단계 후속 M24 오류 모델 정리 (2026-10-03)
+
+**구분: 리팩터링(동작 보존) — 외부 왕복·성능 재측정은 하지 않았다. 검증은 단위·통합 테스트와 기존 시나리오 회귀.**
+
+- 문제: `reason`·`stage`가 자유 문자열이었고(`"language_violation"`, `"남은 기한 없음"`, `"answer_send:invalid_auth"`), `EventProcessor`가 `indexOf("_send:")`로 stage를 잘라 메시지 종류를 복원했다. 재시도 가능 여부도 `reason.contains("ConnectException")`로 판정하는 곳이 있었다.
+- 변경: `ErrorCode`(원인 분류, 고정 저장 코드)·`ErrorInfo(code, detail)`·`ProcessingStage`·`MessageKind`·`Failure(stage, kind, error)` 도입. LLM·Slack·큐 결과 타입과 `HandlingResult`·`Finalization`·`scheduleRetry`가 이 타입을 직접 전달한다. LLM 재시도 판정은 HTTP 연결 단계에서 타입으로 정한다. `processing_state`에 `error_code`·`error_detail` 컬럼을 추가했고(V1 직접 수정 — 로컬 DB 초기화 전제, 기존 값 읽기 호환은 두지 않음) `stage`는 `ProcessingStage` 코드만 갖는다. 복구 CLI 목록은 `ERROR` 열을 보여 준다.
+- 보존: Success/Failed/Unknown 분기, 재시도 정책, 결과 불명 자동 재발신 0, 상태 저장 실패 시 ACK 보류는 그대로이며 기존 테스트(EventProcessorTest·SlackEventHandlerTest·Postgres·RabbitPipeline)가 같은 단언으로 통과한다. 추가 테스트: `ErrorModelTest`(고정 코드 중복 없음·형식, 한 줄 표기, 종료 기록이 종류·단계를 그대로 옮김), 저장소 테스트 2(단계·오류·상세·종류 분리 저장, 완료 시 이전 오류 제거).
+- 보류: 예외 계층(`AppException`)과 `@RestControllerAdvice` — 호출부가 다르게 처리할 예외 종류가 없고 컨트롤러별 응답 의미가 달라 줄일 중복이 적다.
+
+### 23.1 리뷰 대응 (codex 위임, MAJOR 0·MINOR 4)
+
+참고: 이 회차 codex는 `--model/--effort`를 프롬프트에 넣어 설정이 적용되지 않았고 `gpt-6-astra`/medium으로 돌았다(`omc ask`에는 모델 플래그가 없고 `~/.codex/config.toml`을 따른다 — 이후 sol/low). MINOR 반영: ① 재시도 저장 때 `kind` 누락 → 함께 저장하고 테스트 단언 추가 ② 수동·자동 완료가 `error_code/error_detail`을 지우지 않음 → 지우고 회귀 테스트 ③ 실패 안내 발신 중 예상 못한 예외가 `ANSWER`로 기록됨 → `AttemptHandle.recordKind`로 실제 종류를 전달하고 테스트 추가 ④ 작업 디렉터리 때문에 하위 경로에 생긴 `.omc` 상태 파일이 스테이징됨 → 제거, `.gitignore`에 `**/.omc/state/` 추가. 알려진 불안정 테스트: `임대가_유효하면_갱신되고_BUSY로_지켜진다`는 실제 sleep 기반이라 부하가 큰 전체 빌드에서 한 번 실패했고(재실행 2회 통과) 이번 변경과 무관하다.

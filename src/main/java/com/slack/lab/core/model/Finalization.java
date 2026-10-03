@@ -8,8 +8,10 @@ package com.slack.lab.core.model;
  * 조합이 (레코드라 생성자를 감출 수 없으므로) 직접 만들어져도 즉시 걸러지게 하기 위해서다.
  *
  * @param preserveTo 입력을 보존할 목록. 결과 불명은 복구 목록, 명확한 실패는 DLQ, 완료는 없음
+ * @param error 실패 원인. 완료면 null
  */
-public record Finalization(State state, Destination preserveTo, String slackTs, String kind, String stage) {
+public record Finalization(State state, Destination preserveTo, String slackTs, MessageKind kind,
+        ProcessingStage stage, ErrorInfo error) {
 
     public enum State { COMPLETED, UNKNOWN, DEAD }
 
@@ -26,15 +28,15 @@ public record Finalization(State state, Destination preserveTo, String slackTs, 
         }
     }
 
-    public static Finalization completed(String slackTs, String kind) {
-        return new Finalization(State.COMPLETED, Destination.NONE, slackTs, kind, "delivered");
+    public static Finalization completed(String slackTs, MessageKind kind) {
+        return new Finalization(State.COMPLETED, Destination.NONE, slackTs, kind, ProcessingStage.DELIVERED, null);
     }
 
-    public static Finalization unknown(String kind, String stage) {
-        return new Finalization(State.UNKNOWN, Destination.RECOVERY, "", kind, stage);
+    public static Finalization unknown(Failure f) {
+        return new Finalization(State.UNKNOWN, Destination.RECOVERY, "", f.kind(), f.stage(), f.error());
     }
 
-    public static Finalization dead(String kind, String stage) {
-        return new Finalization(State.DEAD, Destination.DLQ, "", kind, stage);
+    public static Finalization dead(Failure f) {
+        return new Finalization(State.DEAD, Destination.DLQ, "", f.kind(), f.stage(), f.error());
     }
 }

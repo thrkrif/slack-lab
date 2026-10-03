@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.slack;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.config.SlackProperties;
 import com.slack.lab.core.model.SlackSendResult;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,6 +53,6 @@ class SlackClientManualIT {
         var client = new SlackClient(props, new ObjectMapper());
 
         var result = client.postMessage("C000000000", null, "이 메시지는 도달하지 않아야 한다", 10_000);
-        assertThat(result).isEqualTo(new SlackSendResult.Failed("channel_not_found"));
+        assertThat(result).isEqualTo(new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_API_ERROR, "channel_not_found")));
     }
 }

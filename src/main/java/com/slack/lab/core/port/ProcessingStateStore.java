@@ -2,6 +2,7 @@ package com.slack.lab.core.port;
 
 import com.slack.lab.core.model.ClaimOutcome;
 import com.slack.lab.core.model.ClaimRequest;
+import com.slack.lab.core.model.Failure;
 import com.slack.lab.core.model.Finalization;
 
 /**
@@ -47,5 +48,5 @@ public interface ProcessingStateStore {
      * @param retries 이번 예약까지 포함한 누적 재시도 횟수
      */
     boolean scheduleRetry(String eventId, String attemptId, String deliveryToken, long nextGen, long retryAtMs,
-            int retries, String stage);
+            int retries, Failure failure);
 }

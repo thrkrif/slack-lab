@@ -81,15 +81,26 @@ public class RecoveryService {
             out.println("미해결 건 없음");
             return 0;
         }
-        out.printf("%-9s %-8s %-22s %-6s %-26s %s%n", "LIST", "STATE", "STAGE", "GEN", "PRESERVED_AT", "EVENT_ID");
+        out.printf("%-9s %-8s %-8s %-28s %-6s %-26s %s%n", "LIST", "STATE", "STAGE", "ERROR", "GEN", "PRESERVED_AT",
+                "EVENT_ID");
         for (Entry e : entries) {
             Map<String, String> st = e.state();
-            out.printf("%-9s %-8s %-22s %-6s %-26s %s%n", e.list(), st.getOrDefault("state", "-"),
-                    st.getOrDefault("stage", e.reason()), st.getOrDefault("gen", "-"),
+            out.printf("%-9s %-8s %-8s %-28s %-6s %-26s %s%n", e.list(), st.getOrDefault("state", "-"),
+                    st.getOrDefault("stage", "-"), errorOf(st, e.reason()), st.getOrDefault("gen", "-"),
                     Instant.ofEpochMilli(e.preservedAtMs()), e.eventId());
         }
         out.println("합계 " + entries.size() + "건");
         return 0;
+    }
+
+    /** 오류 코드와 외부 상세를 한 칸으로 보인다. 기록이 없으면 대체 값. */
+    private static String errorOf(Map<String, String> st, String fallback) {
+        String code = st.get("error_code");
+        if (code == null || code.isBlank()) {
+            return fallback;
+        }
+        String detail = st.get("error_detail");
+        return detail == null || detail.isBlank() ? code : code + ":" + detail;
     }
 
     private int check(String eventId, PrintStream out) {
@@ -99,7 +110,7 @@ public class RecoveryService {
             return 1;
         }
         out.println("상태=" + st.getOrDefault("state", "-") + " stage=" + st.getOrDefault("stage", "-")
-                + " gen=" + st.getOrDefault("gen", "-"));
+                + " error=" + errorOf(st, "-") + " gen=" + st.getOrDefault("gen", "-"));
         String state = st.getOrDefault("state", "");
         if ("COMPLETED".equals(state) || "CLOSED".equals(state)) {
             // 해결되면 보존본(스레드 위치를 담은 입력)이 지워져 조회할 수도, 할 필요도 없다.

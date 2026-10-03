@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.slack;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.port.EventPublisher;
 import com.slack.lab.config.SlackProperties;
 import static org.mockito.ArgumentMatchers.any;
@@ -122,7 +126,7 @@ class SlackEventControllerTest {
 
     @Test
     void 큐_저장_실패는_503이다() throws Exception {
-        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Failed("enqueue_failed:x"));
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_PUBLISH_FAILED, "x")));
 
         mvc.perform(signed(VALID_EVENT)).andExpect(status().isServiceUnavailable());
     }
@@ -130,7 +134,7 @@ class SlackEventControllerTest {
     @Test
     void 큐_저장_확인_불가도_503이다() throws Exception {
         // WAITAOF로 확인받지 못하면 저장 여부가 불명확하므로 200을 주지 않는다(B1).
-        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Unconfirmed("waitaof_numlocal_0"));
+        when(publisher.publish(any(), anyLong(), any())).thenReturn(new PublishResult.Unconfirmed(ErrorInfo.of(ErrorCode.QUEUE_CONFIRM_TIMEOUT)));
 
         mvc.perform(signed(VALID_EVENT)).andExpect(status().isServiceUnavailable());
     }

@@ -1,5 +1,9 @@
 package com.slack.lab.core.service;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
@@ -117,6 +121,30 @@ class EventProcessorTest {
     }
 
     @Test
+    void 실패_안내_발신_중_예상_못한_예외도_실제_메시지_종류와_결과_불명으로_기록한다() {
+        claims(claimed());
+        when(store.markSending(anyString(), anyString())).thenReturn(true);
+        when(store.finalizeAttempt(anyString(), anyString(), anyString(), any(com.slack.lab.core.model.Finalization.class)))
+                .thenReturn(true);
+        when(handler.handle(any(SlackMessageEvent.class), any(AttemptHandle.class), anyBoolean())).thenAnswer(inv -> {
+            AttemptHandle h = inv.getArgument(1);
+            h.recordKind(com.slack.lab.core.model.MessageKind.FAILURE_NOTICE);
+            h.markSending(); // 발신 직전 기록 뒤에 예외가 난다 — 발신 여부를 알 수 없다
+            throw new IllegalStateException("boom");
+        });
+
+        processor.process(delivery);
+
+        ArgumentCaptor<com.slack.lab.core.model.Finalization> f =
+                ArgumentCaptor.forClass(com.slack.lab.core.model.Finalization.class);
+        org.mockito.Mockito.verify(store).finalizeAttempt(anyString(), anyString(), anyString(), f.capture());
+        assertThat(f.getValue().state()).isEqualTo(com.slack.lab.core.model.Finalization.State.UNKNOWN);
+        assertThat(f.getValue().kind()).isEqualTo(com.slack.lab.core.model.MessageKind.FAILURE_NOTICE);
+        assertThat(f.getValue().stage()).isEqualTo(com.slack.lab.core.model.ProcessingStage.SEND);
+        assertThat(f.getValue().error().code()).isEqualTo(com.slack.lab.core.model.ErrorCode.UNEXPECTED_EXCEPTION);
+    }
+
+    @Test
     void 선점_요청에_입력_전체와_전달_토큰이_실린다() {
         claims(new ClaimOutcome.Busy());
         processor.process(delivery);
@@ -131,7 +159,7 @@ class EventProcessorTest {
     @Test
     void 종료_기록이_확인되면_확정한다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.Delivered("answer", "200.1"));
+        handlerReturns(new HandlingResult.Delivered(MessageKind.ANSWER, "200.1"));
         when(store.finalizeAttempt(anyString(), anyString(), anyString(), any(Finalization.class))).thenReturn(true);
 
         processor.process(delivery);
@@ -143,7 +171,7 @@ class EventProcessorTest {
     @Test
     void 종료_기록이_거절되면_확정하지_않고_놓아준다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.Delivered("answer", "200.1"));
+        handlerReturns(new HandlingResult.Delivered(MessageKind.ANSWER, "200.1"));
         when(store.finalizeAttempt(anyString(), anyString(), anyString(), any(Finalization.class))).thenReturn(false);
 
         processor.process(delivery);
@@ -155,7 +183,7 @@ class EventProcessorTest {
     @Test
     void 발신_게이트가_거절하면_상태를_건드리지_않고_놓아준다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.Rejected("mark_sending_rejected"));
+        handlerReturns(new HandlingResult.Rejected(ErrorInfo.of(ErrorCode.SEND_REJECTED, "mark_sending")));
 
         processor.process(delivery);
 
@@ -168,7 +196,7 @@ class EventProcessorTest {
     @Test
     void 종료_기록_호출이_예외로_끝나도_밖으로_던지지_않고_확정하지_않는다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.Delivered("answer", "200.1"));
+        handlerReturns(new HandlingResult.Delivered(MessageKind.ANSWER, "200.1"));
         when(store.finalizeAttempt(anyString(), anyString(), anyString(), any(Finalization.class)))
                 .thenThrow(new IllegalStateException("저장소 다운"));
 
@@ -180,7 +208,7 @@ class EventProcessorTest {
     @Test
     void 확정_뒤_ACK가_예외를_던져도_처리는_정상_종료한다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.Delivered("answer", "200.1"));
+        handlerReturns(new HandlingResult.Delivered(MessageKind.ANSWER, "200.1"));
         when(store.finalizeAttempt(anyString(), anyString(), anyString(), any(Finalization.class))).thenReturn(true);
         delivery.ackThrows = true;
 
@@ -192,9 +220,9 @@ class EventProcessorTest {
     @Test
     void 재시도_요청은_예약이_확인될_때만_확정한다() {
         claims(claimed());
-        handlerReturns(new HandlingResult.RetryRequested("llm_timeout", 0));
+        handlerReturns(new HandlingResult.RetryRequested(TestFailures.llmTimeout(), 0));
         when(store.scheduleRetry(anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt(), anyString()))
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.any(com.slack.lab.core.model.Failure.class)))
                 .thenReturn(true);
 
         processor.process(delivery);

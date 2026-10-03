@@ -14,5 +14,5 @@ public sealed interface LlmResult {
      * @param retryable 재시도 가능 여부(M13, PLAN "M13 재시도·DLQ"). 연결 실패·5xx는 true, 4xx·모델 없음·
      *     요청 직렬화 실패·응답 파싱 실패는 false다 — 같은 입력을 다시 보내도 결과가 달라지지 않는다.
      */
-    record Failed(String reason, long elapsedMs, boolean retryable) implements LlmResult {}
+    record Failed(ErrorInfo error, long elapsedMs, boolean retryable) implements LlmResult {}
 }

@@ -1,6 +1,8 @@
 package com.slack.lab.adapter.slack;
 
 import com.slack.lab.core.port.ChatNotifier;
+import com.slack.lab.core.model.ErrorCode;
+import com.slack.lab.core.model.ErrorInfo;
 import com.slack.lab.core.model.ReactionResult;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.config.SlackProperties;
@@ -86,7 +88,7 @@ public class SlackClient implements ChatNotifier {
             ReplyMetadata metadata) {
         if (remainingMs <= 0) {
             log.warn("Slack 발신 예산 없음 — 발신 시작 안 함");
-            return new SlackSendResult.Failed("budget_exhausted");
+            return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_NO_BUDGET));
         }
         long start = System.nanoTime();
 
@@ -97,7 +99,7 @@ public class SlackClient implements ChatNotifier {
             // 요청을 만들다 실패했으면 네트워크로 나가지 않았으므로 명확한 실패다. 같은 입력으로 다시
             // 시도해도 그대로 실패하므로(M13) 영구 실패다.
             log.warn("Slack 요청 준비 실패 elapsed_ms={} reason={}", elapsedMs(start), e.getClass().getSimpleName());
-            return new SlackSendResult.Failed("request_build_failed:" + e.getClass().getSimpleName());
+            return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_REQUEST_BUILD_FAILED, e));
         }
 
         // M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.11 LOW): buildRequest에 걸린 시간을 예산에서
@@ -109,7 +111,7 @@ public class SlackClient implements ChatNotifier {
             // 실패다(codex critic REVISE MINOR-3). 준비 지연은 시스템 부하 등 일시적 요인일 수 있어 재시도
             // 가능으로 분류한다.
             log.warn("Slack 요청 준비에 예산을 모두 써서 발신하지 않음 elapsed_ms={}", buildElapsedMs);
-            return new SlackSendResult.Failed("budget_exhausted_after_build", true, 0);
+            return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_NO_BUDGET, "after_build"), true, 0);
         }
 
         CompletableFuture<HttpResponse<String>> future;
@@ -118,7 +120,7 @@ public class SlackClient implements ChatNotifier {
         } catch (Exception e) {
             // sendAsync 제출 자체가 실패하면(예: 잘못된 URI) 이때도 아직 네트워크로 나가지 않았다.
             log.warn("Slack 발신 제출 실패 elapsed_ms={} reason={}", elapsedMs(start), e.getClass().getSimpleName());
-            return new SlackSendResult.Failed("send_submit_failed:" + e.getClass().getSimpleName());
+            return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_SUBMIT_FAILED, e));
         }
 
         // M13 흡수 과제(codex WATCH, §2.10 MEDIUM): 제출(sendAsync)과 취소 타이머 예약을 같은 try에 두면,
@@ -133,7 +135,7 @@ public class SlackClient implements ChatNotifier {
             future.cancel(true);
             log.warn("Slack 발신 취소 타이머 예약 실패(결과 불명) elapsed_ms={} reason={}", elapsedMs(start),
                     e.getClass().getSimpleName());
-            return new SlackSendResult.Unknown("cancel_schedule_failed:" + e.getClass().getSimpleName());
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_SUBMIT_FAILED, "cancel_schedule:" + e.getClass().getSimpleName()));
         }
 
         try {
@@ -144,24 +146,24 @@ public class SlackClient implements ChatNotifier {
                 // 재시도 정책이 그 값을 기본 대기보다 우선해 쓴다(M13, PLAN "429 → Retry-After 반영").
                 long retryAfterMs = parseRetryAfterMs(response);
                 log.warn("Slack 발신 rate limit elapsed_ms={} retry_after_ms={}", elapsed, retryAfterMs);
-                return new SlackSendResult.Failed("rate_limited", true, retryAfterMs);
+                return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_RATE_LIMITED), true, retryAfterMs);
             }
             if (response.statusCode() / 100 == 5) {
                 // 5xx는 Slack 쪽에서 일부 처리됐을 수 있어 명확한 실패로 단정하지 않는다.
                 log.warn("Slack 발신 서버 오류(결과 불명) status={} elapsed_ms={}", response.statusCode(), elapsed);
-                return new SlackSendResult.Unknown("status=" + response.statusCode());
+                return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_HTTP_ERROR, String.valueOf(response.statusCode())));
             }
             if (response.statusCode() / 100 != 2) {
                 // 4xx(인증·권한·채널 오류 등)는 같은 요청을 다시 보내도 그대로 실패한다 — 영구 실패.
                 log.warn("Slack 발신 실패 status={} elapsed_ms={}", response.statusCode(), elapsed);
-                return new SlackSendResult.Failed("status=" + response.statusCode());
+                return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_HTTP_ERROR, String.valueOf(response.statusCode())));
             }
             return parseBody(response.body(), elapsed);
         } catch (CancellationException e) {
             // 헤더 수신 전 취소면 미전송이 거의 확실하지만, 요청이 이미 네트워크로 나갔을 수도 있어 안전한 쪽(결과 불명)으로 분류한다.
             long elapsed = elapsedMs(start);
             log.warn("Slack 발신 기한 초과로 취소 elapsed_ms={}", elapsed);
-            return new SlackSendResult.Unknown("cancelled_after_deadline");
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_TIMEOUT, "cancelled_after_deadline"));
         } catch (ExecutionException e) {
             long elapsed = elapsedMs(start);
             Throwable cause = e.getCause();
@@ -169,28 +171,28 @@ public class SlackClient implements ChatNotifier {
                 // 연결조차 되지 않았으므로 전송 안 됐음이 확실하다.
                 log.warn("Slack 발신 연결 실패 elapsed_ms={} reason={}", elapsed, cause.getClass().getSimpleName());
                 // 연결 자체가 안 됐으므로 미전송이 확실하고, 다음 시도에서 연결이 회복될 수 있어 재시도 가능하다.
-                return new SlackSendResult.Failed("connect_failed:" + cause.getClass().getSimpleName(), true, 0);
+                return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_CONNECT_FAILED, cause), true, 0);
             }
             if (cause instanceof HttpTimeoutException) {
                 log.warn("Slack 발신 읽기 시간 초과 elapsed_ms={}", elapsed);
-                return new SlackSendResult.Unknown("read_timeout");
+                return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_TIMEOUT, "read_timeout"));
             }
             // 연결 이후 끊김(RST 등)은 요청이 도달했을 수 있어 결과 불명으로 남긴다.
             log.warn("Slack 발신 중 연결 끊김(결과 불명) elapsed_ms={} reason={}", elapsed,
                     cause == null ? "unknown" : cause.getClass().getSimpleName());
-            return new SlackSendResult.Unknown(cause == null ? "unknown" : cause.getClass().getSimpleName());
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_CONNECTION_LOST, cause));
         } catch (TimeoutException e) {
             future.cancel(true);
             long elapsed = elapsedMs(start);
             log.warn("Slack 발신 감시 시간 초과로 강제 취소 elapsed_ms={}", elapsed);
-            return new SlackSendResult.Unknown("watchdog_timeout");
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_TIMEOUT, "watchdog_timeout"));
         } catch (InterruptedException e) {
             // 인터럽트를 받아도 진행 중인 요청을 취소하지 않으면 헤더 이후 본문 정체가 그대로 남는다(M4 codex 리뷰와 동일 결함).
             future.cancel(true);
             Thread.currentThread().interrupt();
-            return new SlackSendResult.Unknown("interrupted");
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_INTERRUPTED));
         } catch (CompletionException e) {
-            return new SlackSendResult.Unknown(e.getClass().getSimpleName());
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_CONNECTION_LOST, e));
         } finally {
             cancelTask.cancel(false);
         }
@@ -234,20 +236,20 @@ public class SlackClient implements ChatNotifier {
             root = mapper.readTree(body);
         } catch (Exception e) {
             log.warn("Slack 응답 파싱 실패(결과 불명) elapsed_ms={}", elapsed);
-            return new SlackSendResult.Unknown("parse_failed");
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_RESPONSE_INVALID, "parse_failed"));
         }
         JsonNode ok = root.path("ok");
         if (!ok.isBoolean()) {
             // ok 필드가 없거나 boolean이 아니면(예: "true" 문자열) 응답을 신뢰할 수 없다.
             log.warn("Slack 응답에 유효한 ok 필드 없음(결과 불명) elapsed_ms={}", elapsed);
-            return new SlackSendResult.Unknown("invalid_ok_field");
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_RESPONSE_INVALID, "invalid_ok_field"));
         }
         if (ok.asBoolean()) {
             JsonNode ts = root.path("ts");
             if (!ts.isTextual() || ts.asText().isBlank()) {
                 // 성공이라면서 메시지 식별자가 없으면 완전한 성공으로 확정할 수 없다.
                 log.warn("Slack 성공 응답에 ts 없음(결과 불명) elapsed_ms={}", elapsed);
-                return new SlackSendResult.Unknown("success_without_ts");
+                return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_RESPONSE_INVALID, "success_without_ts"));
             }
             log.info("Slack 발신 성공 elapsed_ms={}", elapsed);
             return new SlackSendResult.Success(ts.asText());
@@ -255,10 +257,10 @@ public class SlackClient implements ChatNotifier {
         String error = root.path("error").asText("unknown");
         if (AMBIGUOUS_ERRORS.contains(error)) {
             log.warn("Slack 발신 결과 불명(부분 처리 가능) error={} elapsed_ms={}", error, elapsed);
-            return new SlackSendResult.Unknown(error);
+            return new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_API_ERROR, error));
         }
         log.warn("Slack 발신 실패(ok:false) error={} elapsed_ms={}", error, elapsed);
-        return new SlackSendResult.Failed(error);
+        return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_API_ERROR, error));
     }
 
     private HttpRequest buildRequest(String channel, String threadTs, String text, long remainingMs,

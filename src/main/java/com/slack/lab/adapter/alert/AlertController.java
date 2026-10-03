@@ -93,11 +93,11 @@ public class AlertController {
             }
             // 저장을 확인하지 못했으면 503 — SNS가 재전송하고, 같은 알람은 선점이 흡수한다.
             case PublishResult.Failed f -> {
-                log.error("알람 발행 실패 event_id={} reason={}", event.eventId(), f.reason());
+                log.error("알람 발행 실패 event_id={} reason={}", event.eventId(), f.error().text());
                 yield ResponseEntity.status(503).build();
             }
             case PublishResult.Unconfirmed u -> {
-                log.error("알람 발행 확인 불가 event_id={} reason={}", event.eventId(), u.reason());
+                log.error("알람 발행 확인 불가 event_id={} reason={}", event.eventId(), u.error().text());
                 yield ResponseEntity.status(503).build();
             }
         };

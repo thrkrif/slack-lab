@@ -147,7 +147,7 @@ class RecoveryServiceTest {
 
     @Test
     void check는_이미_해결된_건이면_스레드를_조회하지_않는다() {
-        when(store.stateOf("Ev1")).thenReturn(Map.of("state", "COMPLETED", "stage", "manual_resolved"));
+        when(store.stateOf("Ev1")).thenReturn(Map.of("state", "COMPLETED", "stage", "resolved_manual"));
 
         assertThat(service.execute(List.of("check", "Ev1"), out)).isZero();
 

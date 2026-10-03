@@ -1,5 +1,6 @@
 package com.slack.lab.core.service;
 
+import com.slack.lab.core.model.MessageKind;
 import com.slack.lab.core.port.AttemptHandle;
 import com.slack.lab.core.port.ProcessingStateStore;
 
@@ -14,6 +15,7 @@ final class WorkerAttemptHandle implements AttemptHandle {
     private final long startNanos;
     private final ProcessingStateStore store;
     private volatile boolean sendingMarked;
+    private volatile MessageKind kind = MessageKind.ANSWER;
     private volatile boolean ownershipLost;
     private final java.util.Map<String, Long> phases = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -61,6 +63,15 @@ final class WorkerAttemptHandle implements AttemptHandle {
     /** 기록된 단계 소요. 그 단계에 이르지 못했으면 -1(예: LLM 실패 뒤 발신 없음). */
     long phase(String name) {
         return phases.getOrDefault(name, -1L);
+    }
+
+    @Override
+    public void recordKind(MessageKind kind) {
+        this.kind = kind;
+    }
+
+    MessageKind kind() {
+        return kind;
     }
 
     boolean sendingMarked() {

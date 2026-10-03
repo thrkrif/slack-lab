@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.alert;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -82,7 +86,7 @@ class AlertControllerTest {
 
     @Test
     void 저장을_확인하지_못하면_503으로_재전송을_유도한다() throws Exception {
-        given(publisher.publish(any(SlackMessageEvent.class), anyLong(), any())).willReturn(new PublishResult.Failed("x"));
+        given(publisher.publish(any(SlackMessageEvent.class), anyLong(), any())).willReturn(new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_PUBLISH_FAILED, "x")));
         mvc.perform(post("/alerts/cloudwatch?token=s3cret").contentType(MediaType.APPLICATION_JSON).content(body("ALARM")))
                 .andExpect(status().isServiceUnavailable());
     }
@@ -98,7 +102,7 @@ class AlertControllerTest {
 
     @Test
     void 저장_확인_불가도_503이고_빈_헤더가_유효한_토큰을_가리지_않는다() throws Exception {
-        given(publisher.publish(any(SlackMessageEvent.class), anyLong(), any())).willReturn(new PublishResult.Unconfirmed("t"));
+        given(publisher.publish(any(SlackMessageEvent.class), anyLong(), any())).willReturn(new PublishResult.Unconfirmed(ErrorInfo.of(ErrorCode.QUEUE_CONFIRM_TIMEOUT)));
         mvc.perform(post("/alerts/cloudwatch?token=s3cret").header("X-Alert-Secret", "")
                 .contentType(MediaType.APPLICATION_JSON).content(body("ALARM"))).andExpect(status().isServiceUnavailable());
     }

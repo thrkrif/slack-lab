@@ -20,6 +20,12 @@ public interface AttemptHandle {
     boolean markSending();
 
     /**
+     * 이번 시도가 내보내려는 메시지 종류를 알린다. 발신 이후 예상 못한 예외가 나도 어떤 메시지였는지 기록할 수 있게
+     * {@link #markSending()} 전에 부른다. 기록하지 않는 구현체는 무시해도 된다.
+     */
+    default void recordKind(com.slack.lab.core.model.MessageKind kind) {}
+
+    /**
      * 단계별 소요(ms)를 워커에 알린다(M17 관측: {@code llm_ms}·{@code send_ms} 등). 워커가 시도 하나의 지표를 한 줄로
      * 묶어 남기므로 핸들러는 값을 로그에 흩뿌리지 않는다. 기본 구현은 아무것도 하지 않는다.
      */

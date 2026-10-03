@@ -16,12 +16,12 @@ public sealed interface SlackSendResult {
      * @param retryAfterMs 429 응답의 {@code Retry-After} 헤더(ms로 환산). 해당 없으면 0 — 호출자는
      *     0이면 재시도 정책의 기본 대기를 쓴다.
      */
-    record Failed(String reason, boolean retryable, long retryAfterMs) implements SlackSendResult {
-        public Failed(String reason) {
-            this(reason, false, 0);
+    record Failed(ErrorInfo error, boolean retryable, long retryAfterMs) implements SlackSendResult {
+        public Failed(ErrorInfo error) {
+            this(error, false, 0);
         }
     }
 
     /** 전송 여부를 확인할 수 없음. 자동 재발신 대상이 아니다(A10). */
-    record Unknown(String reason) implements SlackSendResult {}
+    record Unknown(ErrorInfo error) implements SlackSendResult {}
 }

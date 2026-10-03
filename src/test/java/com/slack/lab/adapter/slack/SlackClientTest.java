@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.slack;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.config.SlackProperties;
 import com.slack.lab.core.model.SlackSendResult;
@@ -28,7 +32,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("{\"ok\":false,\"error\":\"channel_not_found\"}", 200)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C-bad", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Failed("channel_not_found"));
+            assertThat(result).isEqualTo(new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_API_ERROR, "channel_not_found")));
         }
     }
 
@@ -49,14 +53,14 @@ class SlackClientTest {
         var client = new SlackClient(props("http://127.0.0.1:1"), new ObjectMapper());
         var result = client.postMessage("C1", null, "안녕", 3_000);
         assertThat(result).isInstanceOf(SlackSendResult.Failed.class);
-        assertThat(((SlackSendResult.Failed) result).reason()).startsWith("connect_failed");
+        assertThat(((SlackSendResult.Failed) result).error().code()).isEqualTo(ErrorCode.SLACK_CONNECT_FAILED);
     }
 
     @Test
     void 남은_기한이_없으면_발신하지_않고_실패로_기록한다() {
         var client = new SlackClient(props("http://127.0.0.1:1"), new ObjectMapper());
         var result = client.postMessage("C1", null, "안녕", 0);
-        assertThat(result).isEqualTo(new SlackSendResult.Failed("budget_exhausted"));
+        assertThat(result).isEqualTo(new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_NO_BUDGET)));
     }
 
     @Test
@@ -73,7 +77,7 @@ class SlackClientTest {
             long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
             assertThat(result).isInstanceOf(SlackSendResult.Unknown.class);
-            assertThat(((SlackSendResult.Unknown) result).reason()).startsWith("cancel_schedule_failed");
+            assertThat(((SlackSendResult.Unknown) result).error().detail()).startsWith("cancel_schedule");
             // 스텁이 응답하지 않는 서버라도, 타이머가 없어 무기한 기다리지 않고 즉시 반환해야 한다 —
             // future를 취소했다는 방증이다.
             assertThat(elapsedMs).isLessThan(3_000);
@@ -113,7 +117,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("rate limited", 429)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Failed("rate_limited", true, 0));
+            assertThat(result).isEqualTo(new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_RATE_LIMITED), true, 0));
         }
     }
 
@@ -122,7 +126,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("bad request", 400)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Failed("status=400"));
+            assertThat(result).isEqualTo(new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_HTTP_ERROR, "400")));
             assertThat(((SlackSendResult.Failed) result).retryable()).isFalse();
         }
     }
@@ -133,7 +137,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("internal error", 500)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Unknown("status=500"));
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_HTTP_ERROR, "500")));
         }
     }
 
@@ -143,7 +147,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("{\"ok\":false,\"error\":\"internal_error\"}", 200)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Unknown("internal_error"));
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_API_ERROR, "internal_error")));
         }
     }
 
@@ -164,7 +168,7 @@ class SlackClientTest {
         try (var stub = StubSlackServer.respondsWith("{\"ok\":true}", 200)) {
             var client = new SlackClient(props(stub.baseUrl()), new ObjectMapper());
             var result = client.postMessage("C1", null, "안녕", 5_000);
-            assertThat(result).isEqualTo(new SlackSendResult.Unknown("success_without_ts"));
+            assertThat(result).isEqualTo(new SlackSendResult.Unknown(ErrorInfo.of(ErrorCode.SLACK_RESPONSE_INVALID, "success_without_ts")));
         }
     }
 
@@ -173,7 +177,7 @@ class SlackClientTest {
         var client = new SlackClient(props("not a url"), new ObjectMapper());
         var result = client.postMessage("C1", null, "안녕", 5_000);
         assertThat(result).isInstanceOf(SlackSendResult.Failed.class);
-        assertThat(((SlackSendResult.Failed) result).reason()).startsWith("request_build_failed");
+        assertThat(((SlackSendResult.Failed) result).error().code()).isEqualTo(ErrorCode.SLACK_REQUEST_BUILD_FAILED);
     }
 
     @Test
