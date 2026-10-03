@@ -3,6 +3,8 @@ package com.slack.lab.adapter.llm;
 import com.slack.lab.core.port.LlmClient;
 import com.slack.lab.core.model.LlmMessage;
 import com.slack.lab.config.LlmProperties;
+import com.slack.lab.core.model.ErrorCode;
+import com.slack.lab.core.model.ErrorInfo;
 import com.slack.lab.core.model.LlmResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -88,7 +90,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         long left = remainingMs - elapsedMs(start);
         if (left < MIN_LANGUAGE_RETRY_MS) {
             log.warn("LLM 응답 언어 위반, 남은 시간 부족으로 다시 묻지 못함 left_ms={}", left);
-            return new LlmResult.Failed("language_violation", elapsedMs(start), true);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_LANGUAGE_VIOLATION), elapsedMs(start), true);
         }
         log.warn("LLM 응답에 한자·가나가 섞임 — 언어 재강조 후 한 번 다시 묻는다 left_ms={}", left);
         LlmResult second = attempt(messages, left, true);
@@ -96,7 +98,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         if (second instanceof LlmResult.Success ok2) {
             if (containsForeignScript(ok2.text())) {
                 log.warn("재시도 응답도 언어 위반 — 실패(재시도 가능)로 처리 total_ms={}", total);
-                return new LlmResult.Failed("language_violation", total, true);
+                return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_LANGUAGE_VIOLATION), total, true);
             }
             return new LlmResult.Success(ok2.text(), total);
         }
@@ -110,7 +112,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
     private LlmResult attempt(List<LlmMessage> messages, long remainingMs, boolean reinforceLanguage) {
         if (remainingMs <= 0) {
-            return new LlmResult.Failed("남은 기한 없음", 0, false);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_NO_BUDGET), 0, false);
         }
         long start = System.nanoTime();
         HttpRequest request;
@@ -121,8 +123,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             // 예외 없이 Failed를 돌려주는 것이다(위 parseContentSafely와 동일한 원칙). 입력 직렬화 실패는
             // 같은 입력으로 재시도해도 그대로 실패하므로 영구 실패다.
             log.warn("LLM 요청 준비 실패 reason={}", e.getClass().getSimpleName());
-            return new LlmResult.Failed("request_build_failed:" + e.getClass().getSimpleName(), elapsedMs(start),
-                    false);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_REQUEST_BUILD_FAILED, e), elapsedMs(start), false);
         }
 
         // M13 흡수 과제(codex WATCH, docs/EXPERIMENT-LOG.md §2.10 LOW): 요청 준비(buildRequest)에 걸린 시간을
@@ -137,26 +138,20 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         long elapsed = elapsedMs(start);
 
         if (outcome.timedOut()) {
-            log.warn("LLM 호출 기한 초과 reason={} elapsed_ms={}", outcome.failureReason(), elapsed);
+            log.warn("LLM 호출 기한 초과 reason={} elapsed_ms={}", outcome.failure().text(), elapsed);
             return new LlmResult.TimedOut(elapsed);
         }
         if (outcome.response() == null) {
-            log.warn("LLM 호출 실패 elapsed_ms={} reason={}", elapsed, outcome.failureReason());
-            return new LlmResult.Failed(outcome.failureReason(), elapsed, isRetryableFailure(outcome.failureReason()));
+            log.warn("LLM 호출 실패 elapsed_ms={} reason={}", elapsed, outcome.failure().text());
+            return new LlmResult.Failed(outcome.failure(), elapsed, outcome.retryable());
         }
         if (outcome.response().statusCode() / 100 != 2) {
             int status = outcome.response().statusCode();
             log.warn("LLM 호출 실패 status={} elapsed_ms={}", status, elapsed);
             // 5xx는 서버 쪽 일시 오류일 수 있어 재시도 가능, 4xx는 같은 요청을 다시 보내도 그대로 실패한다.
-            return new LlmResult.Failed("status=" + status, elapsed, status / 100 == 5);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_HTTP_ERROR, String.valueOf(status)), elapsed, status / 100 == 5);
         }
         return parseContentSafely(outcome.response().body(), elapsed);
-    }
-
-    /** 연결 자체가 안 된 경우만 재시도 가능으로 분류한다(M13, PLAN "오류 분류는 클라이언트 경계에서"). */
-    private static boolean isRetryableFailure(String reason) {
-        return reason != null && (reason.contains("ConnectException") || reason.contains("UnknownHostException")
-                || reason.startsWith("send_submit_failed") || reason.startsWith("cancel_schedule_failed"));
     }
 
     /** 기동 시 모델 존재를 fail-fast로 확인한다 (pitfall 8, PLAN §3 M4). 예외를 던져 기동을 막는다. */
@@ -173,7 +168,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         }
         if (outcome.response() == null) {
             throw new IllegalStateException(
-                    "모델 확인 호출 실패: llm.base-url=" + props.baseUrl() + " reason=" + outcome.failureReason());
+                    "모델 확인 호출 실패: llm.base-url=" + props.baseUrl() + " reason=" + outcome.failure().text());
         }
         if (outcome.response().statusCode() / 100 != 2) {
             throw new IllegalStateException("모델 목록 조회 실패 status=" + outcome.response().statusCode());
@@ -205,7 +200,20 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     }
 
     /** 요청 성공/응답 유무와 실패 사유를 함께 담는다. {@code response}가 null이면 실패, {@code timedOut}이면 기한 초과다. */
-    private record HttpOutcome(HttpResponse<String> response, boolean timedOut, String failureReason) {}
+    private record HttpOutcome(HttpResponse<String> response, boolean timedOut, ErrorInfo failure, boolean retryable) {
+        static HttpOutcome ok(HttpResponse<String> response) {
+            return new HttpOutcome(response, false, null, false);
+        }
+
+        static HttpOutcome timedOut(String detail) {
+            return new HttpOutcome(null, true, ErrorInfo.of(ErrorCode.LLM_TIMEOUT, detail), true);
+        }
+
+        /** 연결 자체가 안 됐거나 요청이 나가기 전에 실패한 경우만 재시도 가능으로 본다(M13, "오류 분류는 클라이언트 경계에서"). */
+        static HttpOutcome failed(ErrorInfo failure, boolean retryable) {
+            return new HttpOutcome(null, false, failure, retryable);
+        }
+    }
 
     /**
      * sendAsync + 호출별 cancel(true) 패턴을 한 곳에 모은다(M1.5 A2). 예외를 던지지 않고 분류된 결과를 돌려준다 —
@@ -224,7 +232,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         try {
             future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         } catch (Exception e) {
-            return new HttpOutcome(null, false, "send_submit_failed:" + e.getClass().getSimpleName());
+            return HttpOutcome.failed(ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED, "submit:" + e.getClass().getSimpleName()), true);
         }
         java.util.concurrent.ScheduledFuture<?> cancelTask;
         try {
@@ -232,35 +240,39 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         } catch (Exception e) {
             future.cancel(true);
             log.warn("LLM 취소 타이머 예약 실패(재시도 가능) reason={}", e.getClass().getSimpleName());
-            return new HttpOutcome(null, false, "cancel_schedule_failed:" + e.getClass().getSimpleName());
+            return HttpOutcome.failed(ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED, "cancel_schedule:" + e.getClass().getSimpleName()), true);
         }
         try {
             HttpResponse<String> response = future.get(remainingMs + 500, TimeUnit.MILLISECONDS);
-            return new HttpOutcome(response, false, null);
+            return HttpOutcome.ok(response);
         } catch (CancellationException e) {
-            return new HttpOutcome(null, true, "cancelled_after_deadline");
+            return HttpOutcome.timedOut("cancelled_after_deadline");
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof HttpTimeoutException) {
-                return new HttpOutcome(null, true, "request_timeout");
+                return HttpOutcome.timedOut("request_timeout");
             }
             // 기한 타이머의 cancel(true)가 ExecutionException으로 감싸져 올 수 있다(경합, M14 중 간헐 실패로 발견).
             // 시간 초과로 분류하지 않으면 재시도 가능한 기한 초과가 영구 실패(즉시 안내)로 바뀐다.
             if (cause instanceof CancellationException) {
-                return new HttpOutcome(null, true, "cancelled_after_deadline");
+                return HttpOutcome.timedOut("cancelled_after_deadline");
             }
-            return new HttpOutcome(null, false, cause == null ? "unknown" : cause.getClass().getSimpleName());
+            if (cause instanceof java.net.ConnectException || cause instanceof java.net.UnknownHostException) {
+                return HttpOutcome.failed(ErrorInfo.of(ErrorCode.LLM_CONNECT_FAILED, cause), true);
+            }
+            return HttpOutcome.failed(cause == null ? ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED)
+                    : ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED, cause), false);
         } catch (TimeoutException e) {
             // cancel(true) 예약이 도달하지 못한 방어적 경로. 감시 시간 초과 시 직접 취소한다.
             future.cancel(true);
-            return new HttpOutcome(null, true, "watchdog_timeout");
+            return HttpOutcome.timedOut("watchdog_timeout");
         } catch (InterruptedException e) {
             // 인터럽트를 받아도 진행 중인 HTTP 요청이 남으면 헤더 이후 본문 정체가 그대로 지속된다 — 반드시 취소한다.
             future.cancel(true);
             Thread.currentThread().interrupt();
-            return new HttpOutcome(null, false, "interrupted");
+            return HttpOutcome.failed(ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED, "interrupted"), false);
         } catch (CompletionException e) {
-            return new HttpOutcome(null, false, e.getClass().getSimpleName());
+            return HttpOutcome.failed(ErrorInfo.of(ErrorCode.LLM_REQUEST_FAILED, e), false);
         } finally {
             cancelTask.cancel(false);
         }
@@ -273,11 +285,11 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             content = mapper.readTree(body).path("choices").path(0).path("message").path("content");
         } catch (Exception e) {
             log.warn("LLM 응답 파싱 실패 elapsed_ms={} reason={}", elapsed, e.getClass().getSimpleName());
-            return new LlmResult.Failed("parse_failed:" + e.getClass().getSimpleName(), elapsed, false);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_RESPONSE_INVALID, "parse:" + e.getClass().getSimpleName()), elapsed, false);
         }
         if (!content.isTextual() || content.asText().isBlank()) {
             log.warn("LLM 응답에 유효한 content 없음 elapsed_ms={}", elapsed);
-            return new LlmResult.Failed("empty_or_missing_content", elapsed, false);
+            return new LlmResult.Failed(ErrorInfo.of(ErrorCode.LLM_RESPONSE_INVALID, "empty_content"), elapsed, false);
         }
         log.info("LLM 호출 성공 elapsed_ms={}", elapsed);
         return new LlmResult.Success(content.asText(), elapsed);

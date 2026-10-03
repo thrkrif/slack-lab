@@ -1,5 +1,6 @@
 package com.slack.lab.core.service;
 
+import com.slack.lab.core.model.Failure;
 import com.slack.lab.config.RetryProperties;
 import com.slack.lab.config.AppRole;
 import com.slack.lab.config.ConditionalOnRole;
@@ -33,7 +34,7 @@ public class RetryPolicy {
      * @param retryAfterMsOverride 0보다 크면 정책의 기본 백오프 대신 이 값을 쓴다(Slack 429 Retry-After 등).
      */
     public boolean scheduleRetry(String eventId, String attemptId, String deliveryToken, long currentGen,
-            int currentRetries, long retryAfterMsOverride, String stage) {
+            int currentRetries, long retryAfterMsOverride, Failure failure) {
         // StartupInvariants(M10)가 backoffMs.size() >= maxRetries를 기동 시 검사하지만, 그 검사를 거치지
         // 않는 조합(단위 테스트가 빈을 직접 생성하는 경우 등)이면 여기서도 벗어날 수 있다(code-reviewer가
         // retry.max-retries=4·기본 backoffMs 3개 조합으로 실제 재현). 불변식이 지켜졌어도 설정 실수가
@@ -43,6 +44,6 @@ public class RetryPolicy {
         long backoffMs = retryAfterMsOverride > 0 ? retryAfterMsOverride : props.backoffMs().get(backoffIndex);
         long retryAtMs = System.currentTimeMillis() + backoffMs;
         int retries = currentRetries + 1;
-        return store.scheduleRetry(eventId, attemptId, deliveryToken, currentGen + 1, retryAtMs, retries, stage);
+        return store.scheduleRetry(eventId, attemptId, deliveryToken, currentGen + 1, retryAtMs, retries, failure);
     }
 }

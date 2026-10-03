@@ -9,8 +9,8 @@ public sealed interface PublishResult {
     record Enqueued(String messageId) implements PublishResult {}
 
     /** 저장 자체가 실패했음이 확실하다(연결 거부 등). 재전송 시 새로 시도된다. */
-    record Failed(String reason) implements PublishResult {}
+    record Failed(ErrorInfo error) implements PublishResult {}
 
     /** `XADD`는 됐을 수 있으나 `WAITAOF`로 로컬 fsync를 확인하지 못했다. 저장 여부가 불명확하다. */
-    record Unconfirmed(String reason) implements PublishResult {}
+    record Unconfirmed(ErrorInfo error) implements PublishResult {}
 }

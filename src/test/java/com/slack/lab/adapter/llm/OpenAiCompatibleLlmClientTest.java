@@ -1,5 +1,6 @@
 package com.slack.lab.adapter.llm;
 
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.model.LlmMessage;
 import com.slack.lab.config.LlmProperties;
 import com.slack.lab.core.model.LlmResult;
@@ -179,7 +180,8 @@ class OpenAiCompatibleLlmClientTest {
 
             assertThat(result).isInstanceOf(LlmResult.Failed.class);
             assertThat(((LlmResult.Failed) result).retryable()).isTrue();
-            assertThat(((LlmResult.Failed) result).reason()).startsWith("cancel_schedule_failed");
+            assertThat(((LlmResult.Failed) result).error().code()).isEqualTo(ErrorCode.LLM_REQUEST_FAILED);
+            assertThat(((LlmResult.Failed) result).error().detail()).startsWith("cancel_schedule");
             // 스텁이 응답하지 않는(수 초 sleep) 서버라도, 타이머가 없어 무기한 기다리지 않고 즉시 반환해야
             // 한다 — future를 취소했다는 방증이다.
             assertThat(elapsedMs).isLessThan(3_000);
@@ -262,7 +264,7 @@ class OpenAiCompatibleLlmClientTest {
 
             assertThat(result).isInstanceOf(LlmResult.Failed.class);
             var failed = (LlmResult.Failed) result;
-            assertThat(failed.reason()).isEqualTo("language_violation");
+            assertThat(failed.error().code()).isEqualTo(ErrorCode.LLM_LANGUAGE_VIOLATION);
             assertThat(failed.retryable()).isTrue();
             assertThat(stub.requestCount()).isEqualTo(2);
         }
@@ -275,7 +277,7 @@ class OpenAiCompatibleLlmClientTest {
             var result = client.chat("질문", 2_500);
 
             assertThat(result).isInstanceOf(LlmResult.Failed.class);
-            assertThat(((LlmResult.Failed) result).reason()).isEqualTo("language_violation");
+            assertThat(((LlmResult.Failed) result).error().code()).isEqualTo(ErrorCode.LLM_LANGUAGE_VIOLATION);
             assertThat(stub.requestCount()).isEqualTo(1);
         }
     }

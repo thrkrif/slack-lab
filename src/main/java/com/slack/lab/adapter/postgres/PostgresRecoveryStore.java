@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.slack.lab.config.StateProperties;
 import com.slack.lab.core.model.RecoveryOutcome;
+import com.slack.lab.core.model.ProcessingStage;
 import com.slack.lab.core.port.RecoveryStore;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -55,7 +56,7 @@ public class PostgresRecoveryStore implements RecoveryStore {
     public List<Entry> list() {
         List<Entry> out = new ArrayList<>();
         jdbc.query("""
-                SELECT p.event_id, p.list_name, p.reason, p.preserved_at, s.state, s.stage, s.gen
+                SELECT p.event_id, p.list_name, p.reason, p.preserved_at, s.state, s.stage, s.error_code, s.error_detail, s.gen
                 FROM preserved_input p LEFT JOIN processing_state s ON s.event_id = p.event_id
                 WHERE p.list_name IN ('dlq', 'recovery')
                 ORDER BY CASE p.list_name WHEN 'recovery' THEN 0 ELSE 1 END, p.preserved_at""",
@@ -63,6 +64,8 @@ public class PostgresRecoveryStore implements RecoveryStore {
                     Map<String, String> st = new LinkedHashMap<>();
                     put(st, "state", rs.getString("state"));
                     put(st, "stage", rs.getString("stage"));
+                    put(st, "error_code", rs.getString("error_code"));
+                    put(st, "error_detail", rs.getString("error_detail"));
                     put(st, "gen", rs.getObject("gen") == null ? null : String.valueOf(rs.getLong("gen")));
                     out.add(new Entry(rs.getString("list_name"), rs.getString("event_id"), rs.getLong("preserved_at"), st,
                             rs.getString("reason")));
@@ -74,10 +77,10 @@ public class PostgresRecoveryStore implements RecoveryStore {
     public Map<String, String> stateOf(String eventId) {
         Map<String, String> out = new LinkedHashMap<>();
         jdbc.query("""
-                SELECT state, stage, gen, kind, slack_ts, channel, thread_ts, retries, first_received_at
+                SELECT state, stage, error_code, error_detail, gen, kind, slack_ts, channel, thread_ts, retries, first_received_at
                 FROM processing_state WHERE event_id = ?""",
                 rs -> {
-                    for (String col : List.of("state", "stage", "gen", "kind", "slack_ts", "channel", "thread_ts",
+                    for (String col : List.of("state", "stage", "error_code", "error_detail", "gen", "kind", "slack_ts", "channel", "thread_ts",
                             "retries", "first_received_at")) {
                         Object v = rs.getObject(col);
                         put(out, col, v == null ? null : v.toString());
@@ -126,21 +129,21 @@ public class PostgresRecoveryStore implements RecoveryStore {
 
     @Override
     public RecoveryOutcome resolveCompleted(String eventId, String slackTs) {
-        return resolve(eventId, "COMPLETED", slackTs, "manual_resolved");
+        return resolve(eventId, "COMPLETED", slackTs, ProcessingStage.RESOLVED_MANUAL);
     }
 
     @Override
     public RecoveryOutcome resolveCompletedAutomatically(String eventId, String slackTs) {
         // 감사·실험 기록에서 사람의 조치와 섞이지 않게 단계를 구분한다.
-        return resolve(eventId, "COMPLETED", slackTs, "auto_resolved");
+        return resolve(eventId, "COMPLETED", slackTs, ProcessingStage.RESOLVED_AUTO);
     }
 
     @Override
     public RecoveryOutcome close(String eventId) {
-        return resolve(eventId, "CLOSED", "", "manual_closed");
+        return resolve(eventId, "CLOSED", "", ProcessingStage.CLOSED_MANUAL);
     }
 
-    private RecoveryOutcome resolve(String eventId, String to, String slackTs, String stage) {
+    private RecoveryOutcome resolve(String eventId, String to, String slackTs, ProcessingStage stage) {
         return tx.execute(status -> {
             lock(eventId);
             List<Map<String, Object>> rows = jdbc.queryForList(
@@ -161,10 +164,10 @@ public class PostgresRecoveryStore implements RecoveryStore {
             if (!rerun) {
                 if ("COMPLETED".equals(to)) {
                     jdbc.update("UPDATE processing_state SET state = 'COMPLETED', stage = ?, slack_ts = ?, "
-                            + "input = NULL, updated_at = ? WHERE event_id = ?", stage, slackTs, now, eventId);
+                            + "error_code = NULL, error_detail = NULL, input = NULL, updated_at = ? WHERE event_id = ?", stage.code(), slackTs, now, eventId);
                 } else {
                     jdbc.update("UPDATE processing_state SET state = 'CLOSED', stage = ?, input = NULL, "
-                            + "updated_at = ? WHERE event_id = ?", stage, now, eventId);
+                            + "updated_at = ? WHERE event_id = ?", stage.code(), now, eventId);
                 }
             }
             // 사람이 명시적으로 끝낸 건이라 세대 비교 없이 보존 입력을 지운다(B18). 보존 기간(만료 시각)은 마지막에 건다 —
@@ -207,12 +210,12 @@ public class PostgresRecoveryStore implements RecoveryStore {
             // 상태가 먼저 올라가야 한다: 재투입 메시지의 세대가 상태보다 크면 이상(ANOMALY)으로 판정된다.
             jdbc.update("""
                     UPDATE processing_state SET state = 'RETRY_WAIT', gen = ?, retry_at = ?, manual_gen = ?,
-                        stage = 'manual_reprocess', expires_at = NULL, updated_at = ? WHERE event_id = ?""",
-                    next, now, next, now, eventId);
+                        stage = ?, expires_at = NULL, updated_at = ? WHERE event_id = ?""",
+                    next, now, next, ProcessingStage.REPROCESS_MANUAL.code(), now, eventId);
             jdbc.update("""
-                    UPDATE preserved_input SET list_name = 'retry', reason = 'manual_reprocess', gen = ?, due_at = ?,
+                    UPDATE preserved_input SET list_name = 'retry', reason = ?, gen = ?, due_at = ?,
                         payload = ?, relayed_at = NULL, preserved_at = ? WHERE event_id = ?""",
-                    next, now, payload, now, eventId);
+                    ProcessingStage.REPROCESS_MANUAL.code(), next, now, payload, now, eventId);
             return new RecoveryOutcome("OK", String.valueOf(next));
         });
     }

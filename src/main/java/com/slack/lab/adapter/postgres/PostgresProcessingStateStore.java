@@ -5,6 +5,10 @@ import com.slack.lab.config.StateProperties;
 import com.slack.lab.core.model.ClaimOutcome;
 import com.slack.lab.core.model.ClaimRequest;
 import com.slack.lab.core.model.Finalization;
+import com.slack.lab.core.model.ProcessingStage;
+import com.slack.lab.core.model.Failure;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.port.ProcessingStateStore;
 import com.slack.lab.core.port.RetryOutbox;
 import java.time.Duration;
@@ -93,6 +97,13 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
     }
 
     /** 멱등: 같은 입력을 다시 써도 결과가 같다. 한 이벤트는 한 목록에만 있다. */
+    /** 저장소가 스스로 종료·격리한 건을 기록한다. 본문(input)은 보존 테이블에만 남긴다(B18). */
+    private void settle(String id, String state, ProcessingStage stage, ErrorInfo error, long now) {
+        write("UPDATE processing_state SET state = ?, stage = ?, error_code = ?, error_detail = ?, expires_at = NULL, "
+                + "input = NULL, updated_at = ? WHERE event_id = ?", state, stage.code(), error.code().code(),
+                error.detail(), now, id);
+    }
+
     private void preserve(String eventId, String list, String reason, long gen, long dueAt, String payload, long now) {
         preserve(eventId, list, reason, gen, dueAt, payload, now, true);
     }
@@ -149,7 +160,7 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 if (payload == null) {
                     return new ClaimOutcome.NoInput();
                 }
-                preserve(id, "dlq", "anomaly_gen", m, now, payload, now, false);
+                preserve(id, "dlq", ErrorInfo.of(ErrorCode.GEN_ANOMALY).text(), m, now, payload, now, false);
                 return new ClaimOutcome.Settled(ClaimOutcome.Reason.ANOMALY);
             }
             // 2: 해결된 건. 사람이 닫은 CLOSED도 여기서 끝나 다시 보존되지 않는다.
@@ -162,7 +173,7 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                     if (payload == null) {
                         return new ClaimOutcome.NoInput();
                     }
-                    preserve(id, listFor(st), "recovered_" + st.toLowerCase(), m, now, payload, now);
+                    preserve(id, listFor(st), ErrorInfo.of(ErrorCode.RECOVERED_STALE, st.toLowerCase()).text(), m, now, payload, now);
                 }
                 return new ClaimOutcome.Settled(ClaimOutcome.Reason.DONE);
             }
@@ -175,9 +186,9 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 if (payload == null) {
                     return new ClaimOutcome.NoInput();
                 }
-                preserve(id, "recovery", "sending_lease_expired", m, now, payload, now);
-                write("UPDATE processing_state SET state = 'UNKNOWN', stage = 'sending_lease_expired', "
-                        + "expires_at = NULL, input = NULL, updated_at = ? WHERE event_id = ?", now, id);
+                ErrorInfo expired = ErrorInfo.of(ErrorCode.SENDING_LEASE_EXPIRED);
+                preserve(id, "recovery", expired.text(), m, now, payload, now);
+                settle(id, "UNKNOWN", ProcessingStage.SEND, expired, now);
                 return new ClaimOutcome.Settled(ClaimOutcome.Reason.UNKNOWN);
             }
             // 4': 사람이 승인한 1회 실행이 소실됐다. 새 승인 없이는 다시 돌리지 않는다.
@@ -185,9 +196,9 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 if (payload == null) {
                     return new ClaimOutcome.NoInput();
                 }
-                preserve(id, "dlq", "manual_attempt_lost", m, now, payload, now);
-                write("UPDATE processing_state SET state = 'DEAD', stage = 'manual_attempt_lost', "
-                        + "expires_at = NULL, input = NULL, updated_at = ? WHERE event_id = ?", now, id);
+                ErrorInfo lost = ErrorInfo.of(ErrorCode.MANUAL_ATTEMPT_LOST);
+                preserve(id, "dlq", lost.text(), m, now, payload, now);
+                settle(id, "DEAD", ProcessingStage.STATE, lost, now);
                 return new ClaimOutcome.Settled(ClaimOutcome.Reason.DEAD);
             }
             // 5
@@ -210,8 +221,9 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 if (payload == null) {
                     return new ClaimOutcome.NoInput();
                 }
-                preserve(id, "dlq", "window_expired", m, now, payload, now);
-                upsertState(id, "DEAD", null, gen, 0, first, r, false, row, "window_expired", null, now);
+                ErrorInfo expired = ErrorInfo.of(ErrorCode.WINDOW_EXPIRED);
+                preserve(id, "dlq", expired.text(), m, now, payload, now);
+                upsertState(id, "DEAD", null, gen, 0, first, r, false, row, ProcessingStage.STATE, expired, null, now);
                 return new ClaimOutcome.Settled(ClaimOutcome.Reason.EXPIRED);
             }
 
@@ -222,19 +234,20 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
             }
             // 승인은 여기서 소비된다. retries는 이 claim이 손대지 않는다(RETRY_WAIT이 남긴 값을 물려받는다).
             String attemptId = UUID.randomUUID().toString();
-            upsertState(id, "PROCESSING", attemptId, gen, now + state.leaseMs(), first, r, manual, row, null, payload,
-                    now);
+            upsertState(id, "PROCESSING", attemptId, gen, now + state.leaseMs(), first, r, manual, row, null, null,
+                    payload, now);
             return new ClaimOutcome.Claimed(attemptId, gen, manual, exists ? row.retries : 0);
         });
     }
 
     /** 새 행이면 만들고 있으면 갱신한다. {@code manual}이면 승인(manual_gen)을 같은 문장에서 지운다. */
     private void upsertState(String id, String newState, String attemptId, long gen, long leaseUntil, long first,
-            ClaimRequest r, boolean manual, Row existing, String stage, String input, long now) {
+            ClaimRequest r, boolean manual, Row existing, ProcessingStage stage, ErrorInfo error, String input,
+            long now) {
         write("""
                 INSERT INTO processing_state (event_id, state, attempt_id, gen, lease_until, first_received_at, channel,
-                    thread_ts, manual_run, stage, input, expires_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                    thread_ts, manual_run, stage, error_code, error_detail, input, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                 ON CONFLICT (event_id) DO UPDATE SET state = EXCLUDED.state,
                     attempt_id = COALESCE(EXCLUDED.attempt_id, processing_state.attempt_id), gen = EXCLUDED.gen,
                     lease_until = CASE WHEN EXCLUDED.attempt_id IS NULL THEN processing_state.lease_until
@@ -245,11 +258,13 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                                       ELSE EXCLUDED.manual_run END,
                     manual_gen = CASE WHEN ? THEN NULL ELSE processing_state.manual_gen END,
                     stage = COALESCE(EXCLUDED.stage, processing_state.stage),
+                    error_code = COALESCE(EXCLUDED.error_code, processing_state.error_code),
+                    error_detail = COALESCE(EXCLUDED.error_detail, processing_state.error_detail),
                     -- 선점이면 이번 입력으로 갱신하고, 종료(창 초과 DEAD)면 비운다: 본문은 보존 테이블에만 있어야 한다(B18).
                     input = EXCLUDED.input,
                     expires_at = NULL, updated_at = EXCLUDED.updated_at""",
-                id, newState, attemptId, gen, leaseUntil, first, r.channel(), r.threadTs(), manual, stage, input, now,
-                manual);
+                id, newState, attemptId, gen, leaseUntil, first, r.channel(), r.threadTs(), manual, stage == null ? null : stage.code(),
+                error == null ? null : error.code().code(), error == null ? null : error.detail(), input, now, manual);
     }
 
     @Override
@@ -312,14 +327,16 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                     return false; // 보존할 입력이 없으면 아무것도 쓰지 않고 거절한다
                 }
                 String list = f.preserveTo() == Finalization.Destination.RECOVERY ? "recovery" : "dlq";
-                preserve(eventId, list, nz(f.stage()), row.gen, now, row.input, now);
+                preserve(eventId, list, f.error() == null ? "unknown" : f.error().text(), row.gen, now, row.input, now);
             }
             Long expires = "COMPLETED".equals(to) ? now + Duration.ofDays(state.completedRetentionDays()).toMillis()
                     : null;
             write("""
-                    UPDATE processing_state SET state = ?, stage = ?, kind = ?, slack_ts = ?, expires_at = ?,
-                        input = NULL, updated_at = ? WHERE event_id = ?""",
-                    to, nz(f.stage()), nz(f.kind()), nz(f.slackTs()), expires, now, eventId);
+                    UPDATE processing_state SET state = ?, stage = ?, error_code = ?, error_detail = ?, kind = ?,
+                        slack_ts = ?, expires_at = ?, input = NULL, updated_at = ? WHERE event_id = ?""",
+                    to, f.stage().code(), f.error() == null ? null : f.error().code().code(),
+                    f.error() == null ? null : f.error().detail(), f.kind() == null ? "" : f.kind().code(),
+                    nz(f.slackTs()), expires, now, eventId);
             if ("COMPLETED".equals(to)) {
                 cleanupPreserved(eventId, row.gen);
             }
@@ -329,7 +346,7 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
 
     @Override
     public boolean scheduleRetry(String eventId, String attemptId, String deliveryToken, long nextGen, long retryAtMs,
-            int retries, String stage) {
+            int retries, Failure failure) {
         return Boolean.TRUE.equals(tx.execute(status -> {
             statements.get()[0] = 0;
             lock(eventId);
@@ -340,12 +357,13 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                 return false;
             }
             // 재투입될 입력은 다음 세대 번호로 한 번에 쓴다(보존본과 상태의 세대가 어긋나는 순간을 만들지 않는다).
-            preserve(eventId, "retry", "retry_scheduled", nextGen, retryAtMs,
+            preserve(eventId, "retry", failure.error().text(), nextGen, retryAtMs,
                     PreservedInputJson.withGen(mapper, row.input, nextGen), now);
             write("""
                     UPDATE processing_state SET state = 'RETRY_WAIT', gen = ?, retry_at = ?, retries = ?, stage = ?,
-                        expires_at = NULL, updated_at = ? WHERE event_id = ?""",
-                    nextGen, retryAtMs, retries, nz(stage), now, eventId);
+                        kind = ?, error_code = ?, error_detail = ?, expires_at = NULL, updated_at = ? WHERE event_id = ?""",
+                    nextGen, retryAtMs, retries, failure.stage().code(), failure.kind().code(), failure.error().code().code(),
+                    failure.error().detail(), now, eventId);
             return true;
         }));
     }
@@ -373,11 +391,12 @@ public class PostgresProcessingStateStore implements ProcessingStateStore, Retry
                         PreservedInputJson.readReceivedAt(mapper, r.payload)));
             } catch (RuntimeException e) {
                 // 깨진 입력 하나가 폴링 전체를 막지 않게 DLQ로 격리한다(사람이 복구 목록에서 보고 처리).
-                jdbc.update("UPDATE preserved_input SET list_name = 'dlq', reason = 'corrupt_payload' WHERE event_id = ?",
-                        r.eventId);
+                jdbc.update("UPDATE preserved_input SET list_name = 'dlq', reason = ? WHERE event_id = ?",
+                        ErrorInfo.of(ErrorCode.CORRUPT_PAYLOAD).text(), r.eventId);
                 // 상태도 DEAD로 내린다: RETRY_WAIT로 두면 복구 CLI의 close·reprocess가 모두 BAD_STATE로 막혀 영구히 남는다.
-                jdbc.update("UPDATE processing_state SET state = 'DEAD', stage = 'corrupt_payload', expires_at = NULL "
-                        + "WHERE event_id = ? AND state = 'RETRY_WAIT'", r.eventId);
+                jdbc.update("UPDATE processing_state SET state = 'DEAD', stage = ?, error_code = ?, error_detail = '', "
+                        + "expires_at = NULL WHERE event_id = ? AND state = 'RETRY_WAIT'",
+                        ProcessingStage.STATE.code(), ErrorCode.CORRUPT_PAYLOAD.code(), r.eventId);
             }
         }
         return out;

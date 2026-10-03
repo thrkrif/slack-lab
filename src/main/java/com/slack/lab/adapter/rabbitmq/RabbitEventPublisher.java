@@ -3,6 +3,8 @@ package com.slack.lab.adapter.rabbitmq;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import com.slack.lab.config.QueueProperties;
+import com.slack.lab.core.model.ErrorCode;
+import com.slack.lab.core.model.ErrorInfo;
 import com.slack.lab.core.model.PublishResult;
 import com.slack.lab.core.model.SlackMessageEvent;
 import com.slack.lab.core.port.EventPublisher;
@@ -100,7 +102,7 @@ public class RabbitEventPublisher implements EventPublisher, EventRepublisher {
             discardChannel();
             log.warn("큐 저장 실패 event_id={} reason={} detail={}", event.eventId(), e.getClass().getSimpleName(),
                     e.getMessage());
-            return new PublishResult.Failed("publish_failed:" + e.getClass().getSimpleName());
+            return new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_PUBLISH_FAILED, e));
         }
 
         // 2단계: 확인 대기. 요청이 나간 뒤라서 실패해도 저장 여부는 모른다(Unconfirmed, 규칙 4).
@@ -112,24 +114,24 @@ public class RabbitEventPublisher implements EventPublisher, EventRepublisher {
             // 다음 발행의 결과에 섞인다 — 채널을 버리고 다음 발행이 새 채널로 시작하게 한다.
             discardChannel();
             log.warn("큐 저장 확인 시간 초과 event_id={} timeout_ms={}", event.eventId(), confirmTimeoutMs);
-            return new PublishResult.Unconfirmed("confirm_timeout");
+            return new PublishResult.Unconfirmed(ErrorInfo.of(ErrorCode.QUEUE_CONFIRM_TIMEOUT));
         } catch (RuntimeException e) {
             discardChannel();
             log.warn("큐 저장 확인 중 연결 종료 event_id={} reason={}", event.eventId(), e.getClass().getSimpleName());
-            return new PublishResult.Unconfirmed("confirm_interrupted:" + e.getClass().getSimpleName());
+            return new PublishResult.Unconfirmed(ErrorInfo.of(ErrorCode.QUEUE_CONFIRM_INTERRUPTED, e));
         } catch (InterruptedException e) {
             discardChannel();
             Thread.currentThread().interrupt();
-            return new PublishResult.Unconfirmed("interrupted");
+            return new PublishResult.Unconfirmed(ErrorInfo.of(ErrorCode.QUEUE_CONFIRM_INTERRUPTED, "interrupted"));
         }
         if (returned.get()) {
             // 큐에 라우팅되지 않았다 — 저장된 것이 아니다.
             log.warn("큐 저장 실패(라우팅 안 됨) event_id={}", event.eventId());
-            return new PublishResult.Failed("unroutable");
+            return new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_UNROUTABLE));
         }
         if (!acked) {
             log.warn("큐 저장 거절(nack) event_id={}", event.eventId());
-            return new PublishResult.Failed("nack");
+            return new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_NACKED));
         }
         long ms = (System.nanoTime() - start) / 1_000_000;
         log.info("큐 저장 확인 event_id={} gen={} enqueue_ms={}", event.eventId(), gen, ms);

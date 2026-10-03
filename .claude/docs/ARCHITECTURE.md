@@ -503,6 +503,10 @@ Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔�
 
 모니터링 도구가 `POST /alerts/{source}`로 직접 보낸다(Slack 메시지를 파싱하지 않는다). 인증은 공유 시크릿(`X-Alert-Secret` 헤더 또는 SNS용 `?token=`, 상수 시간 비교)이고 `alert.secret`·`alert.channel`이 모두 있어야 켜진다(없으면 404). `AlertNormalizer`(원천별 어댑터)가 `AlertEvent`로 바꾸고, `AlertEvent.toMessageEvent()`가 기존 파이프라인(큐 저장 확인 후 200 → 선점 → LLM → 발신)에 `ts` 없는 메시지 이벤트로 태운다 — 리포트는 채널에 새 메시지로 올라가고 반응은 붙지 않으며(원 메시지 없음) 후속 질문은 그 스레드의 멘션으로 이어진다. **"같은 알람" = 알람 이름 + 상태 변경 시각의 해시**(`alert-<hash>`가 event_id): SNS 재전송은 선점 표가 흡수하고 해결 뒤 재발은 시각이 달라 새 건이다. ALARM 이외 전이(OK 등)는 200으로 받고 무시한다. 저장 확인 실패는 503(SNS가 재전송). 한계: SNS 서명은 검증하지 않고(시크릿이 대신, HTTPS 전제), SubscriptionConfirmation의 URL은 서버가 호출하지 않는다(SSRF 방지, 운영자가 한 번 연다). `ts`가 없는 리포트는 스레드 조회 단서가 없어 결과 불명 자동 조회 대상에서 빠진다(사람이 복구 CLI로 처리).
 
+#### 오류 모델 (M24)
+
+실패는 예외가 아니라 결과 타입(sealed `Success/Failed/Unknown`, `PublishResult`, `HandlingResult`)으로 전달한다 — 확실한 실패·결과 불명·재시도 가능 여부가 상태 머신과 규칙 11을 정하기 때문이다. 그 안의 정보는 문자열이 아니라 타입이다: `ErrorCode`(원인 분류, 고정 저장 코드) + `ErrorInfo.detail`(Slack 오류 코드·HTTP 상태·예외 클래스 같은 외부 상세), `ProcessingStage`(어디까지 갔는가: llm/send/processing/delivered/state/resolved_*), `MessageKind`(answer/failure_notice). `Failure(stage, kind, error)`가 핸들러에서 워커·저장소까지 그대로 가므로 워커가 문자열을 잘라 종류를 복원하지 않는다(옛 `kindFromStage` 제거). 재시도 가능 여부는 오류 코드가 아니라 결과의 `retryable`이, 결과 불명은 결과 타입 `Unknown`이 정한다. DB는 `stage`·`error_code`·`error_detail`·`kind`를 따로 저장한다(고정 코드, 자바 이름 변경과 무관). 예외 계층·`@ControllerAdvice`는 도입하지 않았다 — 호출부가 다르게 처리할 예외 종류가 없고 컨트롤러 응답 의미가 서로 달라 공통 처리로 줄일 중복이 적다.
+
 ### ADR-6 · 프로토타입은 폐기하고 지식만 승계한다
 
 문서 없이 먼저 만든 프로토타입이 있었다. `./gradlew build` · `bootRun` · `/health`까지 통과했지만,

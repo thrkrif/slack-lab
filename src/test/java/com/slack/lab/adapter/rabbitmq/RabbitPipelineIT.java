@@ -1,5 +1,9 @@
 package com.slack.lab.adapter.rabbitmq;
 
+import com.slack.lab.TestFailures;
+import com.slack.lab.core.model.MessageKind;
+import com.slack.lab.core.model.ErrorInfo;
+import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.model.ClaimOutcome;
 import com.slack.lab.core.model.ClaimRequest;
 import com.slack.lab.core.port.QueueDelivery;
@@ -297,7 +301,7 @@ class RabbitPipelineIT {
         var claim = new com.slack.lab.core.model.ClaimRequest("Relay", "t", 0, System.currentTimeMillis(), "C1", "100.1",
                 event("Relay"));
         var claimed = (com.slack.lab.core.model.ClaimOutcome.Claimed) store.claim(claim);
-        assertThat(store.scheduleRetry("Relay", claimed.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, "x"))
+        assertThat(store.scheduleRetry("Relay", claimed.attemptId(), "t", 1, System.currentTimeMillis() - 60_000, 1, TestFailures.send("x")))
                 .isTrue();
         // (도래 시각을 충분히 과거로 둔 이유: 컨테이너 DB 시계와 JVM 시계가 몇 ms 어긋날 수 있다)
         // 브로커에 닿지 않는 발행기(잘못된 포트)로는 재투입이 실패한다
@@ -435,7 +439,7 @@ class RabbitPipelineIT {
 
         PublishResult result = publisher.publish(event("Unroutable"), System.currentTimeMillis(), "0");
 
-        assertThat(result).isEqualTo(new PublishResult.Failed("unroutable"));
+        assertThat(result).isEqualTo(new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_UNROUTABLE)));
     }
 
     @Test
@@ -452,7 +456,7 @@ class RabbitPipelineIT {
         assertThat(publisher.publish(event("Full1"), System.currentTimeMillis(), "0"))
                 .isInstanceOf(PublishResult.Enqueued.class);
         assertThat(publisher.publish(event("Full2"), System.currentTimeMillis(), "0"))
-                .isEqualTo(new PublishResult.Failed("nack"));
+                .isEqualTo(new PublishResult.Failed(ErrorInfo.of(ErrorCode.QUEUE_NACKED)));
     }
 
     @Test
