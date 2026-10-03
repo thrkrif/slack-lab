@@ -780,3 +780,204 @@ B11(24시간 자동 차단·수동 승인 1회)은 §11에서 실측했고, 이�
 
 **한계(합격 주장의 범위)**: (1) 요청이 합성이라 **사람이 실제로 멘션하는 Slack→ngrok→수신 구간은 M9~M18 어디서도 검증하지 않았다** — "수신 p95"는 서버 HTTP 진입부터 응답 완료까지이며 ngrok·Slack 구간은 포함하지 않는다. (2) 표본이 작다(순차 20·버스트 10). 버스트 수신 p95는 171ms로 한도(200ms)에 근접해 여유가 크지 않고, M17 소규모 버스트에서는 p50 464ms까지 나온 적이 있다(부하 생성 스크립트·Ollama와 같은 장비 경합 후보, 원인 미규명). 각 실험은 한 번씩만 실행했다. (3) 중복 억제 보장 범위는 `COMPLETED` 보존 7일이다(PRD §5) — 7일 뒤 같은 event_id가 다시 오면 새로 실행된다. (4) 죽은 워커 회수에는 최대 약 100초가 걸린다(R2 153초). (5) 코드 리뷰는 M9~M17 각 마일스톤에서 거쳤고, M18의 산출물은 부하 생성기(`scripts/p1-load`)와 문서뿐이라 별도 리뷰를 하지 않았다.
 
+## 16. 2단계 후속 M19 포트/어댑터 분리 검증 (2026-10-02)
+
+목적: 큐·저장소·LLM·채팅 서비스를 인터페이스(포트) 뒤로 옮겨 코어가 구현체를 모르게 한다(ADR-9). **동작은 바꾸지 않는다.**
+
+| 확인 | 결과 |
+|---|---|
+| 구조 | `core/{model,port,service}` + `adapter/{redis,slack,llm,cli,web}` (ARCHITECTURE "패키지 구조"). `EventWorker`를 코어 `EventProcessor`(선점→처리→확정→ACK)와 `RedisStreamConsumer`(읽기·회수)로 분리 |
+| 회귀 | 기존 232건 + `ArchitectureTest` 5건 + `EventProcessorTest` 11건, 전체 249건 통과 |
+| 컨테이너 스모크 | 새 이미지로 `docker compose --profile app up`(수신·워커·반응·Redis), `/health` `{"status":"UP","redis":"UP"}`, `scripts/p1-load warmup` 2건 → 답글 2개(유실·중복 0), `scripts/recovery list` 정상, `p1-residue-check` OK. 워밍업 직후라 `llm_ms=11065`·`send_ms=2710`로 느렸지만 장시간 쉬다 처음 호출한 모델 적재 지연이다(코드 동작과 무관) |
+| 아키텍처 규칙 | 코어→어댑터 금지, 코어의 인프라 라이브러리(Redis·Lettuce·Servlet·HTTP·Jackson·AMQP·JDBC·`javax.sql`·`HttpURLConnection` 등) 금지, 코어는 `config`의 `…Properties`·역할 표시만 참조, `core.model`은 JDK만, `core.port`는 모델만, 어댑터끼리 금지 |
+| 변이 검사 | 코어에 `StringRedisTemplate`을 넣으면, `javax.sql.DataSource` 필드를 넣으면, 코어가 `config`의 비설정 클래스를 참조하면 각각 `ArchitectureTest`가 실패. 원복하면 통과 |
+
+### 16.1 리뷰 대응 (codex 1회전 REVISE: MAJOR 2·MINOR 3)
+
+- **MAJOR-1(상태 저장소 포트에 Redis식 계약이 샘)**: `ProcessingStateStore` Javadoc의 계약을 "상태를 기록하고 확정 여부만 알림, ACK는 호출자(코어)가 `QueueDelivery`로"로 고쳤다. 입력을 보존해야 하는 전이(결과 불명·DLQ·재시도)를 Postgres가 하려면 입력 본문이 필요하므로 `ClaimRequest`에 `input`(이벤트 전체)을 추가했다. Redis 구현은 스트림 항목이 입력 원본이라 쓰지 않는다. `deliveryToken`은 그런 구현이 쓰는 불투명 값이다. **`scheduleRetry`는 아직 Redis 방식(상태 저장소가 예약 목록까지 관리)이다** — 브로커가 지연 재발행을 직접 지원하는 M21에서 큐 포트의 지연 발행으로 옮기고 상태 저장소에는 전이만 남긴다(Javadoc과 ARCHITECTURE에 표시).
+- **MAJOR-2(아키텍처 테스트 허점)**: 금지 목록에 `javax.sql`·`HttpURLConnection`·`jms`·`kafka`·AWS SDK를 추가하고 `config` 참조를 설정 값·역할 표시로 제한했다. 변이 검사로 확인.
+- **MINOR-3(확정 뒤 추가 ACK 실패가 지표를 지움)**: `EventProcessor`가 ACK 예외를 잡아 경고만 남기고 지표 줄은 항상 남긴다. 상태는 이미 기록됐으므로 재전달 때 선점 결과표가 종료로 판정한다.
+- MINOR-4(증빙 참조 없음)는 이 절로 해소, MINOR-5(미사용 import·`ACKDEL` 상수)는 전체 정리.
+- **알려진 한계**: Redis 어댑터에서 `acknowledge()`는 상태 저장소의 Lua가 이미 ACK한 뒤 한 번 더 도는 멱등 호출이라 Redis 왕복이 한 번 늘어난다(M22에서 Redis 제거 시 사라짐). 사람이 읽기 쉽게 하려고 정리하지 않은 임시 타협이다.
+
+### 16.2 2회전 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 1·MINOR 6, 동작 보존은 통과)
+
+- **MAJOR-1(`QueueDelivery`가 "ACK하지 않으면 브로커가 다시 전달한다"는 Redis 가정을 계약으로 박음)**: RabbitMQ는 채널이 살아 있는 동안 ack하지 않은 메시지를 다시 주지 않고 prefetch 슬롯만 차지한다(consumer_timeout 기본 30분). `QueueDelivery.defer()`를 추가해, 코어가 확정하지 못했거나 지금 처리할 수 없는 모든 분기(BUSY·NoInput·선점 예외·발신 게이트 거절·종료 기록 거절/예외)에서 놓아주는 방법을 어댑터에 위임한다. Redis 구현은 no-op(pending+회수가 그 역할)이고 RabbitMQ 구현은 지연을 둔 재발행이어야 한다(M21 등록). RabbitMQ 어댑터 지침(같은 tag 이중 ack 시 채널 종료, 원래 채널로만 ack, `process`를 부른 스레드에서만 호출)을 Javadoc에 명시.
+- **MINOR-1**: `claim()` Javadoc을 추가하고 `ClaimOutcome` 주석을 브로커 중립으로 바꿨다. `Settled` 전에 필요한 보존은 커밋까지 끝나야 하고, 보존할 입력이 없으면 `NoInput`.
+- **MINOR-2(M20 시점에 Postgres 상태 + Redis 큐 배선에서 재시도 재투입 주체가 없음)**: PLAN M20에 "Postgres 상태 어댑터는 M21 전까지 운영 배선하지 않고 테스트 전용"으로 명시하고, M21에서 재투입을 코어(`RetryPolicy`)가 큐 포트 지연 발행으로 하는 것으로 정했다.
+- **MINOR-3(코어의 ACK 책임을 지키는 테스트 없음)**: `EventProcessorTest` 11건. 가짜 저장소·가짜 전달로 확정/놓아주기 분기, `ClaimRequest.input` 채움, ACK 예외 격리, 종료 기록 예외 격리를 검증. `acknowledgeQuietly` 호출을 지우는 변이를 넣으면 실패하고 원복하면 통과.
+- **MINOR-5(알람 입력 포트 없음)**: `AlertEvent`·`AlertNormalizer` 자리 포트 추가(M23에서 구체화).
+- **MINOR-6(종료 기록이 예외로 끝나면 지표 줄 없음)**: `finalizeResult` 예외를 잡아 `finalized=false`로 지표를 남기고 놓아준다.
+- LOW: `Enqueued(streamId)`→`messageId`, 통합 테스트 이름 `EventWorkerTest`→`RedisStreamConsumerIT`, `RedisStreamConsumer` 낡은 주석·중복 Javadoc 정리(회수 스케줄러는 스레드 1개), `ArchitectureTest` 금지 목록 확대(`redis.clients`·HTTP 클라이언트·JPA·netty·`URL`·`Socket`)와 `config` 허용을 **코어가 실제 쓰는 설정 값 이름 목록**으로 제한(브로커 전용 `QueueProperties`·`ReactionProperties` 차단).
+- 정정/한계: 로그 키 `stream_id=`가 `delivery=`로 바뀌었다(스크립트가 grep하는 곳은 없음). Redis 어댑터의 추가 ACK 왕복 한 번(약 1ms)이 `answer_ms`에 더해진다.
+
+## 17. LLM 언어 혼용 방어 (2026-10-02)
+
+문제: Slack 답글에 중국어가 섞였다(사용자 보고). 요구: 한국어 + 영어(에러·동작 설명용)만 나오게.
+
+**재현(Ollama `qwen2.5:7b`, 기술 장애 질문 12개, 구 프롬프트)**: 12건 중 1건("메모리 누수가 의심될 때 확인 방법")이 `专业的中文翻译如下…`로 시작하는 중국어 문자열 뒤에 한국어가 이어졌다. 한국어로 쓴 "한국어로만" 지시가 이미 있었는데도 샌다. 새 프롬프트(영어 지시 + 영어 허용 범위 명시 + 한자·가나 금지)로도 12건 중 1건이 `的重大问题请使用中文简体回答…`로 시작했다 — **프롬프트만으로는 막을 수 없다**.
+
+**수정(2중)**: ① 시스템 프롬프트를 영어 지시 + 한국어 지시로 바꾸고 영어는 에러 메시지·예외/클래스명·로그·명령어·코드·설정 키·표준 기술 용어에만 허용. ② `OpenAiCompatibleLlmClient`가 응답에 한자(CJK)·일본어 가나가 한 글자라도 있으면 Slack에 보내지 않고, 남은 시간이 3초 이상이면 언어 재강조 시스템 메시지를 붙여 한 번 다시 묻는다. 다시 물어도 섞이거나 시간이 부족하면 `Failed("language_violation", retryable=true)`로 돌려 기존 재시도(5초·30초·120초)와 최종 안내 정책을 탄다.
+
+**검증**: 단위 테스트(영어 기술 용어만 섞인 한국어는 재질문 없음, 중국어 → 재질문 → 정상 응답, 두 번 다 위반 → 재시도 가능 실패, 시간 부족 → 재질문 없이 실패, 문자 판별). 실제 스택에서 기술 질문 12개를 두 번씩(24건) 실제 Slack 스레드로 돌려 `scripts/p1-load`(`P1_QUESTION_SET=tech`)가 답글의 한자·가나를 검사: **언어 위반 0건**. 단 이번 실행에서는 방어 경로(재질문)가 한 번도 발동하지 않았다(로그 0건) — 위반이 확률적(재현 실험에서 12건 중 1건)이라 24건에서 나오지 않은 것으로, 라이브에서 방어가 작동하는 것은 확인하지 못했고 단위 테스트로만 확인했다. 그 24건 중 2건은 실패 안내가 나갔는데, **언어와 무관하게 사용자 노트북이 다른 작업으로 부하 상태였고 LLM 응답이 9~50초로 늘어 50초 기한(`cancelled_after_deadline`)을 넘긴 것**이다(언어 위반 아님).
+
+한계: 한자를 한 글자라도 쓰면 위반이므로 한국어 답변에 한자어 병기(예: `漢字`)가 정상적으로 들어가도 막힌다(재질문 후 실패하면 안내로 간다). 방어는 한자·가나만 보며, 다른 외국 문자(키릴 등)는 보지 않는다.
+
+## 18. 2단계 후속 M20 Postgres 작업 상태 어댑터 검증 (2026-10-02)
+
+목적: Redis 구현(`state.lua`)의 선점 결과표·임대·세대·보존을 같은 의미로 Postgres에 옮긴다(ADR-9). **운영에는 아직 배선하지 않는다** — 재시도 재투입은 M21(큐 어댑터)에서 코어가 큐 포트의 지연 발행으로 하기로 했다.
+
+구성: Flyway 마이그레이션 `V1__processing_state.sql`(`processing_state`, `preserved_input`), `PostgresProcessingStateStore`(JdbcTemplate + 트랜잭션), 전역 DataSource 자동 구성은 끄고 어댑터가 직접 만든다. 이벤트 단위 어드바이저리 락(`pg_advisory_xact_lock`)으로 같은 이벤트의 동시 전이를 직렬화한다(첫 선점처럼 행이 아직 없는 경합도 같은 락). "지금"은 DB 시계다(Redis `TIME`과 같은 이유).
+
+Redis 구현과 달라진 점
+- 한 연산이 한 트랜잭션이라 "검증 → 멱등 보존 → 상태 → ACK" 순서 규율과 `fail_after` 부분 실패 복구가 필요 없다. 중간 실패는 전부 롤백된다.
+- 보존 입력은 이벤트당 한 행(`list_name`: dlq·recovery·retry)이라 Redis에서 옛 목록 멤버십이 남던 틈이 없다.
+- 선점 때 받은 `ClaimRequest.input`을 상태 행에 보관해 두었다가 결과 불명·DLQ·재시도 전이에서 보존한다(포트 계약, M19).
+- ACK는 이 저장소의 일이 아니다.
+
+| 검증 | 결과 |
+|---|---|
+| 선점 결과표 | 새 이벤트, 소유자 아닌 전이 거절, 완료·닫힘 재전달(DONE), 같은 세대 UNKNOWN/DEAD 재전달(멱등 재보존)·이전 세대(보존 없음), 이전 세대·예약 전 재시도(STALE), 발신 중 임대 만료(UNKNOWN+복구 목록), 늦은 UNKNOWN→COMPLETED(보존 삭제), 임대 만료 후 재선점과 이전 소유자 거절, 갱신, 24시간 초과(DLQ), 우선순위 조합(만료 SENDING+24h→UNKNOWN, COMPLETED+24h→DONE, 이전 세대+24h→STALE), 수동 승인 1회 소비와 소실 시 DEAD(B11), ANOMALY, 재시도 예약·도래 후 선점·횟수 상속, 재시도 보존이 다음 세대 번호로 기록, 완료 시 보존 정리, 더 최근 세대 보존본 유지 |
+| 동시성 | 10 스레드 동시 선점 → 1승·9 BUSY |
+| 입력 보존 계약 | 보존이 필요한데 입력이 없으면 `NoInput`이고 아무것도 쓰지 않음, 입력 없이 선점하면 보존이 필요한 종료 전이 거절, 허용되지 않는 전이 거절, 자가 재완료 멱등 |
+| 보존 기간 | 만료된 완료 건만 삭제, 미해결(UNKNOWN)은 유지 |
+| 원자성 | SQL 중간에 실패를 주입(`finalize`·`claim`)하면 상태와 보존이 모두 원래대로이고, 같은 호출을 다시 하면 정상 종료 |
+| **선점 지연** | 순차 200회 `claim` p50 **1ms**, p95 **1ms**, max 4ms (Testcontainers `postgres:16-alpine`, 로컬 컨테이너·단일 연결, 개발 노트북 — PRD §5 성능 판정 환경이 아니다). 수신 경로 밖(워커)이라 p95 200ms 목표와 무관하며 Redis(`XADD+WAITAOF` p95 3ms)와 같은 자릿수다 |
+| 전체 빌드 | 테스트 36건 추가(리뷰 대응 포함), 전체 통과 |
+
+발견·주의: (1) 임대 만료를 JVM `sleep`으로 기다리는 테스트는 Docker VM 시계와 어긋나면 흔들렸다(전체 빌드 중 1회 실패). 임대 만료는 DB에서 `lease_until`을 직접 과거로 돌려 결정적으로 만들고, 실제 시간 경과 만료는 한 테스트만 여유 있게 남겼다. **운영에서도 DB 시계가 판정 기준이므로 워커와 DB 시계가 크게 어긋나도 임대 판정은 DB 기준으로 일관된다.** (2) 스키마는 Flyway로 관리하며, 전역 자동 구성을 끄지 않으면 접속 정보가 없는 수신·복구 역할이 DataSource 생성에 실패한다.
+
+한계: 미해결 목록 조회·`resolve`·`reprocess`·`close`는 아직 Redis 복구 저장소에만 있다(M22에서 `RecoveryStore`의 Postgres 구현). 재시도 재투입(스케줄러)도 M21.
+
+### 18.1 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 1·MINOR 7·LOW 6)
+
+- **MAJOR(B18 회귀: 종료된 건의 입력 본문이 상태 행에 남음)**: Redis는 상태 해시에 본문이 없고 `XACKDEL`이 스트림 항목을 지웠지만, Postgres는 `processing_state.input`에 선점 입력을 들고 있다가 종료 뒤에도 남겨 완료 건은 7일간 질문 본문이 DB에 있었다. 모든 종료 전이(`finalize`, 행 4·4'·7)에서 `input = NULL`로 비운다 — 본문은 `preserved_input`에만 있다. 테스트가 COMPLETED·UNKNOWN·DEAD(finalize)·UNKNOWN(행 4)·DEAD(행 7)·DEAD(행 4')에서 `input IS NULL`을 확인한다. `finalize`의 `input = NULL`을 지우는 변이를 넣으면 실패하고 원복하면 통과.
+- **MINOR**: ① 이상 메시지(행 1)가 재시도 예약 보존본을 덮어 이벤트가 재시도 목록에서 사라지는 문제 → 이상 경로는 다른 목록의 보존본을 덮지 않는다(테스트). ② 락 대기 무한 → `SET LOCAL lock_timeout`·트랜잭션 타임아웃. ③ READ COMMITTED 의존 → 명시하고 이유를 주석으로. ④ 테스트 훅의 공유 가변 상태 → 스레드별 카운터. ⑤ 시간 의존 테스트 → 재시도 도래는 DB에서 `retry_at`을 직접 0으로, 임대 만료는 `expireLease`로 결정적으로 만들고 실제 시간 경과 케이스(발신 중 만료 → UNKNOWN)를 하나 남김. ⑥ 2'의 DEAD 경로·B11 보강(승인 세대 불일치는 소비·수동 실행으로 보지 않음, 24시간 뒤 승인 실행 소실도 DEAD) 테스트 추가.
+- **LOW**: 행 8이 `stage`를 지우던 것을 이전 값 유지(Lua와 같게), `(Long) rs.getObject` → `getObject(col, Long.class)`. 입력 없는 선점은 `NoInput`으로 입구에서 막는다(입력 없이 실행하면 종료 전이가 보존할 입력이 없어 임대 만료 → 재선점을 24시간 창이 닫힐 때까지 되풀이한다).
+- **알려진 한계(수정하지 않음)**: `application.yml`의 `spring.autoconfigure.exclude`는 같은 키를 설정하는 프로필·환경변수가 있으면 목록 전체가 교체돼 DataSource 자동 구성이 되살아난다. `purgeExpired`는 상태 행만 지우므로 미래 세대 이상 보존본이 고아로 남을 수 있다(Redis도 같음, M22에서 정리). `retryAtMs`는 호출자의 JVM 시계로 계산되므로 "시간은 항상 DB 시계"는 임대·창 판정에 한한다(M21에서 지연 길이를 넘기는 방식을 검토).
+
+## 19. 2단계 후속 M21 RabbitMQ 큐 어댑터 검증 (2026-10-02)
+
+구성: `adapter.rabbitmq`(`RabbitBroker`·`RabbitEventPublisher`·`RabbitConsumer`·`RabbitDelivery`), 코어에 `EventRepublisher`·`RetryOutbox`·`RetryRelay` 추가, Postgres 저장소가 `RetryOutbox` 구현(마이그레이션 V2 `relayed_at`). `queue.backend=rabbitmq`일 때만 켜지고 기본값은 아직 Redis다 — 전체 배선(Postgres 상태 + RabbitMQ + 반응 큐 + 복구 CLI)은 M22.
+
+설계 결정
+- **토폴로지**: 직접 교환기 `<큐>` → quorum 큐(`x-delivery-limit`, 초과분은 `<큐>.dead`로), 지연 큐 `<큐>.defer`(고정 TTL, 만료되면 원래 교환기로), 영속 메시지, 수동 ack, 채널마다 prefetch 1.
+- **발행 확인**: mandatory + 퍼블리셔 컨펌. 브로커 ack일 때만 `Enqueued`, nack·미라우팅은 `Failed`, 시간 초과는 `Unconfirmed`(둘 다 수신 서버가 200을 주지 않음). 확인 대기는 `queue.enqueue-timeout-ms`.
+- **`defer()`**: 지연 큐에 복사본을 넣고(확인 대기) 원본을 ack한다. 즉시 nack(requeue)하면 처리 중인 메시지가 빠르게 맴돌기 때문이다. 복사 실패 시 nack(requeue)하고 전달 횟수 상한이 무한 맴돌기를 막는다.
+- **재시도 지연은 TTL 큐가 아니라 Postgres 발신함(outbox)**: 상태 `RETRY_WAIT`과 보존 입력이 곧 발신함이고 `RetryRelay`가 도래한 건을 재발행한다. 브로커와 DB를 한 트랜잭션으로 묶을 수 없어서, "상태에 먼저 기록 → 나중에 큐에 반영"을 되풀이 가능하게 했다. 순서가 어느 지점에서 끊겨도 입력이 사라지지 않는다(재발행 확인 전에 죽으면 다음 사이클이 다시 넣고, 확인 뒤 반영 기록 전에 죽어도 선점 결과표가 하나만 실행시킨다). TTL 큐는 지연이 큐 하나에 고정돼 5초·30초·120초 백오프를 표현하지 못한다.
+- **소비자 타임아웃**: RabbitMQ 기본 `consumer_timeout` 30분이 LLM 처리 최대 50초보다 훨씬 길어 따로 맞출 필요가 없다. 줄이는 설정은 총 처리 시간(60초)보다 길게 유지해야 한다(Javadoc).
+
+| 검증(Testcontainers RabbitMQ 3.13 + Postgres 16, 코어·핸들러는 실제, LLM·Slack은 가짜) | 결과 |
+|---|---|
+| 정상 왕복 | 발행 확인 → 소비 → 선점 → 발신 1회 → `COMPLETED` → 큐 비움 |
+| 동일 event_id 10회 발행 | 발신 1회, 놓아준 중복이 지연 큐를 돌아와도 추가 발신 0, 큐·지연 큐 모두 비워짐 |
+| **B4 처리 중 소비자 강제 종료** | 첫 워커의 연결을 강제로 끊음(핸들러는 막힌 채 임대 갱신 없음) → 브로커가 되돌림 → 둘째 워커가 BUSY→defer로 기다리다 **임대 만료 뒤 재선점**해 완료, 발신 1회. 죽었던 핸들러가 나중에 깨어나도 소유권이 없어 발신하지 못함 |
+| 지연 재시도 | 첫 호출 시간 초과 → `RETRY_WAIT` 예약 → 릴레이가 다음 세대로 재발행 → 둘째 호출 성공, 발신 1회, 완료 뒤 재시도 보존본 정리 |
+| 릴레이 되풀이 안전 | 브로커에 닿지 않으면 반영 시각을 남기지 않고(다음 사이클이 재시도), 확인되면 기록하고 이후 건너뜀 |
+| 발행 실패 | 브로커에 닿지 못하면 `Failed`(수신 서버는 200을 주지 않음) |
+| 독약 메시지 | 읽을 수 없는 본문은 데드레터 큐로 가고 소비자는 계속 동작. 소비자가 계속 예외를 던지면 전달 횟수 상한 뒤 데드레터 큐로 |
+| **발행 확인 지연** | 순차 100회 p50 **1ms**·p95 **3ms**·max 5ms, 동시 5스레드×20 p50 3ms·p95 **16ms**·max 35ms (퍼블리셔 채널 하나에서 직렬화, 개발 노트북 로컬 컨테이너 — PRD §5 성능 판정 환경이 아님). 수신 p95 200ms 예산 안 |
+| 전체 빌드 | RabbitMQ 통합 테스트 14건·설정 가드 2건·발신함 테스트 4건 추가(리뷰 대응 포함), 전체 310건 통과 |
+
+한계: 퍼블리셔는 채널 하나에서 발행을 직렬화한다(이 규모에서는 충분, 처리량이 문제 되면 채널 풀). 릴레이의 주기 실행과 Spring 배선, 반응 큐(RabbitMQ 버전), 복구 CLI의 Postgres 구현은 M22. 재시도 시각은 호출자 JVM 시계로 계산되고 도래 판정은 DB 시계라 몇 ms 어긋날 수 있다(백오프가 5초 이상이라 실질 영향 없음).
+
+### 19.1 리뷰 대응 (codex 사용량 한도 → code-reviewer 대체: REVISE MAJOR 3·MINOR 7)
+
+- **MAJOR-1(확인 실패 경로 미검증)**: 오류를 유도해 확인한다. 어느 큐에도 묶이지 않은 라우팅 키 → `Failed("unroutable")`, 용량 1 + `reject-publish` classic 큐로 브로커 nack → `Failed("nack")`, 컨테이너 일시 정지(`docker pause`)로 확인이 늦으면 `Unconfirmed("confirm_timeout")`. 변이 검사: 확인 결과를 무시하게(`|| true`) 바꾸면 nack 테스트가, `mandatory`를 `false`로 바꾸면 미라우팅 테스트가 실패하고 원복하면 통과. 정상 중복·강제 종료 테스트에 데드레터 큐가 비어 있음을 단언 추가.
+- **MAJOR-2(확인 시간 초과 뒤 같은 채널 재사용)**: 늦게 온 ack·nack·return이 다음 발행 결과에 섞인다(재현 시 정상 저장이 `Failed("nack")`로, 늦은 미라우팅 return이 다음 발행을 `unroutable`로 보고). 시간 초과·확인 중 예외·인터럽트에서 채널을 `abort`하고 버려 다음 발행이 새 채널로 시작한다. 테스트: 일시 정지로 `Unconfirmed`를 만든 뒤 풀면 다음 발행이 `Enqueued`.
+- **MAJOR-3(자동 복구 중인 연결을 새 연결로 교체)**: 복구 중 `isOpen()`이 false인 연결을 버리고 새로 만들면 옛 연결이 누수되고, 연결 시도가 락을 쥔 채 최대 5초 걸려 HTTP 스레드가 줄을 서 수신 p95를 깬다. 연결은 처음 한 번만 만들고 이후는 클라이언트 자동 복구에 맡긴다. 열려 있지 않으면 즉시 실패하고(`broker_unavailable`) 헬스 체크도 새 연결을 만들지 않는다. 테스트: 닫힌 연결에서 발행이 1초 안에 `Failed`, 브로커가 연결을 끊으면(`rabbitmqctl close_all_connections`) 자동 복구 뒤 다시 발행.
+- **MINOR**: 확인 대기 중 연결 종료는 `Failed`가 아니라 `Unconfirmed`(규칙 4; 요청이 나간 뒤라 저장 여부를 모름). 지연 발행도 mandatory로 보내 미라우팅이면 원본을 ack하지 않음. 이벤트 큐 데드레터링을 `at-least-once`(+`reject-publish`)로. `queue.backend=rabbitmq`는 `queue.rabbitmq-preview=true` 없이는 기동을 거부(Redis 상태 저장소가 delivery tag를 스트림 ID로 오해하고 재시도가 재투입되지 않는 반쯤 배선된 앱 방지, 테스트). 릴레이 한 사이클의 예외가 주기 실행을 멈추지 않게 격리, 깨진 재시도 입력은 폴링을 막지 않고 DLQ로 격리(테스트). 옛 tag ack 주석 정정(자동 복구 채널은 복구 전 tag의 ack를 조용히 무시), 채널 폐기·토폴로지 선언 실패 시 연결 비움.
+- **알려진 한계(수정하지 않음)**: ① 지연 큐(`.defer`)의 TTL 데드레터링은 classic 큐라 브로커 장애 순간에 at-most-once다(quorum 큐 + at-least-once로 바꾸는 방안은 검토만 함). ② 릴레이 두 개가 같은 행을 동시에 재발행할 수 있고(`FOR UPDATE SKIP LOCKED`·선점 갱신 없음), 워커 백로그가 `republishAfterMs`보다 길면 같은 세대가 반복 재투입될 수 있다 — 선점 결과표가 흡수해 정확성은 유지되고 큐만 부푼다. ③ 퍼블리셔는 수신·지연 발행·릴레이가 한 채널·한 모니터를 공유한다(ALL 역할에서 지연 발행과 릴레이가 수신 지연을 최대 1초씩 늘릴 수 있음). 필요하면 수신용과 워커용 채널을 분리한다.
+
+## 20. 2단계 후속 M22-1 Postgres·RabbitMQ 전체 배선 검증 (2026-10-02)
+
+M22를 둘로 나눴다. 이번(M22-1)은 새 구성(`queue.backend=rabbitmq` + `state.backend=postgres`)을 끝까지 배선하고 검증하는 일이고, Redis 제거·compose·스크립트·P·D·R 재실험은 M22-2다. 기본값은 아직 Redis라 기존 동작은 그대로다.
+
+추가한 것
+- `PostgresRecoveryStore`(복구 CLI의 Postgres 구현: 목록·조회·`resolve-completed`·`close`·`reprocess`). `reprocess`는 재시도 예약과 같은 경로다: 상태를 `RETRY_WAIT(gen+1, manual_gen)`로 올리고 보존 입력을 즉시 도래하는 재시도로 옮기면 릴레이가 큐에 다시 넣는다. 승인은 그 세대의 첫 선점에서 소비된다(B11).
+- `UnknownResolver`(코어): 복구 목록의 `UNKNOWN`을 읽기 전용으로 스레드 조회해, 우리 메타데이터 답글이 있으면 완료 처리한다. 없거나 조회가 실패하거나 방금 불명이 된 건은 건드리지 않는다. **자동 재발신은 하지 않는다**(규칙 11).
+- `PostgresConfig`·`PostgresMaintenance`: 워커·복구 역할만 DB에 연결(수신은 큐 저장 확인만 하므로 DB가 필요 없음), 재시도 릴레이(5초)·결과 불명 자동 조회(30초)·만료 건 삭제(10분)를 주기 실행. 한쪽 백엔드만 바꾼 반쯤 배선된 앱은 기동을 거부한다(양방향 가드).
+- RabbitMQ 반응 큐: 최초 발행이 확인되면 본문 없는 항목(`event_id`·`channel`·`ts`·`received_at`)을 반응 큐에 넣고(최선 노력 — 실패해도 수락을 막지 않음), `RabbitReactionConsumer`가 이모지를 붙인다. 재투입은 반응을 다시 만들지 않는다. Redis 때의 "처리·반응을 한 스크립트로 원자 기록"은 두 번의 발행으로 바뀌었다.
+
+| 검증 | 결과 |
+|---|---|
+| Postgres 복구 저장소(Testcontainers) | 14건: 목록 정렬·본문 없음, 재시도 예약은 미해결이 아님, 스레드 위치, resolve 멱등·충돌·거절, close 뒤 재전송 무시, reprocess 승인·원래 수신 시각 보존·재실행 멱등·첫 선점 소비·소실 시 DEAD와 다음 세대 승인·24시간 창 초과 건의 수동 실행·보존본 없음 |
+| 결과 불명 자동 조회 | 6건: 답글 발견 시 그 ts로 완료, 미발견·조회 실패·방금 불명·DLQ·UNKNOWN 아님은 변경 없음, 재발신·재처리·닫기 호출 0, 사이클 예외 격리 |
+| 반응 큐(RabbitMQ) | 4건: 최초 발행만 반응 항목 생성(본문 없음), 재투입은 만들지 않음, 이모지 부착 후 삭제, 실패해도 재시도 없이 삭제 |
+| **전체 배선 종단 테스트** | 실제 스프링 컨텍스트(역할 all) + RabbitMQ·Postgres 컨테이너, **Redis 없음**: `/health`가 `rabbitmq`만 보고, 서명된 이벤트가 수신→큐→워커→echo LLM→(가짜 Slack) 답글 1회·반응 1회→`COMPLETED`, 같은 event_id 재전송은 200이고 답글이 늘지 않음, 서명 오류는 401·봇 메시지는 큐에 넣지 않음 |
+
+한계: Slack 호출만 가짜이고 실제 Slack·Ollama와의 왕복은 M22-2의 P·D·R 재실험에서 한다.
+
+
+### 20.1 M22-1 리뷰 반영과 알려진 한계
+
+리뷰(APPROVE, MINOR 위주)를 반영했다. 반응 발행 대기를 수락 타임아웃 이내로 제한하고 `reaction_enqueue_ms`를 남긴다. `.reactions` 큐에 TTL 60초를 둔다. `UnknownResolver`는 건별 예외를 격리하고 사이클당 10건으로 제한한다. 자동 조회로 완료한 건은 단계 `auto_resolved`로 사람의 `manual_resolved`와 구분한다. 깨진 재시도 payload는 `preserved_input`을 dlq로 격리하고 상태도 `DEAD`로 바꿔 복구 CLI로 닫을 수 있다. 마이그레이션 실패 시 DataSource를 닫는다. 검증: `RoleWiringIT`(역할별 빈 구성 4), 복구·해결기·반응 테스트 추가, 전체 빌드 통과.
+
+알려진 한계(M22-2 이후 재검토):
+- Slack 속도 제한은 반응과 답글이 같은 토큰을 공유해 서로 영향을 준다.
+- 반응 발행 확인 왕복이 수락 경로에 들어 있다(상한: 수락 타임아웃).
+- `republishAfterMs`(120초)는 적체 시 재발행을 늘릴 수 있다. 중복은 선점 표가 흡수한다.
+- 자동 조회와 재처리 사이에 좀비 전송이 끼어들 수 있다(결과 불명 정책상 자동 재발신은 하지 않는다).
+- `resolve`가 이상 상태로 보존된 행을 함께 지운다.
+
+## 21. 2단계 후속 M22-2 Redis 제거와 P·D·R 재실험 (2026-10-02)
+
+**구분: 검증 수행 완료 = 예(P·D·R). 합격 판정은 §21.3의 한계 안에서.**
+
+### 21.1 변경과 환경
+
+Redis 어댑터·Lua·의존성·백엔드 스위치를 제거했다(큐=RabbitMQ, 상태=Postgres 고정). 적체 스냅샷은 `BacklogProbe` 포트로 재구성(`retry dlq recovery queue_ready defer dead`), `scripts/p1-residue-check`를 Postgres·RabbitMQ 기준으로 다시 썼다. 환경은 §15.1과 같은 장비(M1 8코어, RAM 16GB)·`qwen2.5:7b`·워커 1개·LLM 동시성 1이고, 컨테이너만 `rabbitmq:3.13-alpine`(512MB)·`postgres:16-alpine`(384MB)·앱 3개(각 512MB)로 바뀌었다. 요청은 §15와 같은 합성 서명 이벤트(실제 테스트 채널). 컨테이너는 포트 18080(호스트 8080을 옛 bootRun이 점유). 빌드: 단위·통합 258건 통과.
+
+### 21.2 결과
+
+| | n | 수신 `recv_ms` p95 | 답변 `answer_ms` p95 | 유실·중복 |
+|---|---|---|---|---|
+| (a) 순차 20건 | 20 | **71ms**(p50 42, max 82) | 6419ms(p50 2532), 표본 18 | 0·0 |
+| (b) 버스트 5×2 | 10 | **129ms**(p50 78) | 17458ms(적체 관측, 판정 제외) | 0·0 |
+
+`enqueue_ms` p95 18~19ms(발행 확인 포함), `reaction_ms` p95 494ms(순차)·1020ms(버스트). 발행·반응 실패 0, 음수 구간 0. 적체 스냅샷은 정상 출력(`queue_ready=0 defer=0 dead=0`). 각 실험 뒤 `p1-residue-check` → `OK: 잔존물 0`.
+
+| 실험 | 결과 |
+|---|---|
+| D1 동일 event_id 10회 동시 / D2 완료 뒤 재전달 | 최종 답글 **1개** / 추가 **0개** |
+| D3 서로 다른 event_id 10건 | 정확히 **10개**, 유실·중복·실패 안내 0 |
+| R1 큐 저장 직후 수신 `kill -9` | 워커가 처리, 답글 1개 |
+| R2 처리 중 워커 `kill -9`(워커 2, 느린 모드 30초) | 남은 워커가 임대 만료를 기다려 인수(`defer`로 재시도), **64초** 만에 새 `attempt_id`로 완료, 답글 1개(Redis 때 153초) |
+| R3 발신 직후 halt(137) → 정상 재기동 | `UNKNOWN(sending_lease_expired)` → `UnknownResolver`가 우리 metadata 답글을 읽기 전용으로 찾아 `COMPLETED/auto_resolved`. 재발신 0, 답글 1개, 잔존물 0 |
+
+### 21.3 관측과 한계
+
+- **언어 방어가 실제로 작동했다.** 순차 20건 중 1건(질문 2번)이 재시도 3회 모두 한자·가나 혼용으로 `llm_failed:language_violation` → 최종 실패 안내로 끝났고(버스트 1건도 같음), 사용자에게 한자가 노출된 건은 0이었다. 방어의 비용은 `재시도 4회 + 지연` — 정상 답변률(event_id별 마지막 결과)은 순차 95%·버스트 90%. 모델이 특정 질문에서 일관되게 위반한다는 뜻이므로 3단계 전에 프롬프트·모델을 점검할 후보다(미해결).
+- 재시도 경로(Postgres 발신함 → `RetryRelay` → RabbitMQ 재투입)가 실제 부하에서 gen 1→2→3으로 동작했다.
+- 한계: 합성 요청(Slack→ngrok 구간 미포함), 표본이 작고 각 실험 1회, 같은 장비에서 Ollama와 경합. 호스트 8080의 옛 bootRun은 건드리지 않았다.
+- 판정: B16(수신 p95 ≤ 200ms, 순차 답변 p95 ≤ 45s) ✓, B3·B4·B5·B6·B7·B15·B18 ✓(R1·R2·R3·D1~D3·residue).
+
+### 21.4 리뷰 대응 (code-reviewer: REVISE MAJOR 2·MINOR 7)
+
+`p1-residue-check`가 명령 치환 안의 `exit 3`이 서브셸만 끝내 질의 실패에도 `OK`를 낼 수 있었다 → 질의를 최상위 변수에 담아 즉시 검사 불가(3)로 끝내고 숫자 응답을 검증한다(실패 유도 확인: 컨테이너가 없을 때 3). `p1-metrics`가 프로브 순서에 따라 적체 줄을 놓칠 수 있었다 → `queue_ready=` 포함 여부로 매칭. 그 밖에 `BacklogReporter` 프로브별 예외 격리, `RoleWiringIT` 보강(리포터·프로브는 워커만, 수신·복구에 LLM 없음), `RabbitPipelineIT`의 재시도 루프가 `Unconfirmed`를 덮지 않도록 단언 추가, compose 비밀번호 주의 문구, ARCHITECTURE 상단에 Redis 서술이 역사 기록임을 명시.
+
+## 22. 2단계 후속 M23 알람 입력 어댑터 검증 (2026-10-02)
+
+**구분: 외부 왕복 = 실제 Slack 채널에 알람 리포트 1건(echo LLM, 로컬 RabbitMQ·Postgres 컨테이너). 실제 CloudWatch/SNS 연동은 하지 않았다(AWS 환경 없음) — SNS 봉투 형식의 합성 요청으로 검증했다.**
+
+- 구현: `AlertController`(`/alerts/{source}`, 시크릿), `CloudWatchAlertNormalizer`, `AlertEvent.toMessageEvent()`. 알람은 `ts` 없는 메시지 이벤트로 기존 파이프라인을 탄다(리포트는 채널의 새 메시지, 반응 없음).
+- 단위·통합: 정규화 5, 컨트롤러 6(401·404·200·503·400·구독 확인), `FullStackWiringIT` 알람 2(새 리포트 1건 → 같은 회차 재전송은 리포트 불변 → 다른 상태 변경 시각은 새 리포트, 틀린 시크릿은 아무것도 발신 안 됨), `PostgresRecoveryStoreTest`(스레드 위치 없는 건은 자동 조회 제외).
+- 왕복: 정상 알람 200 → 실제 Slack 발신 성공 1건(`COMPLETED/delivered`), 같은 알람 재전송 200이지만 발신은 여전히 1건. 오류 유도: 틀린 토큰 401, 깨진 본문 400, RabbitMQ 중지 상태 503.
+- 한계: SNS 서명 미검증(시크릿 인증, HTTPS 전제), 알람 리포트의 결과 불명은 자동 조회 대상이 아님, 알람별 채널 라우팅 없음(전역 `alert.channel`), Grafana 어댑터 없음(포트만). 실제 LLM(qwen) 품질·프롬프트는 이번 범위가 아니다.
+
+### 22.1 리뷰 대응 (code-reviewer: REVISE MAJOR 1·MINOR 10)
+
+MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었다 → https의 `sns.<region>.amazonaws.com`일 때만 `SubscribeURL`을 로그에 남긴다(서버는 열지 않음). 반영한 MINOR: 빈 `X-Alert-Secret` 헤더가 토큰을 가리지 않게, 알람 본문 2000자·제목 200자 상한, 알람 데이터를 `<alarm>` 블록으로 감싸 지시와 분리, 알람 리포트 전용 실패 안내("다시 멘션" 문구 제거), 중복 키에 계정·리전 포함, `Unconfirmed → 503` 테스트. 남긴 항목: 요청 본문 크기 제한(인증 전 읽기)은 프록시/서블릿 한도에 맡김, `?token=`이 ngrok 인스펙터·접근 로그에 남는 점(헤더 시크릿 권장), `<!channel>` 방송 문자열 제거, 알람 스레드에서 실제 후속 멘션은 미검증.
+
+## 23. 2단계 후속 M24 오류 모델 정리 (2026-10-03)
+
+**구분: 리팩터링(동작 보존) — 외부 왕복·성능 재측정은 하지 않았다. 검증은 단위·통합 테스트와 기존 시나리오 회귀.**
+
+- 문제: `reason`·`stage`가 자유 문자열이었고(`"language_violation"`, `"남은 기한 없음"`, `"answer_send:invalid_auth"`), `EventProcessor`가 `indexOf("_send:")`로 stage를 잘라 메시지 종류를 복원했다. 재시도 가능 여부도 `reason.contains("ConnectException")`로 판정하는 곳이 있었다.
+- 변경: `ErrorCode`(원인 분류, 고정 저장 코드)·`ErrorInfo(code, detail)`·`ProcessingStage`·`MessageKind`·`Failure(stage, kind, error)` 도입. LLM·Slack·큐 결과 타입과 `HandlingResult`·`Finalization`·`scheduleRetry`가 이 타입을 직접 전달한다. LLM 재시도 판정은 HTTP 연결 단계에서 타입으로 정한다. `processing_state`에 `error_code`·`error_detail` 컬럼을 추가했고(V1 직접 수정 — 로컬 DB 초기화 전제, 기존 값 읽기 호환은 두지 않음) `stage`는 `ProcessingStage` 코드만 갖는다. 복구 CLI 목록은 `ERROR` 열을 보여 준다.
+- 보존: Success/Failed/Unknown 분기, 재시도 정책, 결과 불명 자동 재발신 0, 상태 저장 실패 시 ACK 보류는 그대로이며 기존 테스트(EventProcessorTest·SlackEventHandlerTest·Postgres·RabbitPipeline)가 같은 단언으로 통과한다. 추가 테스트: `ErrorModelTest`(고정 코드 중복 없음·형식, 한 줄 표기, 종료 기록이 종류·단계를 그대로 옮김), 저장소 테스트 2(단계·오류·상세·종류 분리 저장, 완료 시 이전 오류 제거).
+- 보류: 예외 계층(`AppException`)과 `@RestControllerAdvice` — 호출부가 다르게 처리할 예외 종류가 없고 컨트롤러별 응답 의미가 달라 줄일 중복이 적다.
+
+### 23.1 리뷰 대응 (codex 위임, MAJOR 0·MINOR 4)
+
+참고: 이 회차 codex는 `--model/--effort`를 프롬프트에 넣어 설정이 적용되지 않았고 `gpt-6-astra`/medium으로 돌았다(`omc ask`에는 모델 플래그가 없고 `~/.codex/config.toml`을 따른다 — 이후 sol/low). MINOR 반영: ① 재시도 저장 때 `kind` 누락 → 함께 저장하고 테스트 단언 추가 ② 수동·자동 완료가 `error_code/error_detail`을 지우지 않음 → 지우고 회귀 테스트 ③ 실패 안내 발신 중 예상 못한 예외가 `ANSWER`로 기록됨 → `AttemptHandle.recordKind`로 실제 종류를 전달하고 테스트 추가 ④ 작업 디렉터리 때문에 하위 경로에 생긴 `.omc` 상태 파일이 스테이징됨 → 제거, `.gitignore`에 `**/.omc/state/` 추가. 알려진 불안정 테스트: `임대가_유효하면_갱신되고_BUSY로_지켜진다`는 실제 sleep 기반이라 부하가 큰 전체 빌드에서 한 번 실패했고(재실행 2회 통과) 이번 변경과 무관하다.

@@ -1,108 +1,61 @@
 #!/usr/bin/env bash
-# B18: 해결된 이벤트(COMPLETED·CLOSED)의 입력 본문이 스트림·목록·보존 해시 어디에도 남지 않았는지 검사한다.
-# 읽기 전용이다. 위반이 있으면 종료 코드 1.
-#   REDIS_CLI   redis-cli 호출 방법 (기본: docker exec -i slack-lab-redis-1 redis-cli)
-#   STREAM_KEY  이벤트 스트림 키 (기본: slack:events)
+# B18: 해결된 이벤트(COMPLETED·CLOSED)의 입력 본문이 상태 행·보존 입력·큐 어디에도 남지 않았는지 검사한다.
+# 읽기 전용이다. 위반이 있으면 종료 코드 1, 조회 자체가 실패하면 3.
+#   PSQL     psql 호출 방법 (기본: docker exec -i slack-lab-postgres-1 psql -U slacklab -d slacklab -At)
+#   RABBITCTL rabbitmqctl 호출 방법 (기본: docker exec -i slack-lab-rabbitmq-1 rabbitmqctl)
+#   EVENTS_QUEUE 처리 큐 이름 (기본: slack.events)
+# 기본 컨테이너 이름은 compose 프로젝트 이름이 slack-lab일 때의 것이다. 다르면 PSQL·RABBITCTL로 덮어쓴다.
 set -uo pipefail
 
-RC=${REDIS_CLI:-"docker exec -i slack-lab-redis-1 redis-cli"}
-STREAM=${STREAM_KEY:-slack:events}
-# Redis 조회가 하나라도 실패하면 "잔존물 0"이라고 말하지 않고 검사 불가(종료 코드 3)로 끝낸다.
-# 프로세스 치환·명령 치환 안에서 난 실패도 잡도록 표지 파일로 전달한다.
-ERRF=$(mktemp) || exit 3; rm -f "$ERRF"; trap 'rm -f "$ERRF"' EXIT
-# docker exec -i가 반복문의 표준 입력을 삼키지 않게 막는다
-rc() {
-  local out
-  if ! out=$($RC --raw "$@" </dev/null 2>&1); then touch "$ERRF"; return 1; fi
-  # redis-cli는 오류 응답에도 종료 코드 0을 낸다 — WRONGTYPE·NOPERM·BUSY 같은 대문자 오류 접두어를 잡는다.
-  case "$out" in "(error)"* | [A-Z]*[A-Z]" "*) touch "$ERRF"; return 1 ;; esac
-  [ -n "$out" ] && printf '%s\n' "$out"
-  return 0
-}
-[ "$(rc PING)" = PONG ] || { echo "검사 불가: Redis에 연결할 수 없다"; exit 3; }
+PSQL=${PSQL:-"docker exec -i slack-lab-postgres-1 psql -U slacklab -d slacklab -At"}
+RMQ=${RABBITCTL:-"docker exec -i slack-lab-rabbitmq-1 rabbitmqctl"}
+Q=${EVENTS_QUEUE:-slack.events}
+
+# 조회가 하나라도 실패하면 "잔존물 0"이라고 말하지 않고 검사 불가(3)로 끝낸다.
+q() { $PSQL -c "$1" </dev/null 2>/dev/null; }
+q "SELECT 1" >/dev/null || { echo "검사 불가: Postgres에 연결할 수 없다"; exit 3; }
+queues=$($RMQ list_queues name messages </dev/null 2>/dev/null) || { echo "검사 불가: RabbitMQ에 연결할 수 없다"; exit 3; }
 
 violations=0
 fail() { echo "FAIL: $*"; violations=$((violations + 1)); }
+# 명령 치환 안의 exit는 서브셸만 끝내므로, 질의는 항상 최상위에서 변수에 담고 그 자리에서 실패를 검사한다.
+cannot() { echo "검사 불가: $1"; exit 3; }
+count() {
+  local v
+  v=$(q "$1") || cannot "질의 실패"
+  [[ $v =~ ^[0-9]+$ ]] || cannot "숫자가 아닌 응답: $v"
+  COUNT=$v
+}
 
-# 스트림에 남은 항목의 event_id 필드 값(필드/값이 한 줄씩 번갈아 나온다)
-# 본문에 "event_id" 줄이 있어도 속지 않도록 줄 단위 파싱 대신 JSON(필드/값 배열)에서 필드를 꺼낸다.
-if ! stream_json=$($RC -3 --json XRANGE "$STREAM" - + </dev/null 2>&1); then touch "$ERRF"; stream_json='[]'; fi
-stream_ids=$(python3 -c 'import sys,json
-for _id, f in json.loads(sys.stdin.read() or "[]"):
-    # 항목은 [필드, 값, 필드, 값...] 배열이다. 짝을 맞춰 읽어야 본문 속 "event_id" 문자열에 속지 않는다.
-    for k, v in zip(f[0::2], f[1::2]):
-        if k == "event_id":
-            print(v)' <<<"$stream_json") || { touch "$ERRF"; stream_ids=""; }
-in_stream() { grep -qxF -- "$1" <<<"$stream_ids"; }
+count "SELECT count(*) FROM processing_state WHERE state IN ('COMPLETED','CLOSED')"; resolved=$COUNT
 
-dlq=$(rc ZRANGE slack:dlq 0 -1)
-recovery=$(rc ZRANGE slack:recovery 0 -1)
-retry=$(rc ZRANGE slack:retry 0 -1)
-in_list() { grep -qxF -- "$1" <<<"$dlq"$'\n'"$recovery"$'\n'"$retry"; }
-count() { [ -z "$1" ] && echo 0 || grep -c . <<<"$1"; }
+# 해결된 건은 입력 본문(input)을 비웠어야 한다(B18).
+rows=$(q "SELECT event_id FROM processing_state WHERE state IN ('COMPLETED','CLOSED') AND input IS NOT NULL") || cannot "질의 실패"
+while IFS= read -r id; do [ -n "$id" ] && fail "해결됐는데 상태 행에 입력 본문이 남음: $id"; done <<<"$rows"
 
-resolved=0
-while IFS= read -r key; do
-  [ -z "$key" ] && continue
-  id=${key#slack:evt:}
-  state=$(rc HGET "$key" state)
-  case "$state" in
-    COMPLETED | CLOSED)
-      resolved=$((resolved + 1))
-      [ "$(rc EXISTS "slack:preserved:$id")" = 0 ] || fail "$state 인데 보존 해시가 남음: $id"
-      in_list "$id" && fail "$state 인데 DLQ·복구·재시도 목록에 남음: $id"
-      in_stream "$id" && fail "$state 인데 스트림에 본문이 남음: $id"
-      # TTL이 없는 COMPLETED는 finalize가 정리·TTL 전에 중단된 흔적이다(M11)
-      [ "$(rc TTL "$key")" = -1 ] && fail "$state 인데 TTL이 없음(정리 미완): $id"
-      ;;
-  esac
-done <<<"$(rc --scan --pattern 'slack:evt:*')"
+# 해결된 건은 보존 입력(DLQ·복구·재시도)에 남으면 안 된다.
+rows=$(q "SELECT p.event_id FROM preserved_input p JOIN processing_state s USING (event_id) WHERE s.state IN ('COMPLETED','CLOSED')") || cannot "질의 실패"
+while IFS= read -r id; do [ -n "$id" ] && fail "해결됐는데 보존 입력이 남음: $id"; done <<<"$rows"
 
-# 보존 해시는 어떤 목록에 있거나, 진행 중인 시도(수동 재처리 포함)가 붙잡고 있어야 한다.
-preserved=0
-inflight_unlisted=0
-while IFS= read -r key; do
-  [ -z "$key" ] && continue
-  id=${key#slack:preserved:}
-  preserved=$((preserved + 1))
-  if ! in_list "$id"; then
-    case "$(rc HGET "slack:evt:$id" state)" in
-      RETRY_WAIT | PROCESSING | SENDING) inflight_unlisted=$((inflight_unlisted + 1)) ;;
-      *) fail "어느 목록에도 없고 진행 중도 아닌 보존 해시: $id" ;;
-    esac
-  fi
-done <<<"$(rc --scan --pattern 'slack:preserved:*')"
+# 상태 행이 없는 보존 입력은 고아다.
+rows=$(q "SELECT p.event_id FROM preserved_input p LEFT JOIN processing_state s USING (event_id) WHERE s.event_id IS NULL") || cannot "질의 실패"
+while IFS= read -r id; do [ -n "$id" ] && fail "상태 행이 없는 보존 입력(고아): $id"; done <<<"$rows"
 
-# 목록의 모든 항목에는 보존 해시가 있어야 한다(없으면 복구할 입력이 없다).
-for id in $(printf '%s\n%s\n%s\n' "$dlq" "$recovery" "$retry" | sort -u); do
-  [ -z "$id" ] && continue
-  [ "$(rc EXISTS "slack:preserved:$id")" = 1 ] || fail "목록에는 있는데 보존 해시가 없음: $id"
-done
-
-# 반응 스트림(M15): 본문은 없지만 처리된 항목은 XACKDEL로 지워져야 한다. 진행 중인 항목이 있을 수 있어 개수는 보고만 하고,
-# 10분보다 오래된 항목이 남아 있으면(소비자·회수 모두 놓친 것) 위반으로 본다.
-REACTION_STREAM=${REACTION_STREAM_KEY:-slack:reactions}
-reaction_len=$(rc XLEN "$REACTION_STREAM"); reaction_len=${reaction_len:-0}
-if [ "$reaction_len" -gt 0 ] 2>/dev/null; then
-  oldest_id=$(rc XRANGE "$REACTION_STREAM" - + COUNT 1 | head -1)
-  oldest_ms=${oldest_id%%-*}
-  now_ms=$(python3 -c 'import time;print(int(time.time()*1000))')
-  if [ -n "$oldest_ms" ] && [ $((now_ms - oldest_ms)) -gt 600000 ]; then
-    fail "10분 넘게 남은 반응 항목(가장 오래된 ID ${oldest_id})"
-  fi
+# 진행 중인 건이 하나도 없는데 큐에 메시지가 남아 있으면 해결된 이벤트의 본문이 큐에 남은 것이다(.dead는 운영자 몫이라 제외).
+count "SELECT count(*) FROM processing_state WHERE state NOT IN ('COMPLETED','CLOSED','DEAD')"; active=$COUNT
+ready=$(awk -v q="$Q" '$1==q {print $2}' <<<"$queues"); ready=${ready:-0}
+deferred=$(awk -v q="$Q.defer" '$1==q {print $2}' <<<"$queues"); deferred=${deferred:-0}
+dead=$(awk -v q="$Q.dead" '$1==q {print $2}' <<<"$queues"); dead=${dead:-0}
+[[ $ready =~ ^[0-9]+$ && $deferred =~ ^[0-9]+$ && $dead =~ ^[0-9]+$ ]] || cannot "큐 응답을 읽을 수 없다"
+if [ "$active" -eq 0 ] && [ $((ready + deferred)) -gt 0 ]; then
+  fail "진행 중인 건이 없는데 큐에 메시지가 남음 (ready=${ready}, defer=${deferred})"
 fi
 
-d=$(count "$dlq"); r=$(count "$recovery"); t=$(count "$retry")
-listed=$(printf '%s\n%s\n%s\n' "$dlq" "$recovery" "$retry" | sort -u | grep -c .) || listed=0
-echo "해결 ${resolved}건 | 미해결 DLQ ${d} + 복구 ${r} (재시도 예약 ${t}) | 보존 해시 ${preserved} (목록 밖 진행 중 ${inflight_unlisted}) | 스트림 잔존 $(count "$stream_ids") | 반응 스트림 ${reaction_len}"
-if [ "$preserved" -ne $((listed + inflight_unlisted)) ]; then
-  fail "보존 해시 수(${preserved}) != 목록 항목 수(${listed}) + 진행 중(${inflight_unlisted})"
-fi
+count "SELECT count(*) FROM preserved_input WHERE list_name='dlq'"; dlq=$COUNT
+count "SELECT count(*) FROM preserved_input WHERE list_name='recovery'"; recovery=$COUNT
+count "SELECT count(*) FROM preserved_input WHERE list_name='retry'"; retry=$COUNT
+echo "해결 ${resolved}건 | 진행 중 ${active} | 미해결 DLQ ${dlq} + 복구 ${recovery} (재시도 보존 ${retry}) | 큐 ready ${ready} defer ${deferred} dead ${dead}"
 
-if [ -e "$ERRF" ]; then
-  echo "검사 불가: Redis 조회가 실패했다(결과를 신뢰할 수 없음)"
-  exit 3
-fi
 if [ "$violations" -eq 0 ]; then
   echo "OK: 잔존물 0"
 else

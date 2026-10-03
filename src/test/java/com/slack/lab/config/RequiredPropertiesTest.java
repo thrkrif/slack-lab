@@ -2,8 +2,6 @@ package com.slack.lab.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.slack.lab.llm.LlmProperties;
-import com.slack.lab.slack.SlackProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;

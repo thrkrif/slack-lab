@@ -26,6 +26,8 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILURE_NOTICE_PREFIX = "죄송해요, 지금 답변을 만들지 못했어요"
+# 한국어·영어만 허용한다. 한자(CJK)와 일본어 가나가 한 글자라도 있으면 언어 위반이다.
+FOREIGN_SCRIPT = __import__("re").compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
 # 같은 질문 세트를 고정 순서로 쓴다(PRD §5 입력 고정). 짧은 답을 유도해 출력 토큰 편차를 줄인다.
 QUESTIONS = [
     "한 문장으로 자기소개를 해줘.", "오늘 기분을 한 문장으로 표현해줘.", "커피와 차 중 하나를 골라 이유를 한 문장으로 말해줘.",
@@ -36,6 +38,18 @@ QUESTIONS = [
     "달에 대해 한 문장으로 말해줘.", "웃음이 좋은 이유를 한 문장으로 설명해줘.", "여행 가고 싶은 곳 하나를 한 문장으로 말해줘.",
     "음악이 주는 즐거움을 한 문장으로 표현해줘.", "하루를 마무리하는 인사를 한 문장으로 해줘.",
 ]
+
+
+# 기술 장애 질문 세트(P1_QUESTION_SET=tech). 한국어 지시만으로는 모델이 중국어를 섞던 질문들이다(언어 방어 검증용).
+TECH_QUESTIONS = [
+    "Spring Boot 커넥션 풀 고갈 원인과 해결 방법 알려줘", "NullPointerException이 발생했는데 어떻게 디버깅해?",
+    "Redis OOM command not allowed 에러 뜻이 뭐야?", "DB 커넥션 타임아웃 장애 시 1차 대응 순서 알려줘",
+    "CPU 사용률 90% 알림이 왔는데 뭘 봐야 해?", "502 Bad Gateway가 간헐적으로 나와", "Kafka consumer lag이 증가하는 원인은?",
+    "디스크 용량 부족 알림 대응 방법", "스레드 풀 고갈 증상이 뭐야?", "메모리 누수가 의심될 때 확인 방법",
+    "배포 후 에러율이 급증하면 롤백 기준은?", "ConnectionResetException이 자주 떠 원인이 뭐야?",
+]
+if os.environ.get("P1_QUESTION_SET") == "tech":
+    QUESTIONS = TECH_QUESTIONS
 
 
 def load_env():
@@ -124,20 +138,21 @@ def wait_replies(tss, timeout):
 def audit(label, tss, settle=10):
     """설정 시간을 더 기다린 뒤(늦은 중복 답글 포착) 스레드별 답글 수와 실패 안내 수를 센다."""
     time.sleep(settle)
-    missing = dup = notice = ok = 0
+    missing = dup = notice = ok = foreign = 0
     for ts in tss:
         rs = replies(ts)
         n = len(rs)
         n_notice = sum(1 for m in rs if m.get("text", "").startswith(FAILURE_NOTICE_PREFIX))
         notice += n_notice
+        foreign += sum(1 for m in rs if FOREIGN_SCRIPT.search(m.get("text", "")))
         if n == 0:
             missing += 1
         elif n > 1:
             dup += 1
         if n == 1 and n_notice == 0:
             ok += 1
-    print(f"[{label}] 스레드 {len(tss)}개: 정상 답글 1개 {ok}, 유실 {missing}, 중복 {dup}, 실패 안내 {notice}")
-    return {"threads": len(tss), "ok": ok, "missing": missing, "dup": dup, "failure_notice": notice}
+    print(f"[{label}] 스레드 {len(tss)}개: 정상 답글 1개 {ok}, 유실 {missing}, 중복 {dup}, 실패 안내 {notice}, 언어 위반(한자·가나) {foreign}")
+    return {"threads": len(tss), "ok": ok, "missing": missing, "dup": dup, "failure_notice": notice, "language_violation": foreign}
 
 
 def run_seq(n, mode="seq"):

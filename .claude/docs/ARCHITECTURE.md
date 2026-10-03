@@ -1,4 +1,6 @@
-# ARCHITECTURE.md — slack-ai-lab
+# ARCHITECTURE
+
+> **M22-2(2026-10-02) 이후 Redis는 없다.** 아래 §3~§5의 Redis Streams·Lua·`/health` Redis·compose redis 서술은 2단계(`v0.2.0`)의 역사 기록이며 현재 구조는 "패키지 구조"와 ADR-9(이행 결과)가 정본이다. 프로토콜(선점 결과표·임대·세대·보존→상태→ACK 순서)은 Postgres·RabbitMQ 어댑터가 그대로 승계한다..md — slack-ai-lab
 
 **목표 구조**와 그렇게 결정한 이유. 요구사항은 [`PRD.md`](PRD.md), 작업 규칙은 [`AGENTS.md`](../../AGENTS.md).
 
@@ -115,6 +117,32 @@ flowchart LR
 - 실행: `compose.yaml`의 `redis`(`redis:8.2-alpine`, `infra/redis.conf` — AOF always)와 profile `app`의 `receiver`·`worker`·`reactor`가 한 이미지(`slack-lab-app`)를 쓴다. Ollama는 호스트에 두고 `host.docker.internal:11434`로 호출한다. 포트는 모두 `127.0.0.1`에만 연다.
 - 새 설정: `queue.*`·`state.*`·`retry.*`·`worker.concurrency`(기본 1, M9). `StartupInvariants`가 기동할 때 조합 불변식을 검사한다: 기한 합 ≤ 총 기한, 갱신 ≤ 임대/3, 회수 유휴 ≥ 총 기한 + 임대, 재시도 대기 수 ≥ 재시도 횟수. 위반하면 기동이 실패한다.
 - `/health`는 Redis ping 결과를 포함하고, Redis가 없으면 503을 준다.
+
+### 패키지 구조 (M19, ADR-9 포트/어댑터)
+
+```
+com.slack.lab
+├─ core/                      코어 — 인프라를 모른다 (ArchitectureTest가 강제)
+│  ├─ model/                  값 객체·결과 타입 (SlackMessageEvent, HandlingResult, ClaimOutcome, ...)
+│  ├─ port/                   인터페이스: EventPublisher, ProcessingStateStore, QueueDelivery, ChatNotifier,
+│  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe, BacklogProbe,
+│  │                          EmbeddingClient·VectorStore (3단계 자리만 잡음)
+│  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
+│                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
+├─ adapter/                   구현체 — 서로를 모른다
+│  ├─ alert/                  AlertController(/alerts/{source}, 시크릿 인증), CloudWatchAlertNormalizer(SNS), AlertConfig (M23)
+│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22)
+│  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
+│  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
+│  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
+│  ├─ cli/                    RecoveryRunner
+│  └─ web/                    HealthController
+└─ config/                    역할(app.role)·설정 속성
+```
+
+의존 규칙(`ArchitectureTest`): ① `core`는 `adapter`를 import하지 않는다. ② `core`는 Redis·HTTP·JSON·JDBC·AMQP 같은 인프라 라이브러리를 import하지 않는다(규칙 2를 코어 전체로 넓힌 것). ③ `core`는 `config`에서 자기가 실제로 쓰는 설정 값(`Processing/Experiment/Llm/Slack/State/Retry/Worker/ContextProperties`)과 역할 표시만 참조한다(브로커 전용 `QueueProperties` 등은 금지). ④ `core.model`은 JDK와 모델만, `core.port`는 모델만 안다. ⑤ 어댑터끼리는 서로를 모른다. 코어에 Redis import를 넣으면 이 테스트가 실패함을 확인했다(변이 검사).
+
+메시지 확정은 코어의 책임이다: 확정하면 `QueueDelivery.acknowledge()`, 확정하지 못했거나 지금 처리할 수 없으면 `QueueDelivery.defer()`를 부른다("ack하지 않으면 브로커가 알아서 다시 준다"는 가정은 하지 않는다 — RabbitMQ는 주지 않는다). `ProcessingStateStore`의 `deliveryToken`은 브로커가 정한 불투명 값(RabbitMQ delivery tag)이고 Postgres 저장소는 해석하지 않는다. (M22-2에서 Redis 어댑터를 제거해 확정 책임은 코어의 `acknowledge()`/`defer()` 호출 하나로 정리됐다.)
 
 ### 절대 경계
 
@@ -447,6 +475,37 @@ P1 착수 직전에 정한다. 그 전까지는 어느 쪽이든 되도록 `Slac
 - **근거**: 상태·예약·ACK를 한 저장소의 Lua로 묶어 §5.1 ACK 규칙을 가장 적은 경계로 지킨다. 재전달·pending 같은 큐 고유의 현상도 직접 관찰할 수 있다. 실측(`EXPERIMENT-LOG.md` §6.1)에서 `XADD+WAITAOF`의 p95는 3.18ms였고, `docker kill -s KILL` 후에도 보존됐다.
 - **대안**: RabbitMQ(운영 대상 2개, 큐 ACK와 상태 기록이 비원자적), PostgreSQL 테이블 큐(기술적으로 타당하지만 큐 고유 현상 관찰이 약함). 상세 비교는 `PLAN.md` 2단계 §7에 있다.
 - **대가**: Lua는 실행이 원자적이지만 롤백은 없다. 그래서 검증 → 멱등 보존 → 상태 → ACK 순서로 설계한다. 지연 재시도·DLQ·회수는 직접 구현한다. 내구성 주장은 프로세스 크래시 범위다.
+
+### ADR-9 · 오픈소스 self-hosted 도구로 기반을 바꾼다: RabbitMQ + Postgres, 포트/어댑터 (2026-10-02)
+
+ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중 "큐 고유 현상을 직접 관찰하는 학습 가치"는 더 쓰지 않는다.
+
+- **배경**: 이 프로젝트는 개인 학습용에서 "기존 서비스에 붙여 쓰는 오픈소스 도구"로 방향을 잡았다. 도입하는 팀이 받아서 자기 환경에 띄운다(self-hosted). 우리가 호스팅하는 SaaS가 아니다(PRD §7 유지). 첫 실사용 환경은 사용자가 배포한 AWS 서비스이지만 코드는 AWS에 묶지 않는다.
+- **결정**
+  1. **큐는 RabbitMQ.** publisher confirm 뒤에만 200, durable quorum queue, 수동 ack, 전달 횟수 제한 + 데드레터(DLQ), 지연 재시도는 TTL 큐 또는 지연 플러그인. 직접 만든 Lua 재시도·DLQ·회수는 폐기한다.
+  2. **중복 억제와 처리 상태는 Postgres.** 필수 인프라는 `RabbitMQ + Postgres`. Redis는 쓰지 않는다. RAG를 켜면 같은 Postgres(pgvector)를 벡터 저장에도 쓴다.
+  3. **포트/어댑터(DIP).** 코어는 인터페이스(포트)만 알고 구현체(어댑터)를 모른다. 대상: 메시지 큐(발행/소비), 작업 상태 저장소, LLM, 임베딩, 벡터 저장소, 채팅 알림(Slack), 알람 입력(CloudWatch/SNS, Grafana 등). 코어 패키지가 어댑터 패키지를 import하면 빌드가 실패하는 아키텍처 테스트를 둔다(규칙 2의 import 검사와 같은 방식).
+  4. **알람 입력은 원천에서 직접 받는다.** CloudWatch(SNS)·Grafana가 전용 엔드포인트로 보낸다. Slack에 올라간 알람 메시지를 파싱해 트리거하지 않는다(봇 메시지 필터와 충돌, 서식 파싱 취약). Slack은 표시 용도다. n8n은 필수가 아니라 선택 어댑터다.
+  5. **"같은 알람"의 기준**: 모니터링 도구의 장애 식별자 + 발생 회차(예: 알람 이름 + 상태 변경 시각). 같은 회차의 반복 전송은 같은 작업이고, 해결 뒤 재발은 새 작업이다. 목표는 "장애 한 건에 대표 리포트 하나"다. 추가 분석이 생길 때 메시지를 갱신하는 방식은 후속 검토한다.
+  6. **결과 불명 정책은 유지한다**: 자동 재발신 금지(규칙 11). RabbitMQ의 재전달을 Slack 재발신으로 직결하지 않는다. 같은 작업이 다시 전달되면 저장된 상태로 처리한다 — 진행 중이면 실행하지 않고, 완료면 종료, 결과 불명이면 스레드를 **읽기 전용으로 조회**해 우리 `metadata` 답글이 있으면 완료 처리하고 없으면 결과 불명을 유지한다. 미해결 건은 목록으로 조회해 사람이 처리한다(CLI).
+  7. **운영 기본값**: 워커 1개, 워커 내부 동시성 1. 단 여러 워커·재시작·배포 중 겹침에서도 중복 처리하지 않도록 공유 상태 기반 선점은 항상 유지한다. 이력 조회는 미해결 건 목록(CLI)까지이고 장기 감사·통계 보관은 하지 않는다. 완료 기록은 중복 억제 기간(7일)만 유지한다.
+  8. **스위치 둘**: ① LLM·임베딩 엔드포인트(외부 유출 경로) — 기본은 사내·로컬 엔드포인트, 외부는 명시적 허용. ② RAG on/off — 꺼도 Vector DB 없이 알림 내용과 스레드 문맥만으로 동작한다. 유출 경로는 Vector DB가 아니라 LLM 호출이다.
+- **근거**: 코드를 직접 읽고 유지보수하지 않는 운영자에게는 직접 만든 Lua 상태 기계(재시도·DLQ·회수)가 부채다. 기성 브로커의 기능을 쓰는 편이 낫다. SQS는 AWS 전용이라 오픈소스 이식성이 떨어져 기각했고, RabbitMQ는 어디서나 실행되고(AWS에서는 Amazon MQ) 운영자에게 익숙하다. 중복 억제 조회는 수신 경로(p95 200ms) 밖의 워커에서 일어나고 부하가 작아 Postgres 기본키 조회로 충분하다고 본다(측정으로 확인한다). 처리 이력 목록과 복구에 쓰는 입력 보존도 같은 DB에서 조회·갱신하기 쉽다.
+- **대안**: SQS(AWS 한정), Kafka(이 규모와 메시지별 재시도·DLQ 요구에 과함), Redis 유지(별도 인프라와 자체 Lua 유지 부담), 저장소 없음(같은 알람의 중복 리포트는 UX 문제라 받아들일 수 없음).
+- **대가**: 2단계의 Redis 구현(Lua, 스케줄러, 복구 CLI의 Redis 부분)을 폐기하고 새 어댑터로 다시 만든다. 검증된 것은 **프로토콜**(멱등 키, 선점·임대, 보존 → 상태 → ACK 순서, 결과 불명 처리, 24시간 창)과 실험 설계이며 승계한다. 기반이 바뀌므로 성능·중복·복구 실험(P·D·R)을 다시 수행한다. Postgres가 필수 인프라가 된다. RabbitMQ에는 메시지별 임대가 없어 처리 시간이 길면(LLM 최대 50초) 소비자 타임아웃과 prefetch 설정을 맞춰야 한다.
+- **미결**: CloudWatch 알람 SNS 메시지의 식별 필드 확인, 대표 리포트 갱신(`chat.update`) 시점, Postgres 선점의 실제 지연 측정, 지연 재시도를 TTL 큐로 할지 플러그인으로 할지.
+
+#### ADR-9 이행 결과 (M22-2, 2026-10-02)
+
+Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔드 스위치(`queue.backend`·`state.backend`)도 없앴다 — 큐는 RabbitMQ, 상태는 Postgres 하나뿐이다. 설정은 `queue.enqueue-timeout-ms`(발행 확인 대기)만 남고 스트림 키·소비 그룹·`claim-min-idle-ms` 불변식은 사라졌다. 적체 지표는 `BacklogProbe` 포트(각 어댑터가 수치를 내고 코어 `BacklogReporter`가 한 줄로 합친다): `적체 스냅샷 retry= dlq= recovery= queue_ready= defer= dead=`. Postgres 비밀번호는 기본값이 없다(`POSTGRES_PASSWORD`). compose는 RabbitMQ·Postgres·앱 3역할에 메모리 상한을 둔다. 실측은 `EXPERIMENT-LOG.md` §21.
+
+#### 알람 입력 (M23)
+
+모니터링 도구가 `POST /alerts/{source}`로 직접 보낸다(Slack 메시지를 파싱하지 않는다). 인증은 공유 시크릿(`X-Alert-Secret` 헤더 또는 SNS용 `?token=`, 상수 시간 비교)이고 `alert.secret`·`alert.channel`이 모두 있어야 켜진다(없으면 404). `AlertNormalizer`(원천별 어댑터)가 `AlertEvent`로 바꾸고, `AlertEvent.toMessageEvent()`가 기존 파이프라인(큐 저장 확인 후 200 → 선점 → LLM → 발신)에 `ts` 없는 메시지 이벤트로 태운다 — 리포트는 채널에 새 메시지로 올라가고 반응은 붙지 않으며(원 메시지 없음) 후속 질문은 그 스레드의 멘션으로 이어진다. **"같은 알람" = 알람 이름 + 상태 변경 시각의 해시**(`alert-<hash>`가 event_id): SNS 재전송은 선점 표가 흡수하고 해결 뒤 재발은 시각이 달라 새 건이다. ALARM 이외 전이(OK 등)는 200으로 받고 무시한다. 저장 확인 실패는 503(SNS가 재전송). 한계: SNS 서명은 검증하지 않고(시크릿이 대신, HTTPS 전제), SubscriptionConfirmation의 URL은 서버가 호출하지 않는다(SSRF 방지, 운영자가 한 번 연다). `ts`가 없는 리포트는 스레드 조회 단서가 없어 결과 불명 자동 조회 대상에서 빠진다(사람이 복구 CLI로 처리).
+
+#### 오류 모델 (M24)
+
+실패는 예외가 아니라 결과 타입(sealed `Success/Failed/Unknown`, `PublishResult`, `HandlingResult`)으로 전달한다 — 확실한 실패·결과 불명·재시도 가능 여부가 상태 머신과 규칙 11을 정하기 때문이다. 그 안의 정보는 문자열이 아니라 타입이다: `ErrorCode`(원인 분류, 고정 저장 코드) + `ErrorInfo.detail`(Slack 오류 코드·HTTP 상태·예외 클래스 같은 외부 상세), `ProcessingStage`(어디까지 갔는가: llm/send/processing/delivered/state/resolved_*), `MessageKind`(answer/failure_notice). `Failure(stage, kind, error)`가 핸들러에서 워커·저장소까지 그대로 가므로 워커가 문자열을 잘라 종류를 복원하지 않는다(옛 `kindFromStage` 제거). 재시도 가능 여부는 오류 코드가 아니라 결과의 `retryable`이, 결과 불명은 결과 타입 `Unknown`이 정한다. DB는 `stage`·`error_code`·`error_detail`·`kind`를 따로 저장한다(고정 코드, 자바 이름 변경과 무관). 예외 계층·`@ControllerAdvice`는 도입하지 않았다 — 호출부가 다르게 처리할 예외 종류가 없고 컨트롤러 응답 의미가 서로 달라 공통 처리로 줄일 중복이 적다.
 
 ### ADR-6 · 프로토타입은 폐기하고 지식만 승계한다
 

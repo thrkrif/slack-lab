@@ -23,8 +23,13 @@ ext['testcontainers.version'] = '1.21.4'
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
-    // 2단계 큐(Streams)·공유 처리 상태 (ARCHITECTURE ADR-8)
-    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    // M20: 작업 상태 저장소(Postgres). 연결 풀·마이그레이션은 어댑터가 직접 구성한다(전역 자동 구성은 끈다)
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+    // M21: 큐(RabbitMQ). 확인(confirm)·ack·채널을 직접 다루려고 클라이언트 라이브러리를 그대로 쓴다
+    implementation 'com.rabbitmq:amqp-client'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
 
     // 한쪽만 선언하면 컴파일이 실패한다 (ARCHITECTURE §7)
@@ -32,8 +37,12 @@ dependencies {
     annotationProcessor 'org.projectlombok:lombok'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // 코어가 어댑터·인프라 라이브러리를 모른다는 의존 방향을 빌드에서 강제한다(ADR-9, M19)
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.4.1'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.testcontainers:rabbitmq'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
