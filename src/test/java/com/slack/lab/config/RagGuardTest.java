@@ -120,6 +120,40 @@ class RagGuardTest {
         runner.run(ctx -> assertThat(ctx).hasNotFailed());
     }
 
+    /** RagStartupCheck의 협력자 가짜. 임베딩이 한 번이라도 불리면 카운터가 오른다. */
+    static final java.util.concurrent.atomic.AtomicInteger EMBED_CALLS = new java.util.concurrent.atomic.AtomicInteger();
+
+    @EnableConfigurationProperties({RagProperties.class, LlmProperties.class})
+    static class Collaborators {
+        @org.springframework.context.annotation.Bean
+        com.slack.lab.core.port.EmbeddingClient embeddingClient() {
+            return (text, ms) -> {
+                EMBED_CALLS.incrementAndGet();
+                return new com.slack.lab.core.model.EmbeddingResult.Success(new float[1024], 1);
+            };
+        }
+
+        @org.springframework.context.annotation.Bean
+        com.slack.lab.core.port.VectorStore vectorStore() {
+            return org.mockito.Mockito.mock(com.slack.lab.core.port.VectorStore.class);
+        }
+    }
+
+    @Test
+    void 유출_정책_위반이면_임베딩_프로브가_나가기_전에_기동이_거부된다_빈_정의_순서와_무관하게() {
+        EMBED_CALLS.set(0);
+        // 일부러 RagStartupCheck를 RagGuard보다 먼저 등록한다 — 순서가 의존으로 보장돼야 거부가 프로브보다 앞선다
+        new ApplicationContextRunner().withUserConfiguration(Collaborators.class, RagStartupCheck.class, RagGuard.class)
+                .withPropertyValues("llm.base-url=http://localhost:11434/v1", "llm.model=m", "llm.client=echo", "rag.enabled=true",
+                        "rag.embedding-model=bge-m3", "rag.embedding-dimension=1024",
+                        "rag.embedding-base-url=https://api.example.com/v1")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure()).hasStackTraceContaining("rag.allow-external-embedding");
+                    assertThat(EMBED_CALLS.get()).as("거부되기 전에 외부로 프로브가 나가면 안 된다").isZero();
+                });
+    }
+
     @EnableConfigurationProperties({RagProperties.class, LlmProperties.class})
     static class Cfg {
         @org.springframework.context.annotation.Bean
