@@ -60,8 +60,8 @@ class PostgresConfig {
     @Bean
     @ConditionalOnRole({AppRole.WORKER, AppRole.INDEXER, AppRole.ALL})
     @ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true")
-    PostgresVectorStore vectorStore(HikariDataSource ds) {
-        return new PostgresVectorStore(ds);
+    PostgresVectorStore vectorStore(HikariDataSource ds, com.slack.lab.config.RagProperties rag) {
+        return new PostgresVectorStore(ds, new com.slack.lab.core.model.IndexMeta(rag.embeddingModel(), rag.embeddingDimension()));
     }
 
     @Bean

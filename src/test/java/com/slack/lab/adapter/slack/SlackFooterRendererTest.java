@@ -50,6 +50,16 @@ class SlackFooterRendererTest {
     }
 
     @Test
+    void 긴_제목은_이모지_서로게이트_쌍_중간에서_자르지_않는다() {
+        String out = SlackFooterRenderer.render("답변", refs(new DocumentHit("X", "😀".repeat(200), "t", 0.9)));
+
+        String item = out.split("\n")[3];
+        assertThat(item).endsWith("…");
+        assertThat(item.chars().filter(c -> Character.isHighSurrogate((char) c)).count())
+                .isEqualTo(item.chars().filter(c -> Character.isLowSurrogate((char) c)).count());
+    }
+
+    @Test
     void 안내_문구는_검색_장애와_관련_문서_없음을_구분한다() {
         String none = SlackFooterRenderer.render("답변", new ReplyFooter.NoRelevantDocuments());
         String down = SlackFooterRenderer.render("답변", new ReplyFooter.SearchUnavailable());
