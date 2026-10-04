@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# RAG 색인 CLI(M27). 예: scripts/rag-index | scripts/rag-index --rebuild | scripts/rag-index --confirm-delete
+# .env를 읽고 indexer 역할로 한 번 실행한다(웹 포트 없음). 필요: RAG_ENABLED=true RAG_EMBEDDING_MODEL RAG_EMBEDDING_DIMENSION RAG_DOCS_DIR
+# 종료 코드: 0 성공, 1 일부 문서 실패, 2 출처/설정 오류, 3 다른 색인 진행 중, 4 저장소·메타 오류(모델 변경은 --rebuild),
+#            5 삭제 임계 초과로 중단(--confirm-delete), 6 전체 재색인이 실패해 기존 색인 유지
+set -euo pipefail
+cd "$(dirname "$0")/.."
+./gradlew -q bootJar -x test
+JAR=$(ls build/libs/*.jar | grep -v -- '-plain' | head -1)
+set -a; source .env; set +a
+APP_ROLE=indexer exec java -jar "$JAR" --spring.main.banner-mode=off --logging.level.root=WARN \
+  --logging.level.com.slack.lab.core.service=INFO "$@"

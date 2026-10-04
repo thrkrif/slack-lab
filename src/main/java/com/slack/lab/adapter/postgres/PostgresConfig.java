@@ -65,6 +65,13 @@ class PostgresConfig {
     }
 
     @Bean
+    @ConditionalOnRole(AppRole.INDEXER)
+    @ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true")
+    PostgresIndexLock indexLock(HikariDataSource ds) {
+        return new PostgresIndexLock(ds);
+    }
+
+    @Bean
     @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
     RecoveryStore recoveryStore(HikariDataSource ds, StateProperties state, ObjectMapper mapper) {
         return new PostgresRecoveryStore(ds, state, mapper);

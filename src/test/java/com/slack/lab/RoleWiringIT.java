@@ -55,8 +55,18 @@ class RoleWiringIT {
     }
 
     // 임베딩 서버 없이 배선만 본다(모델·차원 확인은 별도 테스트).
+    // 색인 역할은 기동하면 색인을 한 번 돌리므로 빈 임시 문서 디렉터리를 준다(러너는 종료하지 않게 끈다).
     private static final String[] RAG_ON = {"--rag.enabled=true", "--rag.embedding-model=bge-m3",
-            "--rag.embedding-dimension=1024", "--rag.verify-on-startup=false"};
+            "--rag.embedding-dimension=1024", "--rag.verify-on-startup=false", "--rag.index.exit-after-run=false",
+            "--rag.index.docs-dir=" + emptyDocsDir()};
+
+    private static String emptyDocsDir() {
+        try {
+            return java.nio.file.Files.createTempDirectory("rag-docs").toString();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     @Test
     void 수신_역할은_큐_발행만_갖고_DB와_워커는_없다() {

@@ -29,6 +29,8 @@ rag:
   embedding-dimension: ${RAG_EMBEDDING_DIMENSION:0}
   allow-external-llm: ${RAG_ALLOW_EXTERNAL_LLM:false}
   allow-external-embedding: ${RAG_ALLOW_EXTERNAL_EMBEDDING:false}
+  index:
+    docs-dir: ${RAG_DOCS_DIR:}
 
 llm:
   client: ${LLM_CLIENT:ollama}
