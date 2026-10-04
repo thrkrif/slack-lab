@@ -5,7 +5,9 @@ package com.slack.lab.config;
  * 모두 하는 개발용 기본값이다. 2단계 M12에서 수신과 처리가 큐로 분리되면 {@code ALL}도 큐를 거친다.
  */
 public enum AppRole {
-    RECEIVER, WORKER, REACTOR, RECOVERY, ALL;
+    RECEIVER, WORKER, REACTOR, RECOVERY,
+    /** RAG 색인 CLI(3단계). 복구처럼 웹 포트 없이 일회성으로 돈다. */
+    INDEXER, ALL;
 
     /** 웹 서버가 필요한 역할. ngrok에 노출되는 포트는 수신 서버 하나뿐이어야 한다. */
     public boolean servesHttp() {

@@ -46,7 +46,7 @@ class ArchitectureTest {
                     .and(not(simpleName("ProcessingProperties"))).and(not(simpleName("ExperimentProperties")))
                     .and(not(simpleName("LlmProperties"))).and(not(simpleName("SlackProperties")))
                     .and(not(simpleName("StateProperties"))).and(not(simpleName("RetryProperties")))
-                    .and(not(simpleName("WorkerProperties"))).and(not(simpleName("ContextProperties")))
+                    .and(not(simpleName("WorkerProperties"))).and(not(simpleName("ContextProperties"))).and(not(simpleName("RagProperties")))
                     .and(not(simpleName("AppRole")))
                     .and(not(simpleName("ConditionalOnRole")))
                     .and(not(simpleName("OnRoleCondition"))));
