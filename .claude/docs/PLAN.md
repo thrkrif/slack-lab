@@ -89,7 +89,7 @@
 
 ### 3단계 (P2: RAG) — 진행 중
 
-- [ ] **M24.5a 스파이크** (`docs/spikes/`): Ollama `/v1/embeddings` 지원·bge-m3 차원·콜드/웜 시간. 미지원이면 멈춤
+- [x] **M24.5a 스파이크** — 완료(`docs/spikes/rag-embedding-spike.md`, `EXPERIMENT-LOG.md` §24): `/v1/embeddings` 지원, bge-m3 1024차원·정규화, 콜드 1.2~2.2s·웜 0.05s, 673MB
 - [ ] **M24.5b 계약 확정**: 포트 재설계(`VectorStore`·`EmbeddingClient`·`DocumentSource`·`ReferenceList`)
 - [ ] **M25 pgvector 기반**: 이미지·테스트 5개 이전·V3·`VectorStore` 어댑터 (볼륨 초기화 멈춤 지점)
 - [ ] **M26 임베딩 어댑터·스위치·기동 검사**
@@ -103,7 +103,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-04)**: 3단계(RAG) 단계 전환 완료(AGENTS·PRD·PLAN·ARCHITECTURE 갱신). 인터뷰·합의 계획 반영, **다음은 M24.5a 스파이크** (`/ultragoal`로 마일스톤을 목표 순서로 넣어 진행). 2단계는 ADR-9 전환 M19~M24까지 `develop`에서 완료.
+- **상태(2026-10-04)**: 3단계 진행. M24.5a 완료(임베딩 지원·1024차원). **다음은 M24.5b 계약 확정.** ultragoal 계획 id `stage3-rag`(`omc ultragoal ... --plan-id stage3-rag`), 사용자가 `/goal` 입력해야 훅 통과. Ollama는 내렸다(`bge-m3`는 pull됨).
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).

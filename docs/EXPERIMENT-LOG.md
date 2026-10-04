@@ -981,3 +981,7 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 ### 23.1 리뷰 대응 (codex 위임, MAJOR 0·MINOR 4)
 
 참고: 이 회차 codex는 `--model/--effort`를 프롬프트에 넣어 설정이 적용되지 않았고 `gpt-6-astra`/medium으로 돌았다(`omc ask`에는 모델 플래그가 없고 `~/.codex/config.toml`을 따른다 — 이후 sol/low). MINOR 반영: ① 재시도 저장 때 `kind` 누락 → 함께 저장하고 테스트 단언 추가 ② 수동·자동 완료가 `error_code/error_detail`을 지우지 않음 → 지우고 회귀 테스트 ③ 실패 안내 발신 중 예상 못한 예외가 `ANSWER`로 기록됨 → `AttemptHandle.recordKind`로 실제 종류를 전달하고 테스트 추가 ④ 작업 디렉터리 때문에 하위 경로에 생긴 `.omc` 상태 파일이 스테이징됨 → 제거, `.gitignore`에 `**/.omc/state/` 추가. 알려진 불안정 테스트: `임대가_유효하면_갱신되고_BUSY로_지켜진다`는 실제 sleep 기반이라 부하가 큰 전체 빌드에서 한 번 실패했고(재실행 2회 통과) 이번 변경과 무관하다.
+
+## 24. 3단계 M24.5a 임베딩 스파이크 (2026-10-04)
+
+상세는 `docs/spikes/rag-embedding-spike.md`. 요약: Ollama 0.34.0의 `/v1/embeddings`가 OpenAI 호환으로 동작하고(배열 입력 포함, 없는 모델은 404 JSON), bge-m3는 1024차원·L2 정규화 벡터를 돌려준다. 콜드 1.18~2.19s, 웜 약 0.05s, 적재 메모리 673MB. 검색 상한 5s 안에 콜드도 들어오지만 채팅 모델과의 동시 적재는 M30에서 잰다. 멈춤 조건(임베딩 미지원)은 해당 없음. 이 절은 설계 입력이며 합격 판정이 아니다.
