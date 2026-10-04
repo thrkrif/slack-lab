@@ -1037,3 +1037,14 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 
 ### 29.1 리뷰 대응 (codex가 사용 한도로 실패해 `code-reviewer` 에이전트로 대체, MAJOR 2·MINOR 5)
 ① MAJOR 태그 무력화 정규식 빈틈(`< /reference>`, 줄바꿈, 제로폭, 전각 `＜`) → 정규식에 공백·`\p{Cf}` 허용, 전각 꺾쇠 접기, 7종 테스트 ② MAJOR 검색 중 런타임 예외가 재시도·실패로 샐 수 있음 → `retrieve`가 예외를 `Unavailable`로 변환, 캐스트를 sealed switch로, 깨진 행(null) 건너뜀, 프롬프트 조립 실패도 폴백 ③ MINOR 봇 덧붙임이 다음 질문 문맥으로 되먹임 → `ReplyFooter.stripFooter`(cleanText 이전 원문에서) ④ MINOR 답변 본문 `<!channel>` 주입 경로 → 본문의 `<!`·`<@`·`<#` 이스케이프 ⑤ MINOR `minScore` 범위 → −1~1 검증 ⑥ MINOR 서로게이트 쌍·주석 정정 ⑦ 테스트 공백(발신 재시도 시 재검색, Unknown, 예외) 보강. **보류**: `ChatNotifier` 오버로드 통일(기존 목 기반 테스트 호환을 위해 두 경로 유지 — 이유를 인터페이스에 적음), 스레드 4000자 + 문맥 3000자가 Ollama 기본 `num_ctx`(4096 토큰)를 넘을 수 있는지는 M30 측정 항목.
+
+## 30. 3단계 M29 평가 데이터·하니스 (2026-10-04)
+
+변경: `docs/rag-eval/`(가상 문서 20 + 질문 final 30·tuning 10 + README), 코어 `RagEvaluator`·`EvalQuestion`·`EvalReport`·`AnswerFormatChecker`, `RetrievalService.rank`/`select` 분리, `RagEvalRunner`(indexer `--eval`), `EvalSetLoader`, `scripts/rag-eval`.
+
+검증: ① 단위: `RagEvaluatorTest` 8(정답이 임계값 미달이어도 hit으로 셈·청크→문서 접기·K 경계·정답 없음 근거 미주입·검색 불가=불합격·**합격선 경계 20/24 합격 19/24 불합격, 5/6 합격 4/6 불합격**·튜닝 세트는 판정하지 않음·요약에 본문 없음·답변 쌍 양식), `AnswerFormatCheckerTest` 4 ② 데이터 규격 `RagEvalDataTest` 7(문서 20·한/영/혼합 존재, final 30 = 알람 15·멘션 15·정답 24·없음 6이고 두 종류 모두에 정답 없는 질문 존재, tuning 10 = 8·2이고 final과 겹치지 않음, 정답 ID가 실제 문서이고 모든 문서가 final 정답 하나 이상, 실제 경로·토큰 없음, 알람 질문의 질의 추출, 잘못된 질문 파일 거부) ③ 정합성 기준선 `RagEvalLexicalBaselineTest`: **실제 임베딩이 아니라 글자 2-gram 벡터 + 메모리 저장소**로 final 24개 중 **18개 hit**(미스한 질문 ID와 점수는 final을 조정에 쓰지 않으려고 기록하지 않는다), tuning 8/8 — 라벨이 어휘만으로도 대체로 찾아진다는 정합성 확인이며 모델 품질도 합격 판정도 아니다. 이 결과를 보고 데이터나 라벨을 바꾸지 않았다. ④ 통합 `RagEvalRunnerIT`(실제 pgvector, 임베딩 스텁): 색인 → `--eval`로 final 합격 요약(hit@3 6/6, 근거 미주입 1/1), 못 찾으면 MISS와 "판정: 불합격", `--eval.set=tuning`은 final 없이 판정 줄 없음, `--eval.pairs`는 표만, 질문 파일 없음은 이유 출력 ⑤ 전체 `./gradlew build` 통과.
+
+정직한 한계: 실제 임베딩(bge-m3)으로 final을 돌린 결과(합격 여부)는 아직 없다 — M30의 몫이다. 이 단계의 완료는 "하니스가 경계를 맞게 계산하고 데이터가 규격대로이며 CLI가 색인된 DB에서 돈다"까지다.
+
+### 30.1 리뷰 대응 (codex 사용 한도로 `code-reviewer`, MAJOR 2·MINOR 8)
+① MAJOR `scripts/rag-eval`이 `RAG_DOCS_DIR`를 export했지만 `scripts/rag-index`가 `.env`를 다시 읽어 덮어쓸 수 있었음(실제 문서를 `--confirm-delete`로 색인할 위험) → 문서 경로를 **인자**(`--rag.index.docs-dir=`)로 전달, 그리고 **`POSTGRES_URL`을 호출자가 명시**해야 실행(기본 DB 보호)하며 대상 DB를 출력 ② MAJOR `--eval.set` 기본값이 `all`이라 튜닝 때마다 final 순위가 출력됨 → 기본 **tuning**, final은 명시해야 실행, 어휘 기준선 테스트는 final 집계 수치만 출력, 이 로그에서 final 미스 ID 삭제 ③ MINOR 빈 세트가 공허하게 합격 → `passes()`가 질문 수 0이면 불합격, 러너가 final이 24·6 규격이 아니면 종료 코드 2 ④ MINOR hit@3이 운영 topK에 묶임 → 평가가 `rank(k)`로 `max(topK, 3K)`개를 가져와 문서 3개로 센다(주입은 운영 topK 조각만 임계값 통과) ⑤ MINOR 콜드 임베딩으로 첫 질문 검색 불가 → 평가 시작 시 데우기(최대 6회) ⑥ MINOR 종료 코드 미검증 → `RagEvalRunner.lastExitCode()`로 통합 테스트가 0/1/2 확인(7건) ⑦ MINOR 불필요한 테스트 래퍼 제거, 알람형 20개 모두 질의 추출 검사 ⑧ 문서화: `AnswerFormatChecker`는 자동 연결하지 않음(M30 사람 기록용), tuning 정답 없음 2개뿐·정답 문서 공유(README 한계).

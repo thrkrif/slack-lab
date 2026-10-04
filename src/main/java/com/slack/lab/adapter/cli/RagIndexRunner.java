@@ -33,6 +33,9 @@ class RagIndexRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        if (args.containsOption("eval")) {
+            return; // 평가 실행은 RagEvalRunner의 몫이다
+        }
         IndexReport report = service.run(args.containsOption("rebuild"), args.containsOption("confirm-delete"));
         System.out.println(report.summary());
         System.out.flush();

@@ -46,67 +46,100 @@ public class RetrievalService {
         this.config = config;
     }
 
+    /** 임계값·문맥 상한을 적용하기 전의 검색 순위. 평가 하니스가 hit@K를 재려고 쓴다. */
+    public sealed interface Ranking {
+
+        record Ranked(List<DocumentHit> hits, long elapsedMs) implements Ranking {}
+
+        record Unavailable(ErrorInfo error, long elapsedMs) implements Ranking {}
+    }
+
     /**
      * @param budgetMs 호출 시점에 남은 LLM 단계 예산. 이보다 길게 쓰지 않는다
      * @return 예외를 던지지 않는다 — 포트 구현체의 예상 못한 예외도 {@link Retrieval.Unavailable}로 바꾼다. 검색 실패가 처리
      *     실패·재시도로 번지면 안 되기 때문이다(PLAN M28)
      */
     public Retrieval retrieve(String promptText, long budgetMs) {
+        return switch (rank(promptText, budgetMs)) {
+            case Ranking.Unavailable u -> new Retrieval.Unavailable(u.error(), u.elapsedMs());
+            case Ranking.Ranked r -> {
+                List<DocumentHit> picked = select(r.hits());
+                yield picked.isEmpty() ? new Retrieval.NoRelevant(r.elapsedMs()) : new Retrieval.Found(picked, r.elapsedMs());
+            }
+        };
+    }
+
+    /** 운영 검색이 가져오는 조각 수. */
+    public int topK() {
+        return config.topK();
+    }
+
+    /** 질의 임베딩 + 벡터 검색. 같은 기한 규칙·예외 변환을 쓰며 임계값은 적용하지 않는다. */
+    public Ranking rank(String promptText, long budgetMs) {
+        return rank(promptText, budgetMs, config.topK());
+    }
+
+    /** 가져올 조각 수를 따로 정하는 버전(평가가 운영 topK와 무관하게 hit@K를 재려고 쓴다). */
+    public Ranking rank(String promptText, long budgetMs, int k) {
         long start = System.nanoTime();
         try {
-            return doRetrieve(promptText, budgetMs, start);
+            return doRank(promptText, budgetMs, start, k);
         } catch (RuntimeException e) {
             log.warn("RAG 검색 중 예상 못한 예외 → RAG 없이 진행 reason={}", e.getClass().getSimpleName());
-            return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.UNEXPECTED_EXCEPTION, e), elapsedMs(start));
+            return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.UNEXPECTED_EXCEPTION, e), elapsedMs(start));
         }
     }
 
-    private Retrieval doRetrieve(String promptText, long budgetMs, long start) {
+    private Ranking doRank(String promptText, long budgetMs, long start, int k) {
         long deadlineMs = Math.min(config.searchDeadlineMs(), budgetMs);
         if (deadlineMs <= 0) {
-            return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_NO_BUDGET), 0);
+            return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_NO_BUDGET), 0);
         }
         String query = RagPrompt.queryOf(promptText, config.maxQueryChars());
         if (query.isEmpty()) {
-            return new Retrieval.NoRelevant(0);
+            return new Ranking.Ranked(List.of(), 0);
         }
 
         float[] vector;
         switch (embedding.embed(query, deadlineMs)) {
             case EmbeddingResult.Success ok -> vector = ok.vector();
             case EmbeddingResult.TimedOut t -> {
-                return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_TIMEOUT), elapsedMs(start));
+                return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_TIMEOUT), elapsedMs(start));
             }
             case EmbeddingResult.Failed f -> {
-                return new Retrieval.Unavailable(f.error(), elapsedMs(start));
+                return new Ranking.Unavailable(f.error(), elapsedMs(start));
             }
         }
 
         long left = deadlineMs - elapsedMs(start);
         if (left <= 0) {
-            return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_TIMEOUT, "after_embed"), elapsedMs(start));
+            return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.EMBEDDING_TIMEOUT, "after_embed"), elapsedMs(start));
         }
-        SearchResult searched = store.search(vector, config.topK(), left);
+        SearchResult searched = store.search(vector, k, left);
         long total = elapsedMs(start);
         List<DocumentHit> found;
         switch (searched) {
             case SearchResult.Success ok -> found = ok.hits();
             case SearchResult.TimedOut t -> {
-                return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.VECTOR_STORE_TIMEOUT), total);
+                return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.VECTOR_STORE_TIMEOUT), total);
             }
             case SearchResult.Failed f -> {
-                return new Retrieval.Unavailable(f.error(), total);
+                return new Ranking.Unavailable(f.error(), total);
             }
         }
         // 기한을 넘겨 도착한 결과는 쓰지 않는다(호출자가 이미 다음 단계 예산을 계산했다).
         if (total > deadlineMs) {
             log.warn("검색 결과가 기한 뒤에 도착해 버린다 elapsed_ms={} deadline_ms={}", total, deadlineMs);
-            return new Retrieval.Unavailable(ErrorInfo.of(ErrorCode.VECTOR_STORE_TIMEOUT, "late_result"), total);
+            return new Ranking.Unavailable(ErrorInfo.of(ErrorCode.VECTOR_STORE_TIMEOUT, "late_result"), total);
         }
+        return new Ranking.Ranked(found, total);
+    }
 
+    /** 순위에서 프롬프트에 실제로 주입할 조각: 임계값 이상이고 문맥 글자 상한 안. 깨진 행은 쓰지 않는다. */
+    public List<DocumentHit> select(List<DocumentHit> ranked) {
         List<DocumentHit> picked = new ArrayList<>();
         int chars = 0;
-        for (DocumentHit hit : found) {
+        for (DocumentHit hit : ranked) {
             // 저장소가 깨진 행을 돌려줘도(null 필드) 프롬프트 조립에서 터지지 않게 쓰지 않는다.
             if (hit == null || hit.documentId() == null || hit.title() == null || hit.text() == null
                     || hit.score() < config.minScore()) {
@@ -118,7 +151,7 @@ public class RetrievalService {
             picked.add(hit);
             chars += hit.text().length();
         }
-        return picked.isEmpty() ? new Retrieval.NoRelevant(total) : new Retrieval.Found(picked, total);
+        return picked;
     }
 
     private static long elapsedMs(long startNanos) {
