@@ -495,6 +495,10 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 - **대가**: 2단계의 Redis 구현(Lua, 스케줄러, 복구 CLI의 Redis 부분)을 폐기하고 새 어댑터로 다시 만든다. 검증된 것은 **프로토콜**(멱등 키, 선점·임대, 보존 → 상태 → ACK 순서, 결과 불명 처리, 24시간 창)과 실험 설계이며 승계한다. 기반이 바뀌므로 성능·중복·복구 실험(P·D·R)을 다시 수행한다. Postgres가 필수 인프라가 된다. RabbitMQ에는 메시지별 임대가 없어 처리 시간이 길면(LLM 최대 50초) 소비자 타임아웃과 prefetch 설정을 맞춰야 한다.
 - **미결**: CloudWatch 알람 SNS 메시지의 식별 필드 확인, 대표 리포트 갱신(`chat.update`) 시점, Postgres 선점의 실제 지연 측정, 지연 재시도를 TTL 큐로 할지 플러그인으로 할지.
 
+#### ADR-9 보충 (3단계 착수, 2026-10-04)
+
+"RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
+
 #### ADR-9 이행 결과 (M22-2, 2026-10-02)
 
 Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔드 스위치(`queue.backend`·`state.backend`)도 없앴다 — 큐는 RabbitMQ, 상태는 Postgres 하나뿐이다. 설정은 `queue.enqueue-timeout-ms`(발행 확인 대기)만 남고 스트림 키·소비 그룹·`claim-min-idle-ms` 불변식은 사라졌다. 적체 지표는 `BacklogProbe` 포트(각 어댑터가 수치를 내고 코어 `BacklogReporter`가 한 줄로 합친다): `적체 스냅샷 retry= dlq= recovery= queue_ready= defer= dead=`. Postgres 비밀번호는 기본값이 없다(`POSTGRES_PASSWORD`). compose는 RabbitMQ·Postgres·앱 3역할에 메모리 상한을 둔다. 실측은 `EXPERIMENT-LOG.md` §21.
