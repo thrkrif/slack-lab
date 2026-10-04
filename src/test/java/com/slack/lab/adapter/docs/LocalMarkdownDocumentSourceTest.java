@@ -123,6 +123,16 @@ class LocalMarkdownDocumentSourceTest {
     }
 
     @Test
+    void 경로를_설정하지_않으면_현재_디렉터리를_색인하지_않고_설정_누락으로_실패한다() {
+        for (String blank : new String[] {"", "  ", null}) {
+            var r = new LocalMarkdownDocumentSource(blank).list();
+
+            assertThat(r).isInstanceOf(PortResult.Failed.class);
+            assertThat(((PortResult.Failed<List<SourceDocument>>) r).error().detail()).isEqualTo("docs_dir_not_configured");
+        }
+    }
+
+    @Test
     void 같은_ID가_두_파일에_있으면_모호하므로_실패한다() throws Exception {
         write("x/same.md", "하나");
         write("y/same.md", "둘");

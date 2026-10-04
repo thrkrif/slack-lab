@@ -511,6 +511,8 @@ RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 
 
 **평가 하니스(M29)**: `docs/rag-eval/`에 가상 문서 20개(한/영/혼합)와 질문 40개(final 30 = 알람형 15 + 멘션형 15, 정답 24 + 없음 6 / tuning 10 = 정답 8 + 없음 2, 두 세트는 겹치지 않음)를 커밋한다. 코어 `RagEvaluator`가 운영과 같은 `RetrievalService`(질의 추출·임베딩·검색·임계값·문맥 상한)로 LLM 없이 잰다: **hit@3** = 정답이 임계값 적용 전 순위의 문서 3개 안(청크 순위를 문서 순위로 접음), **근거 미주입** = 정답 없는 질문에서 임계값·문맥 상한 뒤 주입 0건, 검색 불가는 불합격. 합격선(final만 판정)은 정답 24개 중 20개 이상·정답 없음 6개 중 5개 이상을 정수 비교로 고정하고, 조정은 K·청크·임계값에만 tuning 세트로 한다. 실행은 `scripts/rag-eval --confirm-eval-db`(= indexer 역할의 `--eval`; 현재 DB 색인을 가상 문서로 바꾸므로 `POSTGRES_URL`을 명시한 평가용 DB 전용)이고 기본은 tuning 세트만 돌리며(`--eval.set=final|all`로 명시해야 final 판정) final이 규격(24·6)이 아니면 종료 코드 2로 판정을 거부한다. `--eval.pairs`는 답변 쌍 사람 비교용 빈 표를 낸다. `AnswerFormatChecker`는 답글의 참고 문서 줄을 형식만 검사한다(내용 채점 없음). `RetrievalService.rank`/`select`로 순위와 선택을 나눠 평가가 raw 순위를 본다.
 
+**3단계 실측 결론(M30, `EXPERIMENT-LOG.md` §31)**: 임베딩은 **bge-m3**(final hit@3 24/24, 근거 미주입 6/6; nomic-embed-text는 19/24, 4/6으로 불합격). 검색 임계값 `0.54`는 tuning 세트로만 정했고 문맥 상한은 Ollama 4K 컨텍스트에서 조용한 잘림을 피하려고 `1500`자로 낮췄다(프롬프트가 컨텍스트를 넘으면 Ollama가 앞부분을 잘라낸다). LLM은 합격선을 넘은 qwen2.5 3b/7b 중 더 가벼운 **3b를 권장 기본**으로 하고 7b는 선택이다(둘 다 응답 p95 45초 이내, 한자·가나 혼용 실패 0). Ollama `/v1/embeddings`는 `keep_alive`를 무시하므로 임베딩 모델을 상주시키려면 서버의 `OLLAMA_KEEP_ALIVE`를 쓴다(코드는 벤더 API에 묶지 않는다). 임베딩 콜드 적재는 2초대였고 5초 상한을 넘으면 폴백이 흡수한다.
+
 "RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
 
 #### ADR-9 이행 결과 (M22-2, 2026-10-02)
