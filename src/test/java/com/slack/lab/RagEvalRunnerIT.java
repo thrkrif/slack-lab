@@ -67,6 +67,10 @@ class RagEvalRunnerIT {
     static int lastExit = -1;
 
     private static String run(Path docs, String... extra) {
+        return run(docs, true, extra);
+    }
+
+    private static String run(Path docs, boolean withDocsDir, String... extra) {
         PrintStream original = System.out;
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
         System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
@@ -77,7 +81,10 @@ class RagEvalRunnerIT {
                     "--postgres.username=" + PG.getUsername(), "--postgres.password=" + PG.getPassword(), "--rag.enabled=true",
                     "--rag.embedding-model=stub", "--rag.embedding-dimension=4",
                     "--rag.embedding-base-url=http://127.0.0.1:" + embeddings.getAddress().getPort() + "/v1",
-                    "--rag.index.docs-dir=" + docs, "--rag.index.exit-after-run=false", "--rag.retrieval.min-score=0.5"));
+                    "--rag.index.exit-after-run=false", "--rag.retrieval.min-score=0.5"));
+            if (withDocsDir) {
+                args.add("--rag.index.docs-dir=" + docs);
+            }
             args.addAll(List.of(extra));
             try (ConfigurableApplicationContext ctx = new SpringApplicationBuilder(SlackLabApplication.class)
                     .run(args.toArray(String[]::new))) {
@@ -186,6 +193,25 @@ class RagEvalRunnerIT {
 
         assertThat(out).contains("| 질문 ID |").contains("| T-1 | mention | DB-1 |").doesNotContain("hit@3");
         assertThat(lastExit).isZero();
+    }
+
+    @Test
+    void 평가_모드는_문서_경로_설정_없이도_뜬다_scripts_rag_eval의_두_번째_단계(@TempDir Path tmp) throws Exception {
+        Path docs = docsWithDb(tmp);
+        Path eval = tmp.resolve("eval");
+        write(eval, "questions.json", finalQuestions("커넥션 문제", "DB-1", 24, 6, TUNING_Q));
+
+        String out = run(docs, false, "--eval", "--eval.dir=" + eval);
+
+        assertThat(out).contains("== tuning (조정용, 판정 아님)").doesNotContain("docs-dir");
+        assertThat(lastExit).isZero();
+    }
+
+    @Test
+    void 색인_모드는_문서_경로가_없으면_이유를_출력한다_종료_코드는_IndexingPipelineTest가_본다(@TempDir Path tmp) throws Exception {
+        String out = run(tmp, false);
+
+        assertThat(out).contains("outcome=SOURCE_FAILED").contains("docs_dir_not_configured");
     }
 
     @Test

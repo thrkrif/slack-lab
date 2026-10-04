@@ -21,9 +21,7 @@ class DocsConfig {
 
     @Bean
     DocumentSource documentSource(RagIndexProperties index) {
-        if (index.docsDir().isBlank()) {
-            throw new IllegalStateException("rag.index.docs-dir(RAG_DOCS_DIR)가 필요하다. 저장소 밖 문서 디렉터리를 가리킨다");
-        }
+        // 경로 검사는 색인을 실제로 돌릴 때 한다(list()가 실패 결과로 알린다). 평가 모드(--eval)는 문서 경로가 필요 없다.
         return new LocalMarkdownDocumentSource(index.docsDir());
     }
 

@@ -2,7 +2,11 @@
 """RAG 외부 왕복 확인(M28). 실제 테스트 채널에 부모 메시지를 올리고, 서명된 합성 app_mention을 수신 서버로 보낸 뒤
 스레드에 달린 봇 답글 본문을 출력한다(예: RAG 켬/끔·검색 단절 비교용). 합성 이벤트라 Slack 이벤트 전달 경로는 검증하지 않는다.
 
-사용: scripts/rag-roundtrip "<질문>" [라벨]   환경: .env의 SLACK_SIGNING_SECRET·SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL, RAG_URL(기본 http://localhost:8080)
+사용: scripts/rag-roundtrip "<질문>" [라벨]                      단건
+      scripts/rag-roundtrip --batch <questions.json> <라벨> [set=final] [kind=mention]   평가 질문을 순차로 보내 요약(JSON 한 줄씩 + 집계)
+환경: .env의 SLACK_SIGNING_SECRET·SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL, RAG_URL(기본 http://localhost:8080)
+배치는 멘션형 질문만 보낼 수 있다(알람형은 /alerts 경로). **질문 수만큼 실제 테스트 채널에 글을 올린다**(확인 단계 없음). 중복·한자/가나 검사는 첫 답글만 본다. 이전 답글이 달린 뒤 다음 질문을 보내므로 큐 적체가 없고, 응답 시간은 수신 직후부터
+답글이 보일 때까지(2초 간격 폴링)다.
 종료 코드: 0 답글 확인, 1 시간 초과(답글 없음)
 """
 import hashlib
@@ -47,13 +51,13 @@ def slack(method, payload=None, query=None):
         return json.load(r)
 
 
-def main():
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
-    question = sys.argv[1]
-    label = sys.argv[2] if len(sys.argv) > 2 else "rag"
-    bot = slack("auth.test")["user_id"]
-    parent = slack("chat.postMessage", {"channel": CHANNEL, "text": f"[M28 RAG 검증] {label}"})
+FOREIGN = __import__("re").compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+FAILURE_NOTICE_PREFIX = "죄송해요, 지금 답변을 만들지 못했어요"
+
+
+def ask(question, label, bot, quiet=False):
+    """질문 하나를 보내고 (답글 텍스트 리스트, 걸린 초, 수신 코드)를 돌려준다. 시간 초과면 답글이 빈 리스트다."""
+    parent = slack("chat.postMessage", {"channel": CHANNEL, "text": f"[RAG 검증] {label}"})
     if not parent.get("ok"):
         sys.exit(f"부모 메시지 실패: {parent.get('error')}")
     ts = parent["ts"]
@@ -69,23 +73,70 @@ def main():
                                           "X-Slack-Signature": sig})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            print(f"수신 응답 {r.status}")
+            code = r.status
     except urllib.error.HTTPError as e:
-        sys.exit(f"수신 거절 {e.code}")
+        code = e.code
+    except urllib.error.URLError:
+        code = -1  # 수신 서버에 연결하지 못함
+    if not quiet:
+        print(f"수신 응답 {code}")
+    if code != 200:
+        return [], 0.0, code  # 수신이 거절됐으면 답글을 기다리지 않는다
     start = time.time()
     while time.time() - start < 120:
         res = slack("conversations.replies", query={"channel": CHANNEL, "ts": ts, "limit": 50})
         msgs = res.get("messages", [])[1:] if res.get("ok") else []
         if msgs:
-            print(f"답글 {len(msgs)}개 / {time.time() - start:.1f}s")
-            for m in msgs:
-                print("-----")
-                print(m.get("text", ""))
-            print("-----")
-            return
+            return [m.get("text", "") for m in msgs], time.time() - start, code
         time.sleep(2)
-    print("시간 초과: 답글 없음")
-    sys.exit(1)
+    return [], time.time() - start, code
+
+
+def batch(path, label, set_name, kind):
+    bot = slack("auth.test")["user_id"]
+    qs = [q for q in json.load(open(path, encoding="utf-8"))["questions"] if q["set"] == set_name and q["kind"] == kind]
+    rows = []
+    for q in qs:
+        replies, secs, code = ask(q["text"], f"{label} {q['id']}", bot, quiet=True)
+        text = replies[0] if replies else ""
+        row = {"id": q["id"], "expected": q["expected"], "seconds": round(secs, 1), "code": code, "replies": len(replies),
+               "failure_notice": text.startswith(FAILURE_NOTICE_PREFIX), "foreign_script": bool(FOREIGN.search(text)),
+               "references": "*참고 문서*" in text, "no_relevant_notice": "관련 문서 근거를 찾지 못해" in text,
+               "search_unavailable_notice": "문서 검색을 완료하지 못해" in text, "answer": text}
+        rows.append(row)
+        print(json.dumps(row, ensure_ascii=False), flush=True)
+    done = sorted(r["seconds"] for r in rows if r["replies"] and not r["failure_notice"])
+    p95 = done[min(len(done) - 1, int(0.95 * len(done) + 0.999999) - 1)] if done else None
+    print(json.dumps({"summary": label, "questions": len(rows), "no_reply": sum(1 for r in rows if not r["replies"]),
+                      "failure_notices": sum(r["failure_notice"] for r in rows), "foreign_script": sum(r["foreign_script"] for r in rows),
+                      "duplicates": sum(1 for r in rows if r["replies"] > 1), "with_references": sum(r["references"] for r in rows),
+                      "no_relevant_notices": sum(r["no_relevant_notice"] for r in rows),
+                      "search_unavailable_notices": sum(r["search_unavailable_notice"] for r in rows),
+                      "normal_answers": len(done), "p50_s": done[len(done) // 2] if done else None, "p95_s": p95,
+                      "max_s": done[-1] if done else None}, ensure_ascii=False))
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    if sys.argv[1] == "--batch":
+        if len(sys.argv) < 4:
+            sys.exit(__doc__)
+        path, label = sys.argv[2], sys.argv[3]
+        batch(path, label, sys.argv[4] if len(sys.argv) > 4 else "final", sys.argv[5] if len(sys.argv) > 5 else "mention")
+        return
+    question = sys.argv[1]
+    label = sys.argv[2] if len(sys.argv) > 2 else "rag"
+    bot = slack("auth.test")["user_id"]
+    replies, secs, _ = ask(question, label, bot)
+    if not replies:
+        print("시간 초과: 답글 없음")
+        sys.exit(1)
+    print(f"답글 {len(replies)}개 / {secs:.1f}s")
+    for m in replies:
+        print("-----")
+        print(m)
+    print("-----")
 
 
 main()

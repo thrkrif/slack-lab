@@ -29,13 +29,18 @@ public class LocalMarkdownDocumentSource implements DocumentSource {
     private static final int MAX_TITLE = 200;
 
     private final Path root;
+    private final boolean configured;
 
     public LocalMarkdownDocumentSource(String docsDir) {
-        this.root = Path.of(docsDir);
+        this.configured = docsDir != null && !docsDir.isBlank();
+        this.root = Path.of(configured ? docsDir : ".");
     }
 
     @Override
     public PortResult<List<SourceDocument>> list() {
+        if (!configured) {
+            return fail("docs_dir_not_configured"); // rag.index.docs-dir(RAG_DOCS_DIR): 저장소 밖 문서 디렉터리
+        }
         if (!Files.isDirectory(root)) {
             return fail("docs_dir_not_found");
         }
