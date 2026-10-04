@@ -152,7 +152,7 @@ class RoleWiringIT {
             assertThat(ctx.getBeanNamesForType(RabbitBroker.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(EventProcessor.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.LlmClient.class)).isEmpty();
-            assertThat(ctx.getBeanNamesForType(com.slack.lab.core.service.RetrievalService.class)).isEmpty();
+            assertThat(ctx.getBeanNamesForType(com.slack.lab.core.service.RetrievalService.class)).as("평가 모드용").hasSize(1);
         }
     }
 
