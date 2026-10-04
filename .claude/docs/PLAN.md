@@ -94,7 +94,7 @@
 - [x] **M25 pgvector 기반** — 완료(`EXPERIMENT-LOG.md` §26): `pgvector/pgvector:pg16`, 테스트 5개 이전, V3, `PostgresVectorStore`(검색 기한·취소 오류 유도 통과, compose 이미지 확인). codex 리뷰 MAJOR 3 반영. **기존 로컬 볼륨은 사용자가 백업 후 초기화해야 한다**
 - [x] **M26 임베딩 어댑터·스위치·기동 검사** — 완료(`EXPERIMENT-LOG.md` §27): `RagProperties`·`RagGuard`·임베딩 클라이언트·`RagStartupCheck`·`AppRole.INDEXER`, 실제 Ollama bootRun으로 정상/차원·모델·외부 호스트 거부 유도, 기동 거부 시 큐 소비 0 확인. codex 리뷰 MAJOR 3 반영
 - [x] **M27 색인 파이프라인** — 완료(`EXPERIMENT-LOG.md` §28): 로컬 마크다운 출처·청커·`IndexingService`·`scripts/rag-index`·advisory lock. 실제 Ollama로 증분·삭제·빈 폴더(exit 5)·임베딩 단절(exit 1)·동시 실행(exit 3)·`kill -9` 무결 확인. codex 리뷰 MAJOR 2 반영
-- [ ] **M28 검색 주입·출처·폴백** (실제 멘션 RAG off/on 왕복 포함)
+- [x] **M28 검색 주입·출처·폴백** — 완료(`EXPERIMENT-LOG.md` §29): `RetrievalService`·`RagPrompt`·`ReplyFooter`·`SlackFooterRenderer`. 실제 Slack·Ollama·pgvector 왕복(합성 이벤트)으로 RAG 켬(근거·참고 문서)·무관 질문(근거 없음 안내)·끔·임베딩 단절 폴백 확인, **채팅 모델이 올라간 상태의 bge-m3 콜드 적재가 23초라 5초 상한을 넘어 폴백된다는 측정**과 임계값 0.5가 느슨하다는 관찰을 M30 입력으로 남김. 리뷰(`code-reviewer`, codex 한도) MAJOR 2 반영
 - [ ] **M29 평가 데이터·하니스**
 - [ ] **M30 통합 실측·판정** (합격선 미달 시 멈춤)
 - [ ] **3단계 완료** — 사용자 요청 시에만 `develop`→`main`·태그
@@ -103,7 +103,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-04)**: 3단계 진행. M24.5a~M27 완료(임베딩 지원, 포트 계약, pgvector 어댑터, RAG 스위치·기동 검사, 색인 파이프라인). **다음은 M28 검색 주입·출처·폴백** — 코어 `RetrievalService`를 `SlackEventHandler` 스레드 문맥 조회 뒤·`llmClient.chat` 앞에서 호출, 검색 예산 `min(5000, llmBudgetMs)`, 데이터 블록 주입, `ReferenceList` 렌더링은 `ChatNotifier` 어댑터(포트 시그니처 변경), 실패 시 폴백 안내(RetryRequested 아님), 실제 멘션 RAG off/on 왕복과 단절 폴백 확인(Slack 화면 조작이 필요하면 멈춤). 색인 CLI: `scripts/rag-index`(RAG_ENABLED·RAG_EMBEDDING_MODEL·RAG_EMBEDDING_DIMENSION·RAG_DOCS_DIR). 로컬 DB는 새 이미지에서 기존 `postgres-data` 볼륨을 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(사용자 조치). ultragoal 계획 id `stage3-rag`. Ollama는 내렸다.
+- **상태(2026-10-04)**: 3단계 진행. M24.5a~M28 완료(색인·검색·주입·출처·폴백이 실제 환경에서 동작). **다음은 M29 평가 데이터·하니스**(가상 문서 20·최종 질문 30(정답 있음 24+없음 6)·튜닝 세트 별도, hit@3·무근거 비율 하니스, 답변 쌍 기록 형식), 이어서 **M30 통합 실측·판정**. M30 입력: ① 채팅 모델 상주 시 임베딩 모델 콜드 23초(5초 상한 초과 → 상주 정책/keep_alive/`OLLAMA_MAX_LOADED_MODELS`) ② `min-score` 0.5가 느슨(무관 문서 주입) ③ 스레드+RAG 문맥이 4K를 넘는지 ④ 3B vs 7B. 색인 CLI: `scripts/rag-index`, 확인: `scripts/rag-roundtrip`. 로컬 DB는 새 이미지에서 기존 `postgres-data` 볼륨을 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(사용자 조치). 검증 후 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`. codex는 사용 한도(오후 8시 복구)라 M28 리뷰는 code-reviewer로 대체했다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).

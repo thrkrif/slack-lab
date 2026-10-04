@@ -126,6 +126,7 @@ class RoleWiringIT {
         try (ConfigurableApplicationContext ctx = start("worker")) {
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.VectorStore.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.EmbeddingClient.class)).isEmpty();
+            assertThat(ctx.getBeanNamesForType(com.slack.lab.core.service.RetrievalService.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(EventProcessor.class)).hasSize(1);
         }
     }
@@ -135,6 +136,7 @@ class RoleWiringIT {
         try (ConfigurableApplicationContext ctx = start("worker", RAG_ON)) {
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.VectorStore.class)).hasSize(1);
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.EmbeddingClient.class)).hasSize(1);
+            assertThat(ctx.getBeanNamesForType(com.slack.lab.core.service.RetrievalService.class)).hasSize(1);
             assertThat(ctx.getBeanNamesForType(EventProcessor.class)).hasSize(1);
         }
     }
@@ -150,6 +152,7 @@ class RoleWiringIT {
             assertThat(ctx.getBeanNamesForType(RabbitBroker.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(EventProcessor.class)).isEmpty();
             assertThat(ctx.getBeanNamesForType(com.slack.lab.core.port.LlmClient.class)).isEmpty();
+            assertThat(ctx.getBeanNamesForType(com.slack.lab.core.service.RetrievalService.class)).isEmpty();
         }
     }
 

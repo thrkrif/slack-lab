@@ -47,6 +47,17 @@ class SlackThreadContextTest {
     }
 
     @Test
+    void 봇_답글의_참고_문서와_검색_안내는_문맥에서_뺀다() {
+        var out = context(10, 4_000).assemble(List.of(human("100.0", "질문1"),
+                bot("101.0", "답1\n\n*참고 문서*\n• [DB-003] 커넥션 풀"),
+                human("102.0", "질문2"), bot("103.0", "답2\n\n" + com.slack.lab.core.model.ReplyFooter.SEARCH_UNAVAILABLE_TEXT),
+                human("104.0", "질문3"), bot("105.0", "답3\n\n" + com.slack.lab.core.model.ReplyFooter.NO_RELEVANT_TEXT)),
+                current(), null);
+
+        assertThat(out).extracting(LlmMessage::content).containsExactly("질문1", "답1", "질문2", "답2", "질문3", "답3");
+    }
+
+    @Test
     void 사람_메시지의_봇_멘션은_지우고_빈_메시지는_버린다() {
         var out = context(10, 4_000).assemble(List.of(human("100.0", "<@UBOT> 안녕"), human("101.0", "   "),
                 human("102.0", "<@UBOT>")), current(), null);

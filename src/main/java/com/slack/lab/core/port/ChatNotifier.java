@@ -1,6 +1,7 @@
 package com.slack.lab.core.port;
 
 import com.slack.lab.core.model.ReactionResult;
+import com.slack.lab.core.model.ReplyFooter;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.core.model.SlackSendResult;
 
@@ -11,7 +12,16 @@ public interface ChatNotifier {
      * @param remainingMs 이 호출 시작 시점부터 허용되는 남은 시간. 예산이 없으면 발신을 시작하지 않는다.
      * @param metadata 결과 불명 뒤 "이 시도가 보낸 답글"을 찾는 단서. null이면 붙이지 않는다.
      */
-    SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
+    default SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
+            ReplyMetadata metadata) {
+        return postMessage(channel, threadTs, text, ReplyFooter.NONE, remainingMs, metadata);
+    }
+
+    /**
+     * 답변 본문 뒤에 서버가 정한 덧붙임(참고 문서 목록, 안내 문구)을 붙여 보낸다. 의미는 {@link ReplyFooter}가 정하고 문구·서식·
+     * 특수문자 이스케이프는 구현체가 맡는다 — 문서 제목이 멘션·링크로 해석되면 안 된다.
+     */
+    SlackSendResult postMessage(String channel, String threadTs, String text, ReplyFooter footer, long remainingMs,
             ReplyMetadata metadata);
 
     /** 보조 기능이라 재시도·결과 불명 분류를 따로 두지 않는다. 이미 붙어 있는 것은 성공으로 본다. */

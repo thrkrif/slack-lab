@@ -4,6 +4,7 @@ import com.slack.lab.core.port.ChatNotifier;
 import com.slack.lab.core.model.ErrorCode;
 import com.slack.lab.core.model.ErrorInfo;
 import com.slack.lab.core.model.ReactionResult;
+import com.slack.lab.core.model.ReplyFooter;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.config.SlackProperties;
 import com.slack.lab.core.model.SlackSendResult;
@@ -84,8 +85,9 @@ public class SlackClient implements ChatNotifier {
      *                 보낸 답글"을 찾는 유일한 단서다. null이면 붙이지 않는다.
      */
     @Override
-    public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
-            ReplyMetadata metadata) {
+    public SlackSendResult postMessage(String channel, String threadTs, String text, ReplyFooter footer,
+            long remainingMs, ReplyMetadata metadata) {
+        text = SlackFooterRenderer.render(text, footer);
         if (remainingMs <= 0) {
             log.warn("Slack 발신 예산 없음 — 발신 시작 안 함");
             return new SlackSendResult.Failed(ErrorInfo.of(ErrorCode.SLACK_NO_BUDGET));
