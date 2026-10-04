@@ -1003,3 +1003,12 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 
 ### 26.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 3·MINOR 2)
 ① MAJOR 읽기 중 `commitRebuild`가 이전 세대를 지우면 조회가 어긋남 → 메타·해시·검색을 `REPEATABLE READ` 스냅샷으로 ② MAJOR 취소(`Statement.cancel`)가 호출자를 붙잡음(기본 취소 통신 10초) → 취소를 별도 풀에서 비동기로, 호출자는 기한에 반환 ③ MAJOR 실행 전 취소 무시·무제한 스레드 → 포기 플래그로 새 문장 시작 차단, 검색 풀 동시 4개 상한과 포화 시 즉시 실패, `statement_timeout`은 서버 쪽 안전망 ④ MINOR 테스트에서 store 미종료 → `@AfterEach close()`, 포화 테스트 추가 ⑤ MINOR 읽기 도중 커밋·연결 풀 고갈·취소 통신 지연 테스트는 미작성(알려진 공백).
+
+## 27. 3단계 M26 임베딩 어댑터·RAG 스위치·기동 검사 (2026-10-04)
+
+변경: `RagProperties`(`rag.*`, 기본 꺼짐), `RagGuard`(호스트 허용·모델/차원 필수·외부 허용 플래그 독립), `OpenAiCompatibleEmbeddingClient`(OpenAI 호환 `/embeddings`), `RagStartupCheck`(임베딩 프로브 + 색인 메타 비교), `AppRole.INDEXER`, `PostgresVectorStore`·임베딩 빈 배선(`rag.enabled`일 때만), 큐 소비자가 기동 검사를 먼저 만들도록 의존. `ArchitectureTest` 허용 설정 목록에 `RagProperties` 추가.
+
+검증: ① 단위: `RagGuardTest`(URL 파싱 우회 `localhost.evil.com`·`http://localhost@evil.com`·`127.0.0.1.evil.com`·정수 IP·비 http 거부, 접미사·CIDR 허용, 임베딩/LLM 독립 플래그, Echo LLM·색인 역할 LLM 검사 제외, RAG 꺼짐+잘못된 설정도 기동, 실제 바인딩 컨텍스트에서 위반 시 실패·허용 시 기동), `RagStartupCheckTest`(색인 메타 일치/없음/불일치/읽기 실패, 프로브의 영구 실패 거부·일시 실패 경고), `OpenAiCompatibleEmbeddingClientTest`(정상, 차원 불일치, 404 재시도 불가·503 재시도 가능, 깨진 응답, 기한 초과 400ms→1.5s 안 반환, 연결 거부, 예산 0, 리다이렉트 비추종) ② 통합 `RoleWiringIT`(실제 RabbitMQ·pgvector Postgres): RAG 꺼짐=빈 없음, 켜짐=워커/색인 역할 배선, 색인 역할은 웹 컨텍스트·소비자·LLM 없음, 외부 LLM 미허용 거부, **색인이 다른 모델이면 워커 기동 거부 + 이벤트 큐 소비자 0명** + 같은 상태에서 색인 역할은 기동 ③ **실제 환경(오류 유도)**: 별도 compose 프로젝트의 새 볼륨 Postgres와 실제 Ollama bge-m3로 `bootRun`(indexer 역할) — 정상(`임베딩 모델 확인됨 model=bge-m3 dimension=1024 elapsed_ms=2197`, 콜드), 차원 768 → `embedding_dimension_mismatch:got=1024 expected=768`로 기동 거부, 없는 모델 → `embedding_http_error:404` 거부, 허용 목록 밖 호스트 → `RAG 설정 위반: ... rag.allow-external-embedding=true` 거부, `--rag.allow-external-embedding=true` → 경고 로그 한 줄(호스트만) 후 기동·프로브 성공(144ms, 웜), RAG 꺼짐+외부 URL → 영향 없이 기동. 측정 뒤 `ollama stop`, 임시 Postgres `down -v`.
+
+### 27.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 3·MINOR 3)
+① MAJOR `@NotBlank/@Positive`가 RAG 꺼짐에도 적용 → 어노테이션 제거, `RagGuard`가 켰을 때만 검사(꺼짐+잘못된 설정 기동 테스트) ② MAJOR 검사가 `ApplicationRunner`라 큐 소비자(빈 초기화 중 시작)가 먼저 돌 수 있음 → `RagStartupCheck`를 빈 생성 시점 게이트로 바꾸고 `RabbitConfig.rabbitConsumer`가 먼저 만들게 함, 소비자 0명 검증 ③ MAJOR 파싱 뒤 기한 미확인 → 파싱 후 전체 기한 재확인, 늦은 성공 폐기 ④ MINOR 색인 역할에 LLM 검사 적용 → 제외 ⑤ MINOR `close()`가 HTTP 클라이언트를 안 닫음 → `shutdownNow()` ⑥ MINOR 영구 오류 정책 불명확 → 비재시도 실패는 모두 거부로 통일, 프로브 분기 테스트 추가. 알려진 공백: 늦은 성공 폐기(③)와 `close()` 중 진행 요청 정리(⑤)의 전용 테스트는 없다. 

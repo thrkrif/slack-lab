@@ -92,7 +92,7 @@
 - [x] **M24.5a 스파이크** — 완료(`docs/spikes/rag-embedding-spike.md`, `EXPERIMENT-LOG.md` §24): `/v1/embeddings` 지원, bge-m3 1024차원·정규화, 콜드 1.2~2.2s·웜 0.05s, 673MB
 - [x] **M24.5b 계약 확정** — 완료(`EXPERIMENT-LOG.md` §25): `VectorStore`(전체 재색인 대기 세대 포함)·`EmbeddingClient`·`DocumentSource`·`IndexLock`, 결과 타입 `EmbeddingResult`·`SearchResult`·`PortResult`, `ReferenceList`. codex 리뷰 MAJOR 2 반영
 - [x] **M25 pgvector 기반** — 완료(`EXPERIMENT-LOG.md` §26): `pgvector/pgvector:pg16`, 테스트 5개 이전, V3, `PostgresVectorStore`(검색 기한·취소 오류 유도 통과, compose 이미지 확인). codex 리뷰 MAJOR 3 반영. **기존 로컬 볼륨은 사용자가 백업 후 초기화해야 한다**
-- [ ] **M26 임베딩 어댑터·스위치·기동 검사**
+- [x] **M26 임베딩 어댑터·스위치·기동 검사** — 완료(`EXPERIMENT-LOG.md` §27): `RagProperties`·`RagGuard`·임베딩 클라이언트·`RagStartupCheck`·`AppRole.INDEXER`, 실제 Ollama bootRun으로 정상/차원·모델·외부 호스트 거부 유도, 기동 거부 시 큐 소비 0 확인. codex 리뷰 MAJOR 3 반영
 - [ ] **M27 색인 파이프라인**
 - [ ] **M28 검색 주입·출처·폴백** (실제 멘션 RAG off/on 왕복 포함)
 - [ ] **M29 평가 데이터·하니스**
@@ -103,7 +103,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-04)**: 3단계 진행. M24.5a·M24.5b·M25 완료(임베딩 지원, 포트 계약, pgvector 어댑터). **다음은 M26 임베딩 어댑터·`RagProperties`·기동 검사·`AppRole.INDEXER`.** 로컬 DB는 새 이미지에서 기존 `postgres-data` 볼륨을 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(사용자 조치). ultragoal 계획 id `stage3-rag`. Ollama는 내렸다.
+- **상태(2026-10-04)**: 3단계 진행. M24.5a·M24.5b·M25·M26 완료(임베딩 지원, 포트 계약, pgvector 어댑터, RAG 스위치·기동 검사). **다음은 M27 색인 파이프라인**(로컬 마크다운 `DocumentSource`·청커·`IndexingService`·`scripts/rag-index`, `AppRole.INDEXER`로 실행, 증분·부분 성공·advisory lock `IndexLock` 어댑터). 로컬 DB는 새 이미지에서 기존 `postgres-data` 볼륨을 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(사용자 조치). ultragoal 계획 id `stage3-rag`. Ollama는 내렸다(`bge-m3` pull됨).
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).

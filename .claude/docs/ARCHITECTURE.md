@@ -131,6 +131,7 @@ com.slack.lab
 │                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
 │  ├─ alert/                  AlertController(/alerts/{source}, 시크릿 인증), CloudWatchAlertNormalizer(SNS), AlertConfig (M23)
+│  ├─ embedding/              OpenAiCompatibleEmbeddingClient(EmbeddingClient), EmbeddingConfig (M26)
 │  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22), PostgresVectorStore (M25, 운영 배선은 M26 이후)
 │  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
@@ -499,7 +500,9 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 
 RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 결과 타입(`EmbeddingResult`·`SearchResult`: Success/TimedOut/Failed)이고, 그 밖의 저장·출처 호출은 `PortResult<T>`다. 검색은 연결 대기와 쿼리 실행을 합친 기한을 받아 넘으면 쿼리를 취소한다. `DocumentHit.score`는 코사인 유사도(클수록 가까움)로 저장소 구현의 거리 척도를 가린다. `DocumentHit`·`SourceDocument.id`에는 파일 경로를 담지 않는다(불투명 공개 ID). `ReferenceList`는 의미 모델이고 Slack 렌더링·이스케이프는 채팅 어댑터 몫이다. 모델·차원 변경 시 전체 재색인은 대기 세대 → 커밋(`beginRebuild`/`commitRebuild`/`abortRebuild`)으로 기존 색인을 지킨다.
 
-**pgvector 어댑터(M25)**: V3 마이그레이션(`rag_generation`·`rag_index_state`·`rag_document`·`rag_chunk`, 차원 없는 `vector`·무인덱스 전수 검색). 문서 교체는 한 트랜잭션이고, 쓰기는 상태 행 `FOR SHARE`·세대 전환은 `FOR UPDATE`로 직렬화하며, 읽기(메타·해시·검색)는 `REPEATABLE READ` 스냅샷이라 전환 중에도 어긋나지 않는다. 검색은 별도 스레드(동시 4개 상한, 초과 시 대기 없이 실패)에서 돌고 기한이 지나면 호출자가 즉시 `TimedOut`으로 반환하며 취소는 비동기로 보낸다(`statement_timeout`이 서버 쪽 안전망). 운영 빈은 아직 없다(M26에서 RAG 스위치와 함께 배선).
+**pgvector 어댑터(M25)**: V3 마이그레이션(`rag_generation`·`rag_index_state`·`rag_document`·`rag_chunk`, 차원 없는 `vector`·무인덱스 전수 검색). 문서 교체는 한 트랜잭션이고, 쓰기는 상태 행 `FOR SHARE`·세대 전환은 `FOR UPDATE`로 직렬화하며, 읽기(메타·해시·검색)는 `REPEATABLE READ` 스냅샷이라 전환 중에도 어긋나지 않는다. 검색은 별도 스레드(동시 4개 상한, 초과 시 대기 없이 실패)에서 돌고 기한이 지나면 호출자가 즉시 `TimedOut`으로 반환하며 취소는 비동기로 보낸다(`statement_timeout`이 서버 쪽 안전망). 운영 빈은 M26에서 RAG 스위치와 함께 배선했다.
+
+**RAG 스위치·기동 검사(M26)**: `rag.enabled`(기본 false)가 꺼져 있으면 임베딩·벡터 저장소 빈이 없고 어떤 검사도 하지 않는다(값 검증도 켰을 때만 — 꺼 둔 설정이 틀려도 기동한다). 켜면 `RagGuard`가 모델 ID·차원 필수, 호스트 허용 검사(`rag.allowed-hosts` 정확/접미사/IPv4 CIDR, URL을 파싱해 비교하고 리다이렉트는 따라가지 않음), 임베딩과 LLM 각각의 외부 허용 플래그(`rag.allow-external-embedding`·`rag.allow-external-llm`)를 보고 어긋나면 기동을 거부한다(색인 CLI는 LLM을 안 쓰므로 LLM 검사 제외). 허용했을 때는 호스트 이름만 경고 로그에 남기고 문서 내용은 남기지 않는다. `RagStartupCheck`가 빈 생성 시점에 ① 임베딩 프로브(영구 실패 — 모델 없음·차원 불일치·응답 오류 — 는 거부, 연결 실패·5xx·기한 초과는 경고 후 폴백에 맡김) ② (워커) 색인 메타와 설정의 모델·차원 비교(불일치 거부)를 하고, 큐 소비자는 이 빈을 먼저 만든 뒤 시작해 거부할 기동이 메시지를 처리하는 일이 없다. `AppRole.INDEXER`는 웹 포트·큐 소비자 없이 DB·임베딩·벡터 저장소만 갖고 ②를 하지 않는다(전체 재색인이 이 불일치를 푸는 경로). `OpenAiCompatibleEmbeddingClient`는 LLM 클라이언트와 같은 취소 패턴이고 파싱 뒤에도 기한을 다시 본다.
 
 "RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
 
