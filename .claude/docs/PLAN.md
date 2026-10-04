@@ -2,7 +2,7 @@
 
 **1단계(P0): 완료** — `main` 병합(#17), 태그 `v0.1.0`
 **2단계(P1): 완료(`v0.2.0`) — 이후 ADR-9 기반 전환 M19~M24는 `develop`에서 완료**
-**3단계(RAG): 구현·검증 완료(M24.5a~M30, 2026-10-04) · `develop`→`main` 병합·태그(`v0.3.0` 예정)는 사용자 요청 시** — 아래 `# 3단계(RAG) 계획` 참조
+**3단계(RAG): 구현·검증 완료(M24.5a~M30, 2026-10-04) — 합격선 충족, 단 알람형 Slack 왕복과 컨테이너 전체 스택 왕복은 범위 밖(EXPERIMENT-LOG §31 한계) · `develop`→`main` 병합·태그(`v0.3.0` 예정)는 사용자 요청 시** — 아래 `# 3단계(RAG) 계획` 참조
 2단계 계획 승인 이력: ralplan consensus 5회전(Architect 최종 APPROVE, Critic(codex) 최종 ITERATE → 마지막 지적 1건은 Planner가 반영, 재검토 없음). 사본: `.omc/plans/stage2-p1-plan.md`
 정본: 이 파일. 1단계 상세 계획은 아래 **부록**에 보존한다(1단계 사본 `.omc/plans/stage1-p0-plan.md`).
 근거: [`PRD.md`](PRD.md) §4·§5·§7, [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENTS.md`](../../AGENTS.md)
@@ -103,7 +103,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-04)**: 3단계 마일스톤 M24.5a~M30 모두 완료·합격. **남은 것은 사용자 요청이 필요한 단계 마무리**: `develop`→`main` merge commit + 태그(`v0.3.0` 제안). 권장 구성: 임베딩 `bge-m3`(RAG_EMBEDDING_DIMENSION=1024) + LLM `qwen2.5:3b`(7b는 선택), 임계값 0.54·문맥 상한 1500(기본값). 색인 `scripts/rag-index`, 평가 `POSTGRES_URL=… scripts/rag-eval --confirm-eval-db [--eval.set=final|all]`, 확인 `scripts/rag-roundtrip`. 후속 후보: ① 프롬프트에서 `<reference>`·문서 ID를 답변에 쓰지 않게 하기(재측정 필요) ② 알람형 Slack 왕복(`/alerts`)과 스레드 안 질문 + RAG 문맥의 4K 검증 ③ 임베딩 상주(`OLLAMA_KEEP_ALIVE`) 운영 가이드 ④ M28·M29 리뷰를 codex(오후 8시 복구)로 재검토. 사용자 조치: 기존 로컬 `postgres-data` 볼륨은 새 pgvector 이미지에서 백업(`pg_dump`) 후 `docker compose down -v`로 초기화. 검증이 끝나 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`.
+- **상태(2026-10-04)**: 3단계 마일스톤 M24.5a~M30 모두 완료·합격. **남은 것은 사용자 요청이 필요한 단계 마무리**: `develop`→`main` merge commit + 태그(`v0.3.0` 제안). 권장 구성: 임베딩 `bge-m3`(RAG_EMBEDDING_DIMENSION=1024) + LLM `qwen2.5:3b`(7b는 선택), 임계값 0.54·문맥 상한 1500(기본값). 색인 `scripts/rag-index`, 평가 `POSTGRES_URL=… scripts/rag-eval --confirm-eval-db [--eval.set=final|all]`, 확인 `scripts/rag-roundtrip`. 후속 후보: ⓪ 컨테이너 전체 스택(`--profile app`)에서 RAG 켠 1회 왕복(최종 리뷰에서 임베딩 주소 누락을 고쳤지만 컨테이너 안 왕복은 아직 안 했다) ① 프롬프트에서 `<reference>`·문서 ID를 답변에 쓰지 않게 하기(재측정 필요) ② 알람형 Slack 왕복(`/alerts`)과 스레드 안 질문 + RAG 문맥의 4K 검증 ③ 임베딩 상주(`OLLAMA_KEEP_ALIVE`) 운영 가이드 ④ M28·M29 리뷰를 codex(오후 8시 복구)로 재검토. 사용자 조치: 기존 로컬 `postgres-data` 볼륨은 새 pgvector 이미지에서 백업(`pg_dump`) 후 `docker compose down -v`로 초기화. 검증이 끝나 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
@@ -132,7 +132,7 @@ ADR: Decision — A, pgvector 이미지를 RAG off에서도 사용. Drivers — 
 - **M27 색인 파이프라인**: 로컬 마크다운 어댑터, 청커, 코어 `IndexingService`(증분 키, 삭제 임계 비율 초기값 50% 초과 시 중단, 부분 성공·종료 코드, advisory lock), `scripts/rag-index`, 전체 재색인 옵션. 완료: 추가·수정·삭제 반영, 임베딩 단절 시 실패 목록+비0 종료 코드, 색인 중 kill 후 검색 무결, 동시 실행 차단.
 - **M28 검색 주입·출처·폴백**: 코어 `RetrievalService`를 핸들러 L93~L95 사이 호출. 검색 예산 `min(5000, llmBudgetMs(t0))`, 시간 제한은 어댑터 `RestClient` 타임아웃 + 마감 비교 이중 강제, 마감 뒤 도착 결과 폐기 테스트. 데이터 블록 주입. 코어는 `ReferenceList`만 생성, 렌더링·이스케이프는 `ChatNotifier` 어댑터(포트 시그니처 변경). **재시도 규칙(확정)**: 검색 실패는 재시도 사유가 아니며 RetryRequested로 가지 않는다. LLM 재시도 시도에서는 검색을 **재실행**한다(검색 결과를 상태 저장소에 저장하지 않아 스키마 변경을 피함; 시도마다 마감이 독립이라 예산 이중 소모 아님). 관련 문서 없음 안내, 임계값은 초기값(M30에서 튜닝 세트로만 조정). 
   완료: 단위(참고 문서 규칙 — 중복 제거·제목 멘션 이스케이프·경로/원문 미노출·0건 생략·폴백 시 목록 생략, 시간 초과·실패 주입, RAG off 회귀 0, 알람·멘션 두 경로가 같은 주입 지점을 탐) **+ 외부 왕복**: 호스트 bootRun에서 실제 멘션 1건을 RAG off/on 각각, 임베딩 단절 유도 후 폴백 안내 문구 실제 부착 확인, 확인 뒤 즉시 내림(M16 선례).
-- **M29 평가 데이터·하니스**: 가상 문서 20·질문 30(알람형 15+멘션형 15, 정답 없음 6, 튜닝/최종 분리) 커밋, 하니스(CLI/gradle 태스크로 실제 임베딩에도 실행 가능)가 hit@3·무근거 비율·출처 형식 검사 계산, 답변 쌍(RAG on/off) 기록 형식(P2-4)과 "근거 활용·부족 안내" 점검 시트. 완료: 가짜 임베딩으로 경계(20/24, 19/24, 5/6) 검증.
+- **M29 평가 데이터·하니스**: 가상 문서 20·질문 30(알람형 15+멘션형 15, 정답 없음 6, 튜닝/최종 분리) 커밋, 하니스(CLI/gradle 태스크로 실제 임베딩에도 실행 가능)가 hit@3·무근거 비율 계산(출처 형식 검사는 M29 점검 뒤 삭제 — 형식은 `SlackFooterRendererTest`가 고정), 답변 쌍(RAG on/off) 기록 형식(P2-4)과 "근거 활용·부족 안내" 점검 시트. 완료: 가짜 임베딩으로 경계(20/24, 19/24, 5/6) 검증.
 - **M30 통합 실측·판정** (1회): bge-m3 vs nomic, qwen2.5 3b vs 7b(컨테이너 메모리 상한 적용), 검색 5초(모델 내려감/적재), 동시 적재(`OLLAMA_MAX_LOADED_MODELS`)와 채팅 모델 축출 영향, Slack 외부 왕복(알람형·멘션형 각 on/off), 오류 유도 재확인, 답변 쌍 기록·근거 활용 점검.
   **판정 규칙**: 합격선 = hit@3 ≥ 20/24, 정답 없음 ≥ 5/6, 정상 답변 p95 ≤ 45초, 한자·가나 혼용으로 최종 실패 안내가 된 최종 질문 0건(초기값, 착수 시 사용자 확인). 기본 모델 = 합격선 통과 모델 중 더 가벼운 쪽. **미달 시(hit@3 미달·두 모델 모두 p95 초과·축출로 LLM이 50초 초과)**: 원인 단계(검색/주입/LLM 콜드)를 특정하고 개선안 또는 목표 변경안을 올린 뒤 **멈춤 → 사용자 결정**(M9 선례). 수행 완료와 합격을 구분해 기록, 합격 항목만 PRD 체크. ARCHITECTURE·EXPERIMENT-LOG·PLAN 갱신.
 

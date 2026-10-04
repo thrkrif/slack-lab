@@ -49,6 +49,8 @@ public class PostgresVectorStore implements VectorStore, AutoCloseable {
     private static final int MAX_CONCURRENT_SEARCHES = 4;
 
     private final DataSource ds;
+    /** 검색이 기대하는 색인(모델·차원). 있으면 live 세대와 다를 때 검색을 거부한다 — null이면 차원만 본다. */
+    private final IndexMeta expected;
     private final ExecutorService searchPool = daemonPool("pg-vector-search", MAX_CONCURRENT_SEARCHES);
     // 취소는 네트워크 왕복이라 느릴 수 있다(pgjdbc 기본 취소 통신 제한 10초). 호출자가 기한에 반환하도록 따로 돌린다.
     private final ExecutorService cancelPool = daemonPool("pg-vector-cancel", MAX_CONCURRENT_SEARCHES);
@@ -63,7 +65,16 @@ public class PostgresVectorStore implements VectorStore, AutoCloseable {
     }
 
     public PostgresVectorStore(DataSource ds) {
+        this(ds, null);
+    }
+
+    /**
+     * @param expected 이 프로세스가 질의에 쓰는 임베딩 모델·차원. 기동 때 한 번 맞춰 본 뒤에 다른 모델로 재색인이 게시되면(같은
+     *     차원이어도) 검색이 비교할 수 없는 벡터를 조용히 쓰게 되므로, 검색마다 live 세대의 모델 ID를 확인한다
+     */
+    public PostgresVectorStore(DataSource ds, IndexMeta expected) {
         this.ds = ds;
+        this.expected = expected;
     }
 
     @Override
@@ -262,6 +273,11 @@ public class PostgresVectorStore implements VectorStore, AutoCloseable {
                 return new SearchResult.Success(List.of(), elapsedMs(t0));
             }
             Generation g = generation(c, s.live);
+            if (expected != null && !g.meta().equals(expected)) {
+                return new SearchResult.Failed(ErrorInfo.of(ErrorCode.INDEX_META_MISMATCH,
+                        g.modelId() + "/" + g.dimension() + " != " + expected.modelId() + "/" + expected.dimension()),
+                        elapsedMs(t0));
+            }
             if (abandon.abandoned.get()) {
                 return new SearchResult.TimedOut(elapsedMs(t0));
             }

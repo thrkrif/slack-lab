@@ -22,9 +22,10 @@ if [ -z "${POSTGRES_URL:-}" ]; then
 fi
 echo "평가용 DB로 사용: ${POSTGRES_URL} (색인이 가상 문서로 교체된다)" >&2
 # 문서 경로는 환경변수가 아니라 인자로 넘긴다 — scripts/rag-index가 .env를 다시 읽어 환경변수를 덮어쓰기 때문이다.
-scripts/rag-index --confirm-delete "--rag.index.docs-dir=$PWD/docs/rag-eval/documents"
+# DB 주소도 인자로 넘긴다 — scripts/rag-index가 .env를 다시 읽어 POSTGRES_URL을 덮어쓸 수 있어서(보호 장치가 우회된다).
+scripts/rag-index --confirm-delete "--rag.index.docs-dir=$PWD/docs/rag-eval/documents" "--postgres.url=$POSTGRES_URL"
 ./gradlew -q bootJar -x test
 JAR=$(ls build/libs/*.jar | grep -v -- '-plain' | head -1)
 set -a; source .env; set +a
 APP_ROLE=indexer exec java -jar "$JAR" --spring.main.banner-mode=off --logging.level.root=WARN \
-  --eval "${args[@]+"${args[@]}"}"
+  --eval "--postgres.url=$POSTGRES_URL" "${args[@]+"${args[@]}"}"

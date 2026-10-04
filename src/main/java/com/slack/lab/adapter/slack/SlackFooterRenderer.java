@@ -44,8 +44,8 @@ final class SlackFooterRenderer {
     /** Slack이 해석하는 {@code & < >}를 엔티티로, 서식 문자와 제어 문자·줄바꿈은 제거해 한 줄의 평문으로 만든다. */
     static String clean(String s, int max) {
         String flat = s.replaceAll("[\\p{Cntrl}\\u2028\\u2029]+", " ").replaceAll("[*_~`]", "").strip();
-        if (flat.length() > max) {
-            flat = flat.substring(0, max) + "…";
+        if (flat.codePointCount(0, flat.length()) > max) { // 서로게이트 쌍을 깨지 않게 코드 포인트 기준으로 자른다
+            flat = flat.substring(0, flat.offsetByCodePoints(0, max)) + "…";
         }
         return flat.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }

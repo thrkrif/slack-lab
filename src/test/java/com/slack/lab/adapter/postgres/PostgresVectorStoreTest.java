@@ -263,6 +263,22 @@ class PostgresVectorStoreTest {
     }
 
     @Test
+    void 기대한_모델이_다르면_차원이_같아도_검색을_거부한다_재색인이_게시된_뒤_재시작_전의_워커() {
+        ok(store.initMeta(META3));
+        ok(store.replaceDocument("A", "t", "h", List.of(chunk(0, "x", 1, 0, 0))));
+        try (var strict = new PostgresVectorStore(ds, new IndexMeta("test-model", 3));
+                var other = new PostgresVectorStore(ds, new IndexMeta("other-model", 3))) {
+            assertThat(strict.search(new float[] {1, 0, 0}, 3, 2_000)).isInstanceOf(SearchResult.Success.class);
+
+            var r = other.search(new float[] {1, 0, 0}, 3, 2_000);
+
+            assertThat(r).isInstanceOf(SearchResult.Failed.class);
+            assertThat(((SearchResult.Failed) r).error().code()).isEqualTo(ErrorCode.INDEX_META_MISMATCH);
+            assertThat(((SearchResult.Failed) r).error().detail()).contains("test-model").contains("other-model");
+        }
+    }
+
+    @Test
     void 기한이_이미_없으면_쿼리를_시작하지_않고_타임아웃이다() {
         ok(store.initMeta(META3));
         assertThat(store.search(new float[] {1, 0, 0}, 3, 0)).isInstanceOf(SearchResult.TimedOut.class);
