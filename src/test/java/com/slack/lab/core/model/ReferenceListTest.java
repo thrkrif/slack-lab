@@ -21,7 +21,7 @@ class ReferenceListTest {
     @Test
     void 주입이_없으면_비어_있어_출처_줄을_생략할_수_있다() {
         assertThat(ReferenceList.fromInjected(List.of()).isEmpty()).isTrue();
-        assertThat(ReferenceList.empty().isEmpty()).isTrue();
+        assertThat(new ReferenceList(List.of()).isEmpty()).isTrue();
     }
 
     @Test

@@ -16,10 +16,6 @@ public record ReferenceList(List<Reference> references) {
         references = List.copyOf(references);
     }
 
-    public static ReferenceList empty() {
-        return new ReferenceList(List.of());
-    }
-
     /** 주입한 순서(유사도 순)를 유지하며 문서 ID 기준으로 중복을 제거한다. */
     public static ReferenceList fromInjected(List<DocumentHit> injected) {
         var byId = new LinkedHashMap<String, Reference>();

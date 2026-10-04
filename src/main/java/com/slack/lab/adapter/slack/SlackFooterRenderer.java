@@ -10,8 +10,6 @@ import com.slack.lab.core.model.ReplyFooter;
  */
 final class SlackFooterRenderer {
 
-    static final String NO_RELEVANT = ReplyFooter.NO_RELEVANT_TEXT;
-    static final String SEARCH_UNAVAILABLE = ReplyFooter.SEARCH_UNAVAILABLE_TEXT;
     private static final int MAX_TITLE = 120;
 
     private SlackFooterRenderer() {}
@@ -29,8 +27,8 @@ final class SlackFooterRenderer {
         text = sanitizeBody(text);
         return switch (footer) {
             case ReplyFooter.None none -> text;
-            case ReplyFooter.NoRelevantDocuments n -> text + "\n\n" + NO_RELEVANT;
-            case ReplyFooter.SearchUnavailable u -> text + "\n\n" + SEARCH_UNAVAILABLE;
+            case ReplyFooter.NoRelevantDocuments n -> text + "\n\n" + ReplyFooter.NO_RELEVANT_TEXT;
+            case ReplyFooter.SearchUnavailable u -> text + "\n\n" + ReplyFooter.SEARCH_UNAVAILABLE_TEXT;
             case ReplyFooter.References r -> r.references().isEmpty() ? text : text + "\n\n" + references(r.references());
         };
     }

@@ -1,8 +1,10 @@
 package com.slack.lab.core.model;
 
 /**
- * 답변 본문 뒤에 서버가 붙이는 덧붙임의 <b>의미</b>. 모델이 쓰는 값이 아니라 서버가 정하므로 형식 검사가 안정적이다. 문구와
- * 서식, 채팅 서비스별 특수문자 이스케이프는 {@code ChatNotifier} 구현체의 몫이다(코어는 Slack 서식을 모른다).
+ * 답변 본문 뒤에 서버가 붙이는 덧붙임의 <b>의미</b>. 모델이 쓰는 값이 아니라 서버가 정하므로 형식 검사가 안정적이다. 서식 조립과
+ * 채팅 서비스별 특수문자 이스케이프는 {@code ChatNotifier} 구현체의 몫이다. 다만 아래 표지·문구 상수는 렌더링
+ * ({@code SlackFooterRenderer})과 이전 답글에서 덧붙임을 걷어내는 {@link #stripFooter}가 <b>같은 문자열</b>을 쓰도록(대칭이 깨지면
+ * 걷어내기가 조용히 실패한다) 코어에 한 곳으로 둔 것이다.
  */
 public sealed interface ReplyFooter {
 
