@@ -40,7 +40,9 @@ services:
     mem_limit: 512m
 
   postgres:
-    image: postgres:16-alpine
+    # pgvector 확장이 들어 있는 이미지(3단계 RAG, V3 마이그레이션이 extension을 만든다). RAG를 꺼도 같은 이미지를 쓴다.
+    # 주의: 옛 postgres:16-alpine 볼륨(musl)과 collation이 달라 기존 postgres-data 볼륨은 백업(pg_dump) 후 초기화해야 한다.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: slacklab
       POSTGRES_USER: slacklab

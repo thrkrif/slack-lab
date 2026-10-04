@@ -992,3 +992,14 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 
 ### 25.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 2·MINOR 3)
 ① MAJOR 전체 재색인 경로 없음 → `VectorStore.beginRebuild/commitRebuild/abortRebuild`(대기 세대, 중단해도 기존 색인 보존) 추가, `IndexMeta`에서 청킹 해시를 빼고 문서별 증분 키에 접음 ② MAJOR 문서 ID로 경로 노출 가능 → `SourceDocument.id`를 불투명 공개 ID로 계약(경로 금지) ③ MINOR `float[]` 가변성 → 방어적 복사·테스트 ④ MINOR `retryable` 의미 → 색인 CLI 재시도 판단 전용, 질의 임베딩 실패는 RetryRequested를 만들지 않음 명시 ⑤ MINOR `PortResult.Ok`→`Success`.
+
+## 26. 3단계 M25 pgvector 기반 (2026-10-04)
+
+변경: compose·테스트 이미지를 `pgvector/pgvector:pg16`으로 교체(테스트 5개는 `TestImages.POSTGRES` 한 곳으로), V3 마이그레이션, `PostgresVectorStore`(운영 빈 없음 — M26에서 배선). 이미지는 RAG를 꺼도 공통이다(ADR-9 보충).
+
+검증: ① `PostgresVectorStoreTest` 16건(실제 pgvector Postgres) — 메타 초기화·불일치 거부, 코사인 유사도 순서·점수, 문서 재삽입 시 옛 청크 없음, 차원 불일치·삽입 중 실패(기본키 위반) 때 옛 문서 보존(롤백), 삭제, 비유한 값 거부, 전체 재색인(커밋 전 기존 보존·커밋 시 전환·중단 시 기존 유지·동시 재색인 거부), **검색 기한(오류 유도)**: `ACCESS EXCLUSIVE` 잠금으로 검색을 막자 400ms 기한에 `TimedOut`(1.5s 안), 서버에 활성 쿼리가 남지 않음, 잠금 해제 후 정상 검색 / 막힌 검색 4개가 쌓이면 다음 검색은 대기 없이 `search_saturated` ② `./gradlew build` 전체 통과(옮긴 통합 테스트 5개 포함) ③ **compose 이미지 외부 확인**: 별도 프로젝트·새 볼륨으로 `docker compose -p ragcheck up -d postgres` → `CREATE EXTENSION vector`(0.8.7) 성공, 코사인 거리 질의 동작, `down -v`로 정리. 사용자의 기존 `postgres-data` 볼륨은 건드리지 않았다.
+
+**사용자 조치 필요(멈춤 지점)**: 기존 alpine 볼륨(`postgres-data`)을 쓰던 로컬 DB는 collation이 달라 새 이미지로 바로 올리면 텍스트 인덱스가 어긋날 수 있다. 데이터가 필요하면 먼저 `pg_dump`로 백업하고, 필요 없으면 `docker compose down -v`로 볼륨을 지운 뒤 올린다(로컬 상태 DB는 초기화 전제, M24와 동일).
+
+### 26.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 3·MINOR 2)
+① MAJOR 읽기 중 `commitRebuild`가 이전 세대를 지우면 조회가 어긋남 → 메타·해시·검색을 `REPEATABLE READ` 스냅샷으로 ② MAJOR 취소(`Statement.cancel`)가 호출자를 붙잡음(기본 취소 통신 10초) → 취소를 별도 풀에서 비동기로, 호출자는 기한에 반환 ③ MAJOR 실행 전 취소 무시·무제한 스레드 → 포기 플래그로 새 문장 시작 차단, 검색 풀 동시 4개 상한과 포화 시 즉시 실패, `statement_timeout`은 서버 쪽 안전망 ④ MINOR 테스트에서 store 미종료 → `@AfterEach close()`, 포화 테스트 추가 ⑤ MINOR 읽기 도중 커밋·연결 풀 고갈·취소 통신 지연 테스트는 미작성(알려진 공백).

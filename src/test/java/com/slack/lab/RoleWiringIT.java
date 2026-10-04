@@ -35,7 +35,7 @@ class RoleWiringIT {
     static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3.13-alpine");
 
     @Container
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(com.slack.lab.TestImages.POSTGRES);
 
     private static ConfigurableApplicationContext start(String role) {
         return new SpringApplicationBuilder(SlackLabApplication.class).run("--app.role=" + role, "--server.port=0",

@@ -131,7 +131,7 @@ com.slack.lab
 │                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
 │  ├─ alert/                  AlertController(/alerts/{source}, 시크릿 인증), CloudWatchAlertNormalizer(SNS), AlertConfig (M23)
-│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22)
+│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22), PostgresVectorStore (M25, 운영 배선은 M26 이후)
 │  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
 │  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
@@ -498,6 +498,8 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 #### ADR-9 보충 (3단계 착수, 2026-10-04)
 
 RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 결과 타입(`EmbeddingResult`·`SearchResult`: Success/TimedOut/Failed)이고, 그 밖의 저장·출처 호출은 `PortResult<T>`다. 검색은 연결 대기와 쿼리 실행을 합친 기한을 받아 넘으면 쿼리를 취소한다. `DocumentHit.score`는 코사인 유사도(클수록 가까움)로 저장소 구현의 거리 척도를 가린다. `DocumentHit`·`SourceDocument.id`에는 파일 경로를 담지 않는다(불투명 공개 ID). `ReferenceList`는 의미 모델이고 Slack 렌더링·이스케이프는 채팅 어댑터 몫이다. 모델·차원 변경 시 전체 재색인은 대기 세대 → 커밋(`beginRebuild`/`commitRebuild`/`abortRebuild`)으로 기존 색인을 지킨다.
+
+**pgvector 어댑터(M25)**: V3 마이그레이션(`rag_generation`·`rag_index_state`·`rag_document`·`rag_chunk`, 차원 없는 `vector`·무인덱스 전수 검색). 문서 교체는 한 트랜잭션이고, 쓰기는 상태 행 `FOR SHARE`·세대 전환은 `FOR UPDATE`로 직렬화하며, 읽기(메타·해시·검색)는 `REPEATABLE READ` 스냅샷이라 전환 중에도 어긋나지 않는다. 검색은 별도 스레드(동시 4개 상한, 초과 시 대기 없이 실패)에서 돌고 기한이 지나면 호출자가 즉시 `TimedOut`으로 반환하며 취소는 비동기로 보낸다(`statement_timeout`이 서버 쪽 안전망). 운영 빈은 아직 없다(M26에서 RAG 스위치와 함께 배선).
 
 "RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
 
