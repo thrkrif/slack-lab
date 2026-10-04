@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""RAG 외부 왕복 확인(M28). 실제 테스트 채널에 부모 메시지를 올리고, 서명된 합성 app_mention을 수신 서버로 보낸 뒤
+스레드에 달린 봇 답글 본문을 출력한다(예: RAG 켬/끔·검색 단절 비교용). 합성 이벤트라 Slack 이벤트 전달 경로는 검증하지 않는다.
+
+사용: scripts/rag-roundtrip "<질문>" [라벨]   환경: .env의 SLACK_SIGNING_SECRET·SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL, RAG_URL(기본 http://localhost:8080)
+종료 코드: 0 답글 확인, 1 시간 초과(답글 없음)
+"""
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_env():
+    env = dict(os.environ)
+    path = os.path.join(ROOT, ".env")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env.setdefault(k, v.strip().strip('"').strip("'"))
+    return env
+
+
+ENV = load_env()
+TOKEN, SECRET, CHANNEL = ENV["SLACK_BOT_TOKEN"], ENV["SLACK_SIGNING_SECRET"], ENV["SLACK_TEST_CHANNEL"]
+URL = ENV.get("RAG_URL", "http://localhost:8080").rstrip("/")
+
+
+def slack(method, payload=None, query=None):
+    if query:
+        req = urllib.request.Request(f"https://slack.com/api/{method}?" + urllib.parse.urlencode(query),
+                                     headers={"Authorization": f"Bearer {TOKEN}"})
+    else:
+        req = urllib.request.Request(f"https://slack.com/api/{method}", data=json.dumps(payload or {}).encode(),
+                                     headers={"Authorization": f"Bearer {TOKEN}",
+                                              "Content-Type": "application/json; charset=utf-8"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    question = sys.argv[1]
+    label = sys.argv[2] if len(sys.argv) > 2 else "rag"
+    bot = slack("auth.test")["user_id"]
+    parent = slack("chat.postMessage", {"channel": CHANNEL, "text": f"[M28 RAG 검증] {label}"})
+    if not parent.get("ok"):
+        sys.exit(f"부모 메시지 실패: {parent.get('error')}")
+    ts = parent["ts"]
+    time.sleep(1.1)  # chat.postMessage 속도 제한을 피한다
+    event_id = f"EvRAG{int(time.time() * 1000)}"
+    body = json.dumps({"type": "event_callback", "event_id": event_id, "authorizations": [{"user_id": bot}],
+                       "event": {"type": "app_mention", "channel": CHANNEL, "user": "U0TESTUSER",
+                                 "text": f"<@{bot}> {question}", "ts": ts}})
+    stamp = str(int(time.time()))
+    sig = "v0=" + hmac.new(SECRET.encode(), f"v0:{stamp}:{body}".encode(), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(f"{URL}/slack/events", data=body.encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Slack-Request-Timestamp": stamp,
+                                          "X-Slack-Signature": sig})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(f"수신 응답 {r.status}")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"수신 거절 {e.code}")
+    start = time.time()
+    while time.time() - start < 120:
+        res = slack("conversations.replies", query={"channel": CHANNEL, "ts": ts, "limit": 50})
+        msgs = res.get("messages", [])[1:] if res.get("ok") else []
+        if msgs:
+            print(f"답글 {len(msgs)}개 / {time.time() - start:.1f}s")
+            for m in msgs:
+                print("-----")
+                print(m.get("text", ""))
+            print("-----")
+            return
+        time.sleep(2)
+    print("시간 초과: 답글 없음")
+    sys.exit(1)
+
+
+main()

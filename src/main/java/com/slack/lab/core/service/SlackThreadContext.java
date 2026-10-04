@@ -10,6 +10,7 @@ import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.core.model.SlackMessageEvent;
 import com.slack.lab.core.port.ThreadContextSource;
 import com.slack.lab.core.model.LlmMessage;
+import com.slack.lab.core.model.ReplyFooter;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -81,7 +82,10 @@ public class SlackThreadContext implements ThreadContextSource {
             if (m.ts().equals(event.ts()) || (current != null && ts != null && ts.compareTo(current) >= 0)) {
                 continue;
             }
-            String text = SlackMessageEvent.cleanText(m.text(), botUserId);
+            // 서버가 붙인 참고 문서·검색 안내는 모델이 쓴 말이 아니다. cleanText가 줄바꿈을 접기 전에(표지가 줄 단위다) 걷어내지
+            // 않으면 모델이 그 서식을 흉내 내 본문에 가짜 출처를 쓴다.
+            String raw = m.botId().isBlank() ? m.text() : ReplyFooter.stripFooter(m.text());
+            String text = SlackMessageEvent.cleanText(raw, botUserId);
             if (text.isBlank()) {
                 continue;
             }

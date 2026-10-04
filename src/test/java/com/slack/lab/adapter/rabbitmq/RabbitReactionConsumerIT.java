@@ -65,7 +65,8 @@ class RabbitReactionConsumerIT {
     ChatNotifier notifier() {
         return new ChatNotifier() {
             @Override
-            public SlackSendResult postMessage(String c, String t, String text, long ms, ReplyMetadata m) {
+            public SlackSendResult postMessage(String c, String t, String text, com.slack.lab.core.model.ReplyFooter f,
+                    long ms, ReplyMetadata m) {
                 throw new AssertionError("반응 소비자는 답글을 보내지 않는다");
             }
 

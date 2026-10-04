@@ -1021,3 +1021,19 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 
 ### 28.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 2·MINOR 5)
 ① MAJOR `--rebuild`가 삭제 방어를 생략(빈 폴더 재색인이 확인 없이 전체 삭제) → 대기 세대를 만들기 전에 지금 게시된 색인을 기준으로 방어를 재색인에도 적용 ② MAJOR 잠금 연결이 끊겨도 별도 연결로 계속 씀 → `IndexLock.Handle.isHeld()`(연결 유효 + `pg_locks`에서 이 세션의 advisory lock 확인)를 문서 쓰기·삭제·게시 전에 확인, 잃으면 `lock_lost`로 멈추고 대기 세대는 건드리지 않음(확인과 쓰기 사이의 짧은 틈은 남는다 — 분산 락 보증이 아니다) ③ MINOR `abortRebuild` 실패 무시 → 보고서·로그에 남김 ④ MINOR 제목만 바꾸면 unchanged → 제목을 해시에 포함 ⑤ MINOR 경로 모양 ID 정리 시 조각이 남음 → 정리하지 않고 `invalid_id`로 거부 ⑥ MINOR front matter 종료선 오판 → 독립 행만 인정, 빈 front matter 처리 ⑦ MINOR NaN 삭제 비율이 방어를 무력화 → `isFinite` 검사. 알려진 공백: 실제 `kill -9`는 자동 테스트가 아니라 위 수동 실측으로만 확인했고(자동 테스트는 예외 전파로 모사), `abortRebuild` 실패 보고와 CLI 종료 코드 전체는 자동 테스트가 없다.
+
+## 29. 3단계 M28 검색 주입·출처·폴백 (2026-10-04)
+
+변경: 코어 `RetrievalService`·`RagPrompt`·`Retrieval`·`ReplyFooter`, `SlackEventHandler` 연동, `ChatNotifier` 6인자 오버로드, `SlackFooterRenderer`, `rag.retrieval.*` 설정, `scripts/rag-roundtrip`(합성 서명 app_mention을 실제 테스트 채널에 보내 답글을 출력). 상세는 ARCHITECTURE ADR-9 보충.
+
+자동 검증: `RetrievalServiceTest` 13, `RagPromptTest` 6(태그 변형 7종 무력화·알람 질의 추출·서로게이트), `SlackFooterRendererTest` 8(멘션·링크·서식 이스케이프, 렌더↔`stripFooter` 왕복, 실제 `chat.postMessage` 본문), `SlackEventHandlerRagTest` 12(주입·근거 없음·폴백·예산 차감·LLM 실패 시 덧붙임 없음·재시도 가능 실패 시 RetryRequested 유지·발신 재시도 시 재검색·Unknown은 재검색/재발신 없음·예외 변환·알람 경로·예산 소진 시 검색 안 함), `SlackThreadContextTest`(덧붙임 제거), `RoleWiringIT`, 전체 `./gradlew build` 통과.
+
+**외부 왕복(실제 환경, 합성 이벤트 + 실제 Slack 테스트 채널·Ollama qwen2.5:7b·bge-m3·pgvector·RabbitMQ)**. 색인은 저장소 밖 가상 문서 4건(`scripts/rag-index` added=4). 서버는 호스트 `bootRun`(ALL 역할). 이벤트 전달 경로(ngrok→Slack)는 합성이라 검증하지 않았다.
+- **A (RAG 켬, 임베딩 모델이 밀려난 상태 = 현실적 콜드)**: 세 질문 모두 `embedding_timeout elapsed_ms≈5005`(5초 상한)로 **폴백** — 답변은 정상 전송(`Delivered`, 총 8~15초), 본문 뒤에 "문서 검색을 완료하지 못해 일반 지식으로 답변합니다…" 안내, 재시도 없음. 원인 측정: 채팅 모델(qwen2.5:7b)이 올라간 상태에서 밀려난 bge-m3를 다시 적재하는 첫 호출이 **23.4초**, 이후 호출은 0.06초(둘 다 상주). 설계대로 폴백이 흡수했고, 이 값이 M30(모델 상주 정책·`OLLAMA_MAX_LOADED_MODELS`·상한 조정)의 핵심 입력이다.
+- **B (임베딩 모델을 미리 데운 뒤)**: B1 "커넥션 풀 고갈" 질문 → `result=found injected=2 elapsed_ms=314`, 답변이 가상 문서의 구체 수치(풀 크기 30, connectionTimeout 3초, 알람 80%)를 근거로 나오고 `*참고 문서*` 목록(DB-003, MEM-007)이 붙음. B2 디스크 질문 → OPS-012 근거(`df -h`, `du -sh /var/log/*`) + 목록(OPS-012, CPU-001). B3 "점심 메뉴" → `result=none` + "관련 문서 근거를 찾지 못해…" 안내. **관찰**: 관련 질문에서 두 번째로 주입된 문서(MEM-007, CPU-001)는 질문과 무관했다 → 초기 임계값 `min-score=0.5`가 bge-m3에는 느슨하다(M30에서 튜닝 세트로 올린다).
+- **C (RAG 끔, 같은 질문)**: 수신·답변 정상(15.3초), 일반 지식 답변("커넥션 수를 늘리기…")으로 문서의 구체 수치 없음, 덧붙임 없음, 서버 로그에 `RAG 검색` 줄 0건 — **꺼도 기존 흐름 그대로**. (B1 vs C1이 P2-4 답변 쌍의 첫 기록이다.)
+- **D (RAG 켬, 임베딩 서버 단절 `127.0.0.1:9`)**: 기동은 경고만 하고 계속(`임베딩 서버를 확인하지 못했지만 기동은 계속한다`), 질문에는 연결 거부를 1ms에 감지(`embedding_connect_failed:ConnectException`)해 폴백 안내와 함께 답변 전송, 총 13.9초(LLM 시간), 재시도 없음. (이 회차 모델 답변 끝에 대화 형식 잔여 텍스트가 섞였다 — 모델 생성 품질 문제로 RAG와 무관.)
+측정 뒤 서버·Ollama 두 모델·임시 Postgres/RabbitMQ를 내렸다. 테스트 채널에는 검증 메시지가 남아 있다.
+
+### 29.1 리뷰 대응 (codex가 사용 한도로 실패해 `code-reviewer` 에이전트로 대체, MAJOR 2·MINOR 5)
+① MAJOR 태그 무력화 정규식 빈틈(`< /reference>`, 줄바꿈, 제로폭, 전각 `＜`) → 정규식에 공백·`\p{Cf}` 허용, 전각 꺾쇠 접기, 7종 테스트 ② MAJOR 검색 중 런타임 예외가 재시도·실패로 샐 수 있음 → `retrieve`가 예외를 `Unavailable`로 변환, 캐스트를 sealed switch로, 깨진 행(null) 건너뜀, 프롬프트 조립 실패도 폴백 ③ MINOR 봇 덧붙임이 다음 질문 문맥으로 되먹임 → `ReplyFooter.stripFooter`(cleanText 이전 원문에서) ④ MINOR 답변 본문 `<!channel>` 주입 경로 → 본문의 `<!`·`<@`·`<#` 이스케이프 ⑤ MINOR `minScore` 범위 → −1~1 검증 ⑥ MINOR 서로게이트 쌍·주석 정정 ⑦ 테스트 공백(발신 재시도 시 재검색, Unknown, 예외) 보강. **보류**: `ChatNotifier` 오버로드 통일(기존 목 기반 테스트 호환을 위해 두 경로 유지 — 이유를 인터페이스에 적음), 스레드 4000자 + 문맥 3000자가 Ollama 기본 `num_ctx`(4096 토큰)를 넘을 수 있는지는 M30 측정 항목.
