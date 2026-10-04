@@ -33,7 +33,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class PostgresRecoveryStoreTest {
 
     @Container
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(com.slack.lab.TestImages.POSTGRES);
 
     static final StateProperties STATE = new StateProperties(400, 100, 7, 24);
     static final long DAY_MS = Duration.ofDays(1).toMillis();
