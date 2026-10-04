@@ -1,10 +1,12 @@
 # 작업 계획 — slack-lab
 
 **1단계(P0): 완료** — `main` 병합(#17), 태그 `v0.1.0`
-**2단계(P1): 승인됨(2026-09-28) · M9 착수 전** — ralplan consensus 5회전(Architect 최종 APPROVE, Critic(codex) 최종 ITERATE → 마지막 지적 1건은 Planner가 반영, 재검토 없음). 사본: `.omc/plans/stage2-p1-plan.md`
+**2단계(P1): 완료(`v0.2.0`) — 이후 ADR-9 기반 전환 M19~M24는 `develop`에서 완료**
+**3단계(RAG): 진행 중(2026-10-04 착수) · M24.5a 착수 전** — 아래 `# 3단계(RAG) 계획` 참조
+2단계 계획 승인 이력: ralplan consensus 5회전(Architect 최종 APPROVE, Critic(codex) 최종 ITERATE → 마지막 지적 1건은 Planner가 반영, 재검토 없음). 사본: `.omc/plans/stage2-p1-plan.md`
 정본: 이 파일. 1단계 상세 계획은 아래 **부록**에 보존한다(1단계 사본 `.omc/plans/stage1-p0-plan.md`).
 근거: [`PRD.md`](PRD.md) §4·§5·§7, [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENTS.md`](../../AGENTS.md)
-범위: 2단계는 **P1-1 ~ P1-8만.** RAG·임베딩·pgvector·LangGraph·n8n·모델 라우팅·지표 스택은 넣지 않는다(AGENTS.md 규칙 1).
+범위: 2단계는 **P1-1 ~ P1-8만**(완료). 3단계는 **RAG(P2-1~P2-4)만**이며 LangGraph·n8n·요청 분류·모델 라우팅·지표 스택은 넣지 않는다(AGENTS.md 규칙 1).
 
 ## 진행 상태
 
@@ -85,16 +87,88 @@
 
 각 마일스톤을 마칠 때 이 목록, `다음 세션 핸드오프` 소절(덮어쓰기), `EXPERIMENT-LOG.md`를 갱신한다. 구조가 바뀐 마일스톤(M12·M13·M14·M15)은 같은 작업에서 `ARCHITECTURE.md`도 갱신한다(규칙 9).
 
+### 3단계 (P2: RAG) — 진행 중
+
+- [ ] **M24.5a 스파이크** (`docs/spikes/`): Ollama `/v1/embeddings` 지원·bge-m3 차원·콜드/웜 시간. 미지원이면 멈춤
+- [ ] **M24.5b 계약 확정**: 포트 재설계(`VectorStore`·`EmbeddingClient`·`DocumentSource`·`ReferenceList`)
+- [ ] **M25 pgvector 기반**: 이미지·테스트 5개 이전·V3·`VectorStore` 어댑터 (볼륨 초기화 멈춤 지점)
+- [ ] **M26 임베딩 어댑터·스위치·기동 검사**
+- [ ] **M27 색인 파이프라인**
+- [ ] **M28 검색 주입·출처·폴백** (실제 멘션 RAG off/on 왕복 포함)
+- [ ] **M29 평가 데이터·하니스**
+- [ ] **M30 통합 실측·판정** (합격선 미달 시 멈춤)
+- [ ] **3단계 완료** — 사용자 요청 시에만 `develop`→`main`·태그
+
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-02)**: 2단계(`v0.2.0`) 위에서 ADR-9 기반 전환 중. M19~M22 병합 완료(큐=RabbitMQ, 상태=Postgres, Redis 제거). M23 알람 입력, M24 오류 모델 정리 완료. **다음은 3단계(RAG) 착수 전 멈춤** — 단계 전환·`develop`→`main` 병합·태그는 사용자 요청 시에만.
+- **상태(2026-10-04)**: 3단계(RAG) 단계 전환 완료(AGENTS·PRD·PLAN·ARCHITECTURE 갱신). 인터뷰·합의 계획 반영, **다음은 M24.5a 스파이크** (`/ultragoal`로 마일스톤을 목표 순서로 넣어 진행). 2단계는 ADR-9 전환 M19~M24까지 `develop`에서 완료.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
 - 클라이언트 Slack 호출만 가짜인 `FullStackWiringIT`·`RoleWiringIT`가 배선 회귀를 막는다. 테스트는 Testcontainers(postgres:16-alpine, rabbitmq:3.13-alpine).
 - **세션 종료 시 호스트 `bootRun`/컨테이너를 켜둘지 끌지 사용자에게 명시적으로 알릴 것.**
+
+---
+
+# 3단계(RAG) 계획
+
+승인: 2026-10-04 사용자 요청으로 단계 전환. 근거 스펙은 인터뷰 결과(PRD §6 "3단계(RAG) 범위 확정")이고 합의 이력은 Planner → Architect → Critic 1차, Codex(gpt-6.1-sol) Architect → Critic 2차(Critic REVISE → 아래 "v4 보완" 반영, v4 재리뷰 없음). 각 마일스톤 완료 = 정상 흐름 외부 왕복 **및** 실패 흐름 오류 유도, 코드 리뷰 1회 이상. 무거운 Docker·Ollama는 마일스톤 끝 1회만 켜고 즉시 내린다.
+
+## RALPLAN-DR
+Principles: (1) RAG는 부가 — 꺼도·실패해도 기존 흐름 불변 (2) 조용한 실패 금지 (3) 상시 프로세스·자원 최소 (4) 코어는 포트만 안다, Slack 지식(이스케이프)은 어댑터 (5) 합격선 사전 고정.
+Drivers: ① 노트북 자원 ② 60초 예산 불변 ③ 유출 안전 기본값.
+Options: A 수평 분할+스파이크(선택) / B 얇은 end-to-end 먼저(기각: 주입 코드 전반이 폐기 후보, harness 없이 판정 불가). B의 장점(미지수 조기 확인)은 M24.5로 흡수.
+ADR: Decision — A, pgvector 이미지를 RAG off에서도 사용. Drivers — 위 3개. Alternatives — B; 조건부 마이그레이션(Flyway 이력 분기·테스트 이중화로 기각). Consequences — 이미지 교체·테스트 5개 이전·기존 볼륨 초기화 안내(alpine→glibc collation). Follow-ups — 마스킹, 문서 URL 링크, 질의 재작성.
+
+## 마일스톤
+각 완료 = 외부 왕복 또는 오류 유도 + 리뷰 1회 이상. 무거운 Docker·Ollama는 M24.5 스파이크 끝, M28 확인, M30에서만 짧게 켜고 즉시 내린다(`ollama stop`·compose down 명시).
+
+- **M24.5a 스파이크** (`docs/spikes/`, M9 선례, 코드 폐기): Ollama `/v1/embeddings` 지원, bge-m3 차원, 콜드/웜 임베딩 시간 1회. 끝에 `ollama stop`. 미지원이면 **멈춤 → 사용자 결정**.
+- **M24.5b 계약 확정** (별도 PR): 포트 재설계 `VectorStore`(replaceDocument·search→Hit(docId,title,text,score)·deleteMissing·meta), `EmbeddingClient` 결과 타입, `DocumentSource`, 코어 `ReferenceList`. 평가 데이터(문서 20·질문 30, 튜닝/최종 분리)는 M29로 이동(데이터는 하니스와 함께 검증). 완료: 컴파일·ArchitectureTest.
+- **M25 pgvector 기반**: compose 이미지 교체, 테스트 5개 `pgvector/pgvector:pg16` 이전, V3(documents, chunks `vector` 무인덱스 전수 검색, index_meta), Postgres `VectorStore` 어댑터. 볼륨 초기화 안내는 **멈춤 지점**. 완료: 전체 build 회귀 0, 문서 단위 교체 원자성·차원 불일치 거부.
+- **M26 임베딩 어댑터·스위치·기동 검사**: 어댑터, `RagProperties`, 호스트 파싱 검사(`StartupInvariants`), index_meta 불일치 검사(Postgres 어댑터 기동 검사, RAG on·WORKER/ALL), `AppRole.INDEXER`, ArchitectureTest 허용 목록·ARCHITECTURE 갱신. 완료(오류 유도): ① `localhost.evil.com` 거부 ② RAG on + 외부 URL 거부 ③ `allow-external-rag` 켜면 기동 + 경고 로그 한 줄(문서 내용 없음) ④ 모델/차원 불일치 기동 거부 ⑤ RAG off면 검사 생략.
+- **M27 색인 파이프라인**: 로컬 마크다운 어댑터, 청커, 코어 `IndexingService`(증분 키, 삭제 임계 비율 초기값 50% 초과 시 중단, 부분 성공·종료 코드, advisory lock), `scripts/rag-index`, 전체 재색인 옵션. 완료: 추가·수정·삭제 반영, 임베딩 단절 시 실패 목록+비0 종료 코드, 색인 중 kill 후 검색 무결, 동시 실행 차단.
+- **M28 검색 주입·출처·폴백**: 코어 `RetrievalService`를 핸들러 L93~L95 사이 호출. 검색 예산 `min(5000, llmBudgetMs(t0))`, 시간 제한은 어댑터 `RestClient` 타임아웃 + 마감 비교 이중 강제, 마감 뒤 도착 결과 폐기 테스트. 데이터 블록 주입. 코어는 `ReferenceList`만 생성, 렌더링·이스케이프는 `ChatNotifier` 어댑터(포트 시그니처 변경). **재시도 규칙(확정)**: 검색 실패는 재시도 사유가 아니며 RetryRequested로 가지 않는다. LLM 재시도 시도에서는 검색을 **재실행**한다(검색 결과를 상태 저장소에 저장하지 않아 스키마 변경을 피함; 시도마다 마감이 독립이라 예산 이중 소모 아님). 관련 문서 없음 안내, 임계값은 초기값(M30에서 튜닝 세트로만 조정). 
+  완료: 단위(참고 문서 규칙 — 중복 제거·제목 멘션 이스케이프·경로/원문 미노출·0건 생략·폴백 시 목록 생략, 시간 초과·실패 주입, RAG off 회귀 0, 알람·멘션 두 경로가 같은 주입 지점을 탐) **+ 외부 왕복**: 호스트 bootRun에서 실제 멘션 1건을 RAG off/on 각각, 임베딩 단절 유도 후 폴백 안내 문구 실제 부착 확인, 확인 뒤 즉시 내림(M16 선례).
+- **M29 평가 데이터·하니스**: 가상 문서 20·질문 30(알람형 15+멘션형 15, 정답 없음 6, 튜닝/최종 분리) 커밋, 하니스(CLI/gradle 태스크로 실제 임베딩에도 실행 가능)가 hit@3·무근거 비율·출처 형식 검사 계산, 답변 쌍(RAG on/off) 기록 형식(P2-4)과 "근거 활용·부족 안내" 점검 시트. 완료: 가짜 임베딩으로 경계(20/24, 19/24, 5/6) 검증.
+- **M30 통합 실측·판정** (1회): bge-m3 vs nomic, qwen2.5 3b vs 7b(컨테이너 메모리 상한 적용), 검색 5초(모델 내려감/적재), 동시 적재(`OLLAMA_MAX_LOADED_MODELS`)와 채팅 모델 축출 영향, Slack 외부 왕복(알람형·멘션형 각 on/off), 오류 유도 재확인, 답변 쌍 기록·근거 활용 점검.
+  **판정 규칙**: 합격선 = hit@3 ≥ 20/24, 정답 없음 ≥ 5/6, 정상 답변 p95 ≤ 45초, 한자·가나 혼용으로 최종 실패 안내가 된 최종 질문 0건(초기값, 착수 시 사용자 확인). 기본 모델 = 합격선 통과 모델 중 더 가벼운 쪽. **미달 시(hit@3 미달·두 모델 모두 p95 초과·축출로 LLM이 50초 초과)**: 원인 단계(검색/주입/LLM 콜드)를 특정하고 개선안 또는 목표 변경안을 올린 뒤 **멈춤 → 사용자 결정**(M9 선례). 수행 완료와 합격을 구분해 기록, 합격 항목만 PRD 체크. ARCHITECTURE·EXPERIMENT-LOG·PLAN 갱신.
+
+## 스펙 수락 기준 ↔ 마일스톤
+| 수락 기준 | 마일스톤 |
+|---|---|
+| RAG off 회귀 0 | M25, M28 |
+| 문서 추가·수정·삭제 반영 | M27 |
+| 임베딩 단절: 색인 실패 목록 / 질의 폴백 | M27 / M28 |
+| 색인 중 kill 무결 | M27 |
+| 모델·차원 불일치 기동 거부 | M26 |
+| 외부 URL 기동 거부, 허용 시 기동+경고 | M26 |
+| 평가 합격선 + 3B·7B 기록 | M29, M30 |
+| 참고 문서 규칙, 경로·원문 미노출 | M28 |
+| 검색 5초 상한·공통 마감 | M28, M30(적재 전/후) |
+| Slack 외부 왕복 on/off 비교 | M28(1건), M30 |
+| ArchitectureTest 유지 | M24.5b, M26 |
+
+## 리스크
+Ollama 임베딩 미지원(M24.5a에서 판명, 멈춤) · 볼륨 collation(멈춤) · 5초 vs 콜드 적재(폴백+측정) · 모델 축출로 LLM 지연(M30 판정 규칙) · 임계값 선후(초기값+M30 조정) · 평가 세트 소규모(기능 검증·회귀용, 일반 품질 보장 아님).
+
+## 변경 이력(v2→v3)
+M28 외부 왕복 추가, 수락 기준 표 추가, 재시도 규칙 확정, M30 불합격 경로·멈춤 추가, 스파이크/계약 PR 분리, 5초 강제 방식 명시, 하니스 실행 방식 명시, 단계 전환 게이트를 선두로 이동.
+
+## v4 보완 (Codex Architect·Critic 2차 반영)
+- **마감 계산(M28)**: 검색 마감 = `min(검색시작+5초, t0+50초, 총마감−Slack예산)`. `RestClient` 타임아웃만으로는 DB 연결 대기·SQL 실행을 못 막으므로 JDBC 연결·쿼리 타임아웃과 취소를 `VectorStore` 포트 계약에 포함(검색 기한·실패 결과 타입). 오류 유도: 검색 지연 주입 후에도 LLM·실패 안내 포함 총 60초·Slack 10초 유지 확인.
+- **재시도 규칙 확장(M28)**: 재처리는 LLM 실패뿐 아니라 발신의 명확한 재시도 가능 실패에도 일어난다 — 두 경우 모두 검색을 재실행하고, `Unknown`에서는 재검색·재발신이 없음을 테스트로 검증.
+- **경계(M24.5b/M27)**: advisory lock은 포트(예: `IndexLock`)로 두고 JDBC 수명은 Postgres 어댑터가 맡는다. DTO(`ReferenceList` 등)는 `core.model`. ArchitectureTest에 pgvector 클라이언트 패키지 금지 추가. 점수는 코사인 거리→유사도 변환·범위를 포트 문서에 명시.
+- **순서 의존(M25/M26/M27)**: 차원 불일치 거부는 M26 설정에 의존하므로 M25는 어댑터 단위 거부까지만, 기동 거부는 M26. 빈 색인 초기화 규칙(첫 색인이 index_meta 생성)과, 전체 재색인(INDEXER 역할)이 메타 불일치로 기동 거부되지 않는 별도 경로를 M26에 포함.
+- **평가 분모(M29)**: **최종 질문 30개(정답 있음 24+없음 6)를 고정**하고 튜닝 질문은 별도 세트(예: 10개)로 추가한다. 문서는 한/영/혼합을 포함. 모델별 메모리·언어 방어 재시도 수·혼용률을 M30 기록 항목에 명시.
+- **완료 조건 정리(규칙 5)**: 공통 문구를 "정상 흐름 외부 왕복 **및** 실패 흐름 오류 유도"로 정정. M24.5b·M29는 계약·데이터 작업이므로 "컴파일·단위 검증"으로 범위를 구분 명시하되, M25~27은 각 마일스톤 끝에 실제 Postgres(Testcontainers) + 실제 Ollama 임베딩 1회 통합 확인을 두고 오류별 기대 결과를 표로 적는다(자원 정책: 마일스톤 끝 1회, 직후 내림).
+- **자원 정책**: 컨테이너 메모리 상한은 호스트 Ollama를 제한하지 못한다. 제한 대상은 앱·Postgres·RabbitMQ 컨테이너이고, Ollama는 `OLLAMA_MAX_LOADED_MODELS`·`keep_alive`·종료 절차(`ollama stop`)와 활동 모니터/`ollama ps` 측정으로 관리한다고 정정.
+- **안전·복구**: M26에 LLM/임베딩 외부 허용 플래그 독립 검증(한쪽만 외부) 추가. 볼륨 초기화 전 `pg_dump` 백업·복원 절차를 안내에 포함. M27 "검색 무결"은 "중단 전 문서가 유지되고 부분 청크가 검색에 노출되지 않음"으로 구체화.
+- **대안 비교 보강**: B도 작은 하니스를 포함할 수 있다 — 기각 근거를 "하니스 불가"가 아니라 변경량(주입 코드 전반이 포트 확정 전 임시)·자원 비용(실측 반복)·이미지 교체 운영 비용 대비로 정정. 스틸맨은 M24.5a(+소수 문서 임베딩→SQL 검색→채팅 폐기용 수직 실험 1회)로 흡수.
+- **ADR 긴장**: pgvector 이미지는 RAG off 사용자에게도 확장 설치를 요구해 ADR-9 "꺼도 Vector DB 없이 동작"과 해석상 충돌한다 → ADR-9에 "Vector DB 없이"는 기능 의미이고 인프라는 pgvector 이미지를 공통 사용한다고 주석 추가 필요(PLAN 반영 시).
+- 미정 용어는 착수 시 사용자 확인: 삭제 임계 비율 50%, 튜닝 질문 수, 언어 위반 합격 기준 0건.
 
 ---
 
