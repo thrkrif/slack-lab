@@ -19,7 +19,7 @@ class SlackFooterRendererTest {
     @Test
     void 덧붙임이_없으면_본문_그대로다() {
         assertThat(SlackFooterRenderer.render("답변", ReplyFooter.NONE)).isEqualTo("답변");
-        assertThat(SlackFooterRenderer.render("답변", new ReplyFooter.References(ReferenceList.empty()))).isEqualTo("답변");
+        assertThat(SlackFooterRenderer.render("답변", new ReplyFooter.References(new ReferenceList(List.of())))).isEqualTo("답변");
     }
 
     @Test

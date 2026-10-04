@@ -95,7 +95,7 @@
 - [x] **M26 임베딩 어댑터·스위치·기동 검사** — 완료(`EXPERIMENT-LOG.md` §27): `RagProperties`·`RagGuard`·임베딩 클라이언트·`RagStartupCheck`·`AppRole.INDEXER`, 실제 Ollama bootRun으로 정상/차원·모델·외부 호스트 거부 유도, 기동 거부 시 큐 소비 0 확인. codex 리뷰 MAJOR 3 반영
 - [x] **M27 색인 파이프라인** — 완료(`EXPERIMENT-LOG.md` §28): 로컬 마크다운 출처·청커·`IndexingService`·`scripts/rag-index`·advisory lock. 실제 Ollama로 증분·삭제·빈 폴더(exit 5)·임베딩 단절(exit 1)·동시 실행(exit 3)·`kill -9` 무결 확인. codex 리뷰 MAJOR 2 반영
 - [x] **M28 검색 주입·출처·폴백** — 완료(`EXPERIMENT-LOG.md` §29): `RetrievalService`·`RagPrompt`·`ReplyFooter`·`SlackFooterRenderer`. 실제 Slack·Ollama·pgvector 왕복(합성 이벤트)으로 RAG 켬(근거·참고 문서)·무관 질문(근거 없음 안내)·끔·임베딩 단절 폴백 확인, **채팅 모델이 올라간 상태의 bge-m3 콜드 적재가 23초라 5초 상한을 넘어 폴백된다는 측정**과 임계값 0.5가 느슨하다는 관찰을 M30 입력으로 남김. 리뷰(`code-reviewer`, codex 한도) MAJOR 2 반영
-- [x] **M29 평가 데이터·하니스** — 완료(`EXPERIMENT-LOG.md` §30): `docs/rag-eval/`(문서 20·final 30·tuning 10), `RagEvaluator`(hit@3·근거 미주입, 합격선 정수 경계 테스트), `scripts/rag-eval`(기본 tuning, final은 명시, `POSTGRES_URL` 필수), 어휘 기준선 18/24는 정합성 확인일 뿐 판정 아님. `AnswerFormatChecker`는 하니스에 자동 연결하지 않고 M30 사람 기록에 씀
+- [x] **M29 평가 데이터·하니스** — 완료(`EXPERIMENT-LOG.md` §30): `docs/rag-eval/`(문서 20·final 30·tuning 10), `RagEvaluator`(hit@3·근거 미주입, 합격선 정수 경계 테스트; `AnswerFormatChecker`는 운영에서 안 쓰여 AI-slop 점검 뒤 삭제), `scripts/rag-eval`(기본 tuning, final은 명시, `POSTGRES_URL` 필수), 어휘 기준선 18/24는 정합성 확인일 뿐 판정 아님.
 - [x] **M30 통합 실측·판정** — 완료·합격(`EXPERIMENT-LOG.md` §31): bge-m3 final hit@3 24/24·근거 미주입 6/6(nomic 19/24·4/6 불합격), 임계값 0.54(tuning 기준), 문맥 상한 1500(4K 잘림 방지), 3B p95 15.6s·7B p95 30.8s·한자/가나 혼용 0 → 권장 기본 bge-m3 + qwen2.5:3b
 - [ ] **3단계 완료** — 사용자 요청 시에만 `develop`→`main`·태그
 

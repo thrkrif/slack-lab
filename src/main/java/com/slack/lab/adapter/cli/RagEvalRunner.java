@@ -80,15 +80,15 @@ public class RagEvalRunner implements ApplicationRunner {
         long finalAnswerable = questions.stream().filter(q -> q.set().equals(EvalQuestion.FINAL) && q.answerable()).count();
         long finalNone = questions.stream().filter(q -> q.set().equals(EvalQuestion.FINAL) && !q.answerable()).count();
         boolean hasFinal = questions.stream().anyMatch(q -> q.set().equals(EvalQuestion.FINAL));
-        if (hasFinal && (finalAnswerable != 24 || finalNone != 6)) {
-            System.out.println("final 세트가 규격(정답 24 + 정답 없음 6)이 아니라 판정하지 않는다: 정답 " + finalAnswerable + ", 정답 없음 " + finalNone);
+        if (hasFinal && (finalAnswerable != EvalReport.FINAL_ANSWERABLE || finalNone != EvalReport.FINAL_UNANSWERABLE)) {
+            System.out.println("final 세트가 규격(정답 " + EvalReport.FINAL_ANSWERABLE + " + 정답 없음 " + EvalReport.FINAL_UNANSWERABLE + ")이 아니라 판정하지 않는다: 정답 " + finalAnswerable + ", 정답 없음 " + finalNone);
             return 2;
         }
         if (args.containsOption("eval.pairs")) {
             System.out.println(RagEvaluator.pairsTemplate(questions));
             return 0;
         }
-        EvalReport report = new RagEvaluator(retrieval, 3).evaluate(questions);
+        EvalReport report = new RagEvaluator(retrieval, EvalReport.HIT_K).evaluate(questions);
         System.out.println(report.summary());
         if (report.anyUnavailable()) {
             System.out.println("검색 불가가 있어 판정할 수 없다(임베딩 서버·색인 상태를 확인한다)");

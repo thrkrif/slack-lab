@@ -310,12 +310,7 @@ public class IndexingService {
 
     static String sha256(String s) {
         try {
-            byte[] h = MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(h.length * 2);
-            for (byte b : h) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e); // 모든 JDK가 SHA-256을 제공한다
         }

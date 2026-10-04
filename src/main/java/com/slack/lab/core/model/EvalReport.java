@@ -9,6 +9,13 @@ import java.util.stream.Collectors;
  */
 public record EvalReport(List<SetResult> sets) {
 
+    /** 합격 판정 규격(PRD 3단계): final은 정답 24 + 정답 없음 6, hit@3 ≥ 20/24, 근거 미주입 ≥ 5/6. 판정·검사·요약이 같은 값을 쓴다. */
+    public static final int HIT_K = 3;
+    public static final int FINAL_ANSWERABLE = 24;
+    public static final int FINAL_UNANSWERABLE = 6;
+    public static final int REQUIRED_HITS = 20;
+    public static final int REQUIRED_NO_INJECTION = 5;
+
     /** 한 질문의 결과. {@code ranked}는 임계값 적용 전 순위(문서 ID와 최고 점수), {@code injected}는 임계값·문맥 상한 적용 후다. */
     public record Row(EvalQuestion question, List<RankedDoc> ranked, List<String> injected, boolean hit, boolean noInjection,
             ErrorInfo unavailable) {
@@ -28,8 +35,8 @@ public record EvalReport(List<SetResult> sets) {
 
         /** 합격 조건. 정수로 비교한다(20/24와 5/6 경계가 부동소수점에 흔들리지 않게). */
         public boolean passes() {
-            boolean hitOk = answerable == 0 || hits * 24 >= answerable * 20;
-            boolean noneOk = none == 0 || noInjected * 6 >= none * 5;
+            boolean hitOk = answerable == 0 || hits * FINAL_ANSWERABLE >= answerable * REQUIRED_HITS;
+            boolean noneOk = none == 0 || noInjected * FINAL_UNANSWERABLE >= none * REQUIRED_NO_INJECTION;
             return answerable + none > 0 && hitOk && noneOk && unavailable == 0; // 빈 세트가 공허하게 합격하지 않는다
         }
     }
@@ -62,7 +69,7 @@ public record EvalReport(List<SetResult> sets) {
         for (SetResult s : sets) {
             boolean judged = EvalQuestion.FINAL.equals(s.set());
             sb.append("== ").append(s.set()).append(judged ? " (합격 판정)" : " (조정용, 판정 아님)").append('\n');
-            sb.append(String.format("hit@3 %d/%d  근거 미주입 %d/%d  검색 불가 %d  정답 질문에서 정답 외 문서 추가 주입 %d건%n", s.hits(),
+            sb.append(String.format("hit@" + HIT_K + " %d/%d  근거 미주입 %d/%d  검색 불가 %d  정답 질문에서 정답 외 문서 추가 주입 %d건%n", s.hits(),
                     s.answerable(), s.noInjected(), s.none(), s.unavailable(), s.extraInjected()));
             for (Row r : s.rows()) {
                 sb.append(String.format("  %-6s %-7s %s expected=%s ranked=%s injected=%s%n", r.question().id(),
@@ -70,7 +77,8 @@ public record EvalReport(List<SetResult> sets) {
                         r.injected()));
             }
             if (judged) {
-                sb.append("판정: ").append(s.passes() ? "합격" : "불합격").append(" (hit@3 ≥ 20/24, 근거 미주입 ≥ 5/6, 검색 불가 0)\n");
+                sb.append("판정: ").append(s.passes() ? "합격" : "불합격").append(String.format(" (hit@%d ≥ %d/%d, 근거 미주입 ≥ %d/%d, 검색 불가 0)%n",
+                        HIT_K, REQUIRED_HITS, FINAL_ANSWERABLE, REQUIRED_NO_INJECTION, FINAL_UNANSWERABLE));
             }
         }
         return sb.toString();
