@@ -20,6 +20,18 @@ public enum ErrorCode {
     LLM_HTTP_ERROR("llm_http_error"),
     LLM_RESPONSE_INVALID("llm_response_invalid"),
 
+    /** 3단계 RAG: 임베딩·벡터 저장소. 검색 실패는 재시도 사유가 아니라 RAG 없이 답하는 폴백 사유다(PLAN M28). */
+    EMBEDDING_TIMEOUT("embedding_timeout"),
+    EMBEDDING_NO_BUDGET("embedding_no_budget"),
+    EMBEDDING_CONNECT_FAILED("embedding_connect_failed"),
+    EMBEDDING_HTTP_ERROR("embedding_http_error"),
+    EMBEDDING_RESPONSE_INVALID("embedding_response_invalid"),
+    EMBEDDING_DIMENSION_MISMATCH("embedding_dimension_mismatch"),
+    VECTOR_STORE_TIMEOUT("vector_store_timeout"),
+    VECTOR_STORE_FAILED("vector_store_failed"),
+    INDEX_META_MISMATCH("index_meta_mismatch"),
+    DOCUMENT_SOURCE_FAILED("document_source_failed"),
+
     SLACK_NO_BUDGET("slack_no_budget"),
     SLACK_REQUEST_BUILD_FAILED("slack_request_build_failed"),
     SLACK_SUBMIT_FAILED("slack_submit_failed"),

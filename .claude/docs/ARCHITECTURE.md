@@ -126,7 +126,7 @@ com.slack.lab
 │  ├─ model/                  값 객체·결과 타입 (SlackMessageEvent, HandlingResult, ClaimOutcome, ...)
 │  ├─ port/                   인터페이스: EventPublisher, ProcessingStateStore, QueueDelivery, ChatNotifier,
 │  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe, BacklogProbe,
-│  │                          EmbeddingClient·VectorStore (3단계 자리만 잡음)
+│  │                          EmbeddingClient·VectorStore·DocumentSource·IndexLock (M24.5b 계약 확정, 구현체는 M25~M27)
 │  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
 │                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
@@ -496,6 +496,8 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 - **미결**: CloudWatch 알람 SNS 메시지의 식별 필드 확인, 대표 리포트 갱신(`chat.update`) 시점, Postgres 선점의 실제 지연 측정, 지연 재시도를 TTL 큐로 할지 플러그인으로 할지.
 
 #### ADR-9 보충 (3단계 착수, 2026-10-04)
+
+RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 결과 타입(`EmbeddingResult`·`SearchResult`: Success/TimedOut/Failed)이고, 그 밖의 저장·출처 호출은 `PortResult<T>`다. 검색은 연결 대기와 쿼리 실행을 합친 기한을 받아 넘으면 쿼리를 취소한다. `DocumentHit.score`는 코사인 유사도(클수록 가까움)로 저장소 구현의 거리 척도를 가린다. `DocumentHit`·`SourceDocument.id`에는 파일 경로를 담지 않는다(불투명 공개 ID). `ReferenceList`는 의미 모델이고 Slack 렌더링·이스케이프는 채팅 어댑터 몫이다. 모델·차원 변경 시 전체 재색인은 대기 세대 → 커밋(`beginRebuild`/`commitRebuild`/`abortRebuild`)으로 기존 색인을 지킨다.
 
 "RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
 

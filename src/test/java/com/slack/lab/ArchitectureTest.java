@@ -33,7 +33,7 @@ class ArchitectureTest {
                     "org.springframework.web..", "java.net.http..", "com.fasterxml.jackson..", "com.rabbitmq..",
                     "org.postgresql..", "java.sql..", "javax.sql..", "org.springframework.jdbc..", "org.springframework.amqp..",
                     "org.springframework.jms..", "org.apache.kafka..", "software.amazon.awssdk..", "javax.net..", "redis.clients..",
-                    "org.apache.hc..", "okhttp3..", "jakarta.persistence..", "org.hibernate..", "io.netty..")
+                    "org.apache.hc..", "okhttp3..", "jakarta.persistence..", "org.hibernate..", "io.netty..", "com.pgvector..")
             .orShould().dependOnClassesThat().haveFullyQualifiedName("java.net.HttpURLConnection")
             .orShould().dependOnClassesThat().haveFullyQualifiedName("java.net.URL")
             .orShould().dependOnClassesThat().haveFullyQualifiedName("java.net.Socket");

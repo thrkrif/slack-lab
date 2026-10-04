@@ -985,3 +985,10 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 ## 24. 3단계 M24.5a 임베딩 스파이크 (2026-10-04)
 
 상세는 `docs/spikes/rag-embedding-spike.md`. 요약: Ollama 0.34.0의 `/v1/embeddings`가 OpenAI 호환으로 동작하고(배열 입력 포함, 없는 모델은 404 JSON), bge-m3는 1024차원·L2 정규화 벡터를 돌려준다. 콜드 1.18~2.19s, 웜 약 0.05s, 적재 메모리 673MB. 검색 상한 5s 안에 콜드도 들어오지만 채팅 모델과의 동시 적재는 M30에서 잰다. 멈춤 조건(임베딩 미지원)은 해당 없음. 이 절은 설계 입력이며 합격 판정이 아니다.
+
+## 25. 3단계 M24.5b RAG 포트 계약 확정 (2026-10-04)
+
+코드는 포트·모델·테스트뿐이고 구현체는 없다(M25~M27). 검증: `./gradlew build` 통과(`ArchitectureTest` 포함, 포트·모델이 인프라 라이브러리와 `com.pgvector..`를 모름), 신규 `ReferenceListTest`(문서 ID 중복 제거·주입 0건 생략·검색 성공(빈 결과)과 장애 구분·벡터 방어적 복사). 외부 왕복·오류 유도는 구현체가 생기는 M25부터 해당한다.
+
+### 25.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 2·MINOR 3)
+① MAJOR 전체 재색인 경로 없음 → `VectorStore.beginRebuild/commitRebuild/abortRebuild`(대기 세대, 중단해도 기존 색인 보존) 추가, `IndexMeta`에서 청킹 해시를 빼고 문서별 증분 키에 접음 ② MAJOR 문서 ID로 경로 노출 가능 → `SourceDocument.id`를 불투명 공개 ID로 계약(경로 금지) ③ MINOR `float[]` 가변성 → 방어적 복사·테스트 ④ MINOR `retryable` 의미 → 색인 CLI 재시도 판단 전용, 질의 임베딩 실패는 RetryRequested를 만들지 않음 명시 ⑤ MINOR `PortResult.Ok`→`Success`.
