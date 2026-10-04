@@ -9,6 +9,13 @@ import java.util.Optional;
 public interface IndexLock {
 
     interface Handle extends AutoCloseable {
+        /**
+         * 잠금을 아직 쥐고 있는가. 잠금을 쥔 연결이 끊기면(서버 재시작, 강제 종료) 서버가 잠금을 풀어 다른 색인이 시작될 수 있다 —
+         * 쓰기 전에 확인해 소유권을 잃은 실행이 다른 실행의 대기 세대를 건드리지 않게 한다. 확인과 쓰기 사이의 짧은 틈까지
+         * 막지는 못한다(드문 사고에 대한 방어이지 분산 락 보증이 아니다).
+         */
+        boolean isHeld();
+
         @Override
         void close();
     }
