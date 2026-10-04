@@ -17,6 +17,8 @@ import org.springframework.stereotype.Component;
  * 만들어졌는가. 어긋나면 기동을 거부한다 — 모델을 바꾸면 기존 벡터와 새 질의 벡터가 서로 비교 불가능해지는데, 모르고 쓰면
  * 검색이 조용히 엉터리가 된다(규칙 4).
  *
+ * <p>{@link RagGuard}(유출 정책)가 이 검사보다, 이 검사가 큐 소비 시작보다 먼저 끝난다 — 의존 그래프로 보장한다.
+ *
  * <p>검사는 빈 생성 시점에 하고, 큐 소비자는 이 빈을 먼저 만들게 해서({@code RabbitConfig}) 거부하기 전에 메시지를 처리하는
  * 일이 없게 한다(ApplicationRunner로 두면 소비자가 이미 돈다). 색인 CLI(INDEXER)는 ②를 하지 않는다 — 전체 재색인이 바로
  * 이 불일치를 풀기 위한 경로다.
@@ -28,7 +30,9 @@ public class RagStartupCheck {
 
     private static final Logger log = LoggerFactory.getLogger(RagStartupCheck.class);
 
-    public RagStartupCheck(RagProperties rag, EmbeddingClient embedding, VectorStore store, Environment env) {
+    // RagGuard를 생성자 인자로 받는 것은 순서를 확정하려는 것이다: 허용되지 않은 호스트로 프로브("ping")가 나가거나 큐 소비가 시작되기
+    // 전에 유출 정책 검사가 먼저 끝나 있어야 한다. 의존이 없으면 생성 순서가 컴포넌트 스캔 순서에 달려 보장되지 않는다.
+    public RagStartupCheck(RagGuard guard, RagProperties rag, EmbeddingClient embedding, VectorStore store, Environment env) {
         if (rag.verifyOnStartup()) {
             verifyEmbedding(embedding, rag);
         } else {

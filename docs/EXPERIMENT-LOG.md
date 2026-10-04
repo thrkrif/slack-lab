@@ -1099,3 +1099,7 @@ M24.5a~M30에서 추가·변경한 main 소스를 `code-reviewer`로 점검했�
 ## 33. 3단계 최종 리뷰 반영 (2026-10-04)
 
 최종 게이트 리뷰(`code-reviewer`, 3단계 전체 diff) 판정은 REQUEST CHANGES(MAJOR 2·MINOR 5)였고 모두 반영했다. ① MAJOR **전체 스택(`--profile app`)에서 RAG가 항상 폴백**: `x-app-env`에 `RAG_EMBEDDING_BASE_URL`이 없어 컨테이너 워커가 자기 `localhost`를 써서 임베딩을 못 불렀다(M30은 bootRun으로만 측정해 가려져 있었다) → compose에 임베딩 주소와 `RAG_*` 전달 추가, `docker compose config`로 컨테이너 환경에 변수가 들어가는 것만 확인(**컨테이너 안 왕복은 하지 않았다**) ② MAJOR 검색이 색인 **모델 ID를 확인하지 않음**(기동 때만 비교하므로 같은 차원의 다른 모델로 재색인이 게시된 뒤 워커 재시작 전에는 비교할 수 없는 벡터로 검색) → `PostgresVectorStore`가 기대 모델·차원을 받아 검색마다 live 세대와 비교, 다르면 `INDEX_META_MISMATCH`로 폴백(테스트 추가) ③ MINOR `scripts/rag-eval`의 DB 보호가 `.env`의 `POSTGRES_URL`에 우회됨 → `--postgres.url` 인자로 전달 ④ PLAN 완료 표기를 실제 범위(알람형 Slack 왕복·컨테이너 왕복 제외)로 좁힘 ⑤ `ArchitectureTest`의 불필요한 `RagProperties` 허용 제거 ⑥ 참고 문서 제목 자르기를 코드 포인트 기준으로(서로게이트 테스트 추가) ⑦ RAG를 꺼도 답변 본문 멘션 이스케이프가 적용된다는 점을 ARCHITECTURE에 기록.
+
+## 34. 3단계 아키텍트 서명 검토 반영 (2026-10-04)
+
+구현된 아키텍처에 대한 아키텍트 검토(`architect`) 판정은 WATCH였다. 경계(ArchitectureTest), 결과 타입 폴백, 예산, 메타 이중 방어, 잠금·세대 설계, 소비 시작 순서는 적합하다고 봤고 구조적 우려 하나를 지적했다: **유출 정책 검사 `RagGuard`가 임베딩 프로브·큐 소비 시작보다 먼저 실행된다는 보장이 없다**(독립 `@Component`라 생성 순서가 스캔 순서에 달림). → `RagStartupCheck`가 `RagGuard`를 생성자 인자로 받아 순서를 의존으로 확정, 회귀 테스트 추가(`RagStartupCheck`를 `RagGuard`보다 먼저 등록해도 외부 호스트 설정이면 임베딩이 한 번도 불리지 않고 기동이 거부됨). 추적만 하는 항목: ① `ReplyFooter` 표지 문자열에 Slack mrkdwn이 코어에 있어 두 번째 채팅 어댑터를 붙이면 `stripFooter` 대칭이 깨짐(걷어내기를 스레드 문맥 어댑터로 옮길 후보) ② `select`가 첫 조각을 항상 넣으므로 청크 크기가 `max-context-chars`보다 크면 문맥 상한이 의미를 잃음 → "청크 크기 ≤ 문맥 상한" 불변식을 `RagGuard`에 추가할 후보.
