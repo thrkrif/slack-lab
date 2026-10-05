@@ -73,7 +73,8 @@ scripts/p1-residue-check                          # 2단계: 해결된 건의 �
 scripts/p1-metrics <로그...>                      # 2단계: 로그 집계 (p50/p95·결과별 건수·적체, B14)
 scripts/p1-load <warmup|seq|burst|dup|distinct>   # 2단계: 검증 부하 생성기 (합성 서명 요청)
 scripts/rag-index [--rebuild] [--confirm-delete]  # 3단계: RAG 색인 CLI (RAG_ENABLED·RAG_EMBEDDING_MODEL·RAG_EMBEDDING_DIMENSION·RAG_DOCS_DIR 필요, 문서는 저장소 밖)
-scripts/rag-roundtrip "<질문>" [라벨]             # 3단계: 합성 멘션을 실제 테스트 채널에 보내 RAG 답글을 확인
+scripts/rag-roundtrip "<질문>" [라벨]             # 3단계: 합성 멘션을 실제 테스트 채널에 보내 RAG 답글을 확인 (--batch <questions.json> <라벨>: 질문 세트 일괄)
+ALERT_SECRET=… scripts/alert-roundtrip "<알람>" "<설명>" "<사유>" [재전송N]  # CloudWatch(SNS) 형식 알림 → 알람 채널 리포트 확인
 ollama list                                       # 설정에 박을 모델 ID는 여기서 확인
 git config core.hooksPath .githooks               # 클론 후 1회: pre-commit 훅 활성화
 curl localhost:8080/health                        # bootRun 후 200 확인

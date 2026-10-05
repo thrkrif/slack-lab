@@ -44,6 +44,22 @@ class CloudWatchAlertNormalizerTest {
         return normalizer.normalize(Map.of(), sns("Notification", "ALARM", name, at)).orElseThrow().dedupKey();
     }
 
+    /**
+     * scripts/alert-roundtrip이 이 공식으로 이벤트 ID를 다시 계산해 봇 답글의 메타데이터와 맞춘다 — 공식이 바뀌면 스크립트가 조용히
+     * 어긋나므로 고정한다: "alert-" + SHA-256("cloudwatch|계정|리전|알람 이름|상태 변경 시각")의 앞 16바이트(hex 32자).
+     */
+    @Test
+    void 이벤트_ID_공식은_알람_왕복_스크립트가_의존하므로_고정한다() throws Exception {
+        byte[] body = MAPPER.writeValueAsBytes(Map.of("Type", "Notification", "Message", MAPPER.writeValueAsString(Map.of(
+                "AlarmName", "payment-api-x", "NewStateValue", "ALARM", "StateChangeTime", "2026-10-06T00:00:00.000+0000",
+                "Region", "ap-northeast-2", "AWSAccountId", "000000000000", "Trigger", Map.of()))));
+
+        AlertEvent e = normalizer.normalize(Map.of(), body).orElseThrow();
+
+        // python3: "alert-" + hashlib.sha256(b"cloudwatch|000000000000|ap-northeast-2|payment-api-x|2026-10-06T00:00:00.000+0000").hexdigest()[:32]
+        assertThat(e.toMessageEvent().eventId()).isEqualTo("alert-aa5a5dc477c74556603fe5a1bc5c581a");
+    }
+
     @Test
     void ALARM이_아닌_전이는_리포트_대상이_아니다() throws Exception {
         assertThat(normalizer.normalize(Map.of(), sns("Notification", "OK", "web-cpu", "2026-10-02T02:00:00.000+0000")))
