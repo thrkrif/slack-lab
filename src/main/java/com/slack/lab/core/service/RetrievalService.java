@@ -145,8 +145,12 @@ public class RetrievalService {
                     || hit.score() < config.minScore()) {
                 continue;
             }
+            if (hit.text().length() > config.maxContextChars()) {
+                // 한 조각이 상한보다 크면(이전 설정의 큰 청크로 색인된 DB 등) 상한까지만 넣는다. 상한이 있으나 마나 해지면 4K 컨텍스트가 잘린다.
+                hit = new DocumentHit(hit.documentId(), hit.title(), hit.text().substring(0, config.maxContextChars()), hit.score());
+            }
             if (!picked.isEmpty() && chars + hit.text().length() > config.maxContextChars()) {
-                break; // 첫 조각은 항상 넣고, 그 뒤부터 문맥 상한을 넘기면 멈춘다
+                break; // 상한을 넘기면 멈춘다
             }
             picked.add(hit);
             chars += hit.text().length();

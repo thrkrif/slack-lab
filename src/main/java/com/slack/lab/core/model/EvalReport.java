@@ -33,6 +33,15 @@ public record EvalReport(List<SetResult> sets) {
             rows = List.copyOf(rows);
         }
 
+        /**
+         * 정답 질문 중 정답 문서가 임계값·문맥 상한을 지나 <b>실제로 프롬프트에 주입된</b> 수. hit@K는 임계값 적용 전 순위라 임계값을 높여
+         * 주입을 줄이면 근거 미주입은 좋아지는데 hit@K는 그대로여서, 이 수가 함께 떨어지면 튜닝이 정답 근거까지 지우고 있다는 신호다.
+         */
+        public int injectedExpected() {
+            return (int) rows.stream().filter(r -> r.question().answerable() && !r.isUnavailable()
+                    && r.question().expected().stream().anyMatch(r.injected()::contains)).count();
+        }
+
         /** 합격 조건. 정수로 비교한다(20/24와 5/6 경계가 부동소수점에 흔들리지 않게). */
         public boolean passes() {
             boolean hitOk = answerable == 0 || hits * FINAL_ANSWERABLE >= answerable * REQUIRED_HITS;
@@ -69,8 +78,9 @@ public record EvalReport(List<SetResult> sets) {
         for (SetResult s : sets) {
             boolean judged = EvalQuestion.FINAL.equals(s.set());
             sb.append("== ").append(s.set()).append(judged ? " (합격 판정)" : " (조정용, 판정 아님)").append('\n');
-            sb.append(String.format("hit@" + HIT_K + " %d/%d  근거 미주입 %d/%d  검색 불가 %d  정답 질문에서 정답 외 문서 추가 주입 %d건%n", s.hits(),
-                    s.answerable(), s.noInjected(), s.none(), s.unavailable(), s.extraInjected()));
+            sb.append(String.format("hit@" + HIT_K + " %d/%d  근거 미주입 %d/%d  검색 불가 %d  정답 질문에서 정답 외 문서 추가 주입 %d건  정답 문서가 실제 주입됨 %d/%d%n",
+                    s.hits(), s.answerable(), s.noInjected(), s.none(), s.unavailable(), s.extraInjected(), s.injectedExpected(),
+                    s.answerable()));
             for (Row r : s.rows()) {
                 sb.append(String.format("  %-6s %-7s %s expected=%s ranked=%s injected=%s%n", r.question().id(),
                         r.question().kind().name().toLowerCase(), verdict(r), r.question().expected(), ranked(r.ranked()),

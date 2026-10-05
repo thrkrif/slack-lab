@@ -89,6 +89,20 @@ class RagGuardTest {
     }
 
     @Test
+    void 청크_크기가_문맥_상한보다_크면_켰을_때만_거부한다() {
+        var on = rag(true, "http://localhost:11434/v1", false, false, LOCAL);
+        var off = rag(false, "http://localhost:11434/v1", false, false, LOCAL);
+        var bigChunk = new RagIndexProperties("", 2_000, 100, 0.5, 30_000, 2, true);
+        var okChunk = new RagIndexProperties("", 800, 100, 0.5, 30_000, 2, true);
+        var cap = new RagRetrievalProperties(3, 0.54, 1_500, 500);
+
+        assertThat(RagGuard.checkChunking(on, bigChunk, cap)).singleElement().asString()
+                .contains("rag.index.chunk-size(2000)").contains("max-context-chars(1500)");
+        assertThat(RagGuard.checkChunking(on, okChunk, cap)).isEmpty();
+        assertThat(RagGuard.checkChunking(off, bigChunk, cap)).as("RAG 끔이면 검사하지 않는다").isEmpty();
+    }
+
+    @Test
     void Echo_LLM은_외부_호출이_없어_LLM_검사를_건너뛴다() {
         var r = rag(true, "http://localhost:11434/v1", false, false, LOCAL);
         assertThat(RagGuard.check(r, llm(LlmProperties.Client.ECHO, "https://api.example.com/v1"))).isEmpty();
@@ -123,7 +137,7 @@ class RagGuardTest {
     /** RagStartupCheck의 협력자 가짜. 임베딩이 한 번이라도 불리면 카운터가 오른다. */
     static final java.util.concurrent.atomic.AtomicInteger EMBED_CALLS = new java.util.concurrent.atomic.AtomicInteger();
 
-    @EnableConfigurationProperties({RagProperties.class, LlmProperties.class})
+    @EnableConfigurationProperties({RagProperties.class, LlmProperties.class, RagIndexProperties.class, RagRetrievalProperties.class})
     static class Collaborators {
         @org.springframework.context.annotation.Bean
         com.slack.lab.core.port.EmbeddingClient embeddingClient() {
@@ -154,11 +168,12 @@ class RagGuardTest {
                 });
     }
 
-    @EnableConfigurationProperties({RagProperties.class, LlmProperties.class})
+    @EnableConfigurationProperties({RagProperties.class, LlmProperties.class, RagIndexProperties.class, RagRetrievalProperties.class})
     static class Cfg {
         @org.springframework.context.annotation.Bean
-        RagGuard guard(RagProperties rag, LlmProperties llm, org.springframework.core.env.Environment env) {
-            return new RagGuard(rag, llm, env);
+        RagGuard guard(RagProperties rag, LlmProperties llm, org.springframework.core.env.Environment env,
+                RagIndexProperties index, RagRetrievalProperties retrieval) {
+            return new RagGuard(rag, llm, env, index, retrieval);
         }
     }
 }

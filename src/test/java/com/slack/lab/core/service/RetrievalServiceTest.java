@@ -41,14 +41,16 @@ class RetrievalServiceTest {
     }
 
     @Test
-    void 주입하는_글자_수가_상한을_넘으면_뒤쪽_조각을_뺀다_첫_조각은_항상_넣는다() {
+    void 주입하는_글자_수가_상한을_넘으면_뒤쪽_조각을_빼고_상한보다_큰_첫_조각은_상한까지만_넣는다() {
         var cfg = new RetrievalService.Config(5_000, 5, 0.0, 100, 500);
         var svc = new RetrievalService(okEmbedding(), storeReturning(hit("A", "t", "a".repeat(80), 0.9),
                 hit("B", "t", "b".repeat(80), 0.8), hit("C", "t", "c", 0.7)), cfg);
         var huge = new RetrievalService(okEmbedding(), storeReturning(hit("X", "t", "x".repeat(500), 0.9)), cfg);
 
         assertThat(((Retrieval.Found) svc.retrieve("q", 50_000)).hits()).extracting("documentId").containsExactly("A");
-        assertThat(((Retrieval.Found) huge.retrieve("q", 50_000)).hits()).extracting("documentId").containsExactly("X");
+        var hugeHits = ((Retrieval.Found) huge.retrieve("q", 50_000)).hits();
+        assertThat(hugeHits).extracting("documentId").containsExactly("X");
+        assertThat(hugeHits.get(0).text()).as("상한(100자)을 넘겨 주입하지 않는다").hasSize(100);
     }
 
     @Test

@@ -31,6 +31,11 @@ rag:
   allow-external-embedding: ${RAG_ALLOW_EXTERNAL_EMBEDDING:false}
   index:
     docs-dir: ${RAG_DOCS_DIR:}
+  retrieval:
+    # 기본값은 코드(RagRetrievalProperties)가 정한다 — M30 실측값. 환경변수로 덮어쓸 때만 쓴다.
+    top-k: ${RAG_RETRIEVAL_TOP_K:3}
+    min-score: ${RAG_RETRIEVAL_MIN_SCORE:0.54}
+    max-context-chars: ${RAG_RETRIEVAL_MAX_CONTEXT_CHARS:1500}
 
 llm:
   client: ${LLM_CLIENT:ollama}

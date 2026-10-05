@@ -54,7 +54,10 @@ class RabbitConfig {
     @Bean(initMethod = "start", destroyMethod = "close")
     @ConditionalOnRole({AppRole.REACTOR, AppRole.WORKER, AppRole.ALL})
     RabbitReactionConsumer rabbitReactionConsumer(RabbitBroker broker, ObjectMapper mapper,
-            com.slack.lab.core.port.ChatNotifier notifier, com.slack.lab.config.ReactionProperties reaction) {
+            com.slack.lab.core.port.ChatNotifier notifier, com.slack.lab.config.ReactionProperties reaction,
+            org.springframework.beans.factory.ObjectProvider<com.slack.lab.config.RagStartupCheck> ragStartupCheck) {
+        // 거부될 기동에서는 어떤 소비도 시작하지 않는다(질의 소비자와 같은 규칙). 반응 소비자는 LLM·임베딩을 부르지 않지만 일관되게 둔다.
+        ragStartupCheck.getIfAvailable();
         return new RabbitReactionConsumer(broker, mapper, notifier, reaction);
     }
 }
