@@ -25,10 +25,12 @@ public class RagGuard {
     private static final Logger log = LoggerFactory.getLogger(RagGuard.class);
     private static final Pattern IPV4 = Pattern.compile("(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})");
 
-    public RagGuard(RagProperties rag, LlmProperties llm, Environment env) {
+    public RagGuard(RagProperties rag, LlmProperties llm, Environment env, RagIndexProperties index,
+            RagRetrievalProperties retrieval) {
         // 색인 CLI는 LLM을 쓰지 않으므로 LLM 호스트·예산 검사를 적용하지 않는다(무관한 허용 플래그를 요구하면 안 된다).
         boolean llmUsed = OnRoleCondition.currentRole(env) != AppRole.INDEXER;
-        List<String> violations = check(rag, llm, llmUsed);
+        List<String> violations = new ArrayList<>(check(rag, llm, llmUsed));
+        violations.addAll(checkChunking(rag, index, retrieval));
         if (!violations.isEmpty()) {
             throw new IllegalStateException("RAG 설정 위반: " + String.join("; ", violations));
         }
@@ -46,6 +48,19 @@ public class RagGuard {
 
     static List<String> check(RagProperties rag, LlmProperties llm) {
         return check(rag, llm, true);
+    }
+
+    /**
+     * 청크 하나가 문맥 상한보다 크면 {@code RetrievalService.select}가 "첫 조각은 항상 넣는다" 규칙으로 상한을 넘겨 주입한다 — 상한이
+     * 있으나 마나가 되고 Ollama 4K 컨텍스트에서 앞부분이 조용히 잘린다(M30 실측). 그래서 설정 단계에서 막는다.
+     */
+    static List<String> checkChunking(RagProperties rag, RagIndexProperties index, RagRetrievalProperties retrieval) {
+        List<String> v = new ArrayList<>();
+        if (rag.enabled() && index.chunkSize() > retrieval.maxContextChars()) {
+            v.add("rag.index.chunk-size(" + index.chunkSize() + ") <= rag.retrieval.max-context-chars(" + retrieval.maxContextChars()
+                    + ") 이어야 한다 — 청크 하나가 문맥 상한을 넘으면 상한이 의미를 잃고 4K 컨텍스트가 잘린다");
+        }
+        return v;
     }
 
     static List<String> check(RagProperties rag, LlmProperties llm, boolean llmUsed) {

@@ -107,6 +107,20 @@ class RagEvaluatorTest {
     }
 
     @Test
+    void 임계값을_높여_주입을_다_지우면_hit는_그대로여도_정답_문서_실제_주입_수가_드러난다() {
+        var low = scripted(java.util.Map.of("A", hits("DOC-A", 0.6)), 0.5);
+        var high = scripted(java.util.Map.of("A", hits("DOC-A", 0.6)), 0.9);
+
+        var lowReport = new RagEvaluator(low, 3).evaluate(List.of(q("A", "final", "DOC-A")));
+        var highReport = new RagEvaluator(high, 3).evaluate(List.of(q("A", "final", "DOC-A")));
+
+        assertThat(lowReport.set("final").hits()).isEqualTo(highReport.set("final").hits());
+        assertThat(lowReport.set("final").injectedExpected()).isEqualTo(1);
+        assertThat(highReport.set("final").injectedExpected()).as("게임화 신호").isZero();
+        assertThat(highReport.summary()).contains("정답 문서가 실제 주입됨 0/1");
+    }
+
+    @Test
     void 요약에는_질문_ID_문서_ID_점수만_있고_문서_본문은_없다() {
         var svc = scripted(java.util.Map.of("A", hits("DOC-A", 0.91)), 0.5);
 
