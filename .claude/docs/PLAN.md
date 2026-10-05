@@ -2,7 +2,7 @@
 
 **1단계(P0): 완료** — `main` 병합(#17), 태그 `v0.1.0`
 **2단계(P1): 완료(`v0.2.0`) — 이후 ADR-9 기반 전환 M19~M24는 `develop`에서 완료**
-**3단계(RAG): 구현·검증 완료(M24.5a~M30, 2026-10-04) — 합격선 충족, 컨테이너 전체 스택·알람형 왕복·중복/언어 재검증 완료(EXPERIMENT-LOG §37). 실제 Slack 이벤트→ngrok→수신→RAG 답글·👀 반응도 1건 확인(EXPERIMENT-LOG §38) · `develop`→`main` 병합·태그(`v0.3.0` 예정)는 사용자 요청 시** — 아래 `# 3단계(RAG) 계획` 참조
+**3단계(RAG): 완료(`v0.3.0`, 2026-10-06) — 구현·검증 M24.5a~M30(2026-10-04) — 합격선 충족, 컨테이너 전체 스택·알람형 왕복·중복/언어 재검증 완료(EXPERIMENT-LOG §37). 실제 Slack 이벤트→ngrok→수신→RAG 답글·👀 반응도 1건 확인(EXPERIMENT-LOG §38) · 4단계는 착수 전** — 아래 `# 3단계(RAG) 계획` 참조
 2단계 계획 승인 이력: ralplan consensus 5회전(Architect 최종 APPROVE, Critic(codex) 최종 ITERATE → 마지막 지적 1건은 Planner가 반영, 재검토 없음). 사본: `.omc/plans/stage2-p1-plan.md`
 정본: 이 파일. 1단계 상세 계획은 아래 **부록**에 보존한다(1단계 사본 `.omc/plans/stage1-p0-plan.md`).
 근거: [`PRD.md`](PRD.md) §4·§5·§7, [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENTS.md`](../../AGENTS.md)
@@ -97,13 +97,13 @@
 - [x] **M28 검색 주입·출처·폴백** — 완료(`EXPERIMENT-LOG.md` §29): `RetrievalService`·`RagPrompt`·`ReplyFooter`·`SlackFooterRenderer`. 실제 Slack·Ollama·pgvector 왕복(합성 이벤트)으로 RAG 켬(근거·참고 문서)·무관 질문(근거 없음 안내)·끔·임베딩 단절 폴백 확인, **채팅 모델이 올라간 상태의 bge-m3 콜드 적재가 23초라 5초 상한을 넘어 폴백된다는 측정**과 임계값 0.5가 느슨하다는 관찰을 M30 입력으로 남김. 리뷰(`code-reviewer`, codex 한도) MAJOR 2 반영
 - [x] **M29 평가 데이터·하니스** — 완료(`EXPERIMENT-LOG.md` §30): `docs/rag-eval/`(문서 20·final 30·tuning 10), `RagEvaluator`(hit@3·근거 미주입, 합격선 정수 경계 테스트; `AnswerFormatChecker`는 운영에서 안 쓰여 AI-slop 점검 뒤 삭제), `scripts/rag-eval`(기본 tuning, final은 명시, `POSTGRES_URL` 필수), 어휘 기준선 18/24는 정합성 확인일 뿐 판정 아님.
 - [x] **M30 통합 실측·판정** — 완료·합격(`EXPERIMENT-LOG.md` §31): bge-m3 final hit@3 24/24·근거 미주입 6/6(nomic 19/24·4/6 불합격), 임계값 0.54(tuning 기준), 문맥 상한 1500(4K 잘림 방지), 3B p95 15.6s·7B p95 30.8s·한자/가나 혼용 0 → 권장 기본 bge-m3 + qwen2.5:3b
-- [ ] **3단계 완료** — 사용자 요청 시에만 `develop`→`main`·태그
+- [x] **3단계 완료** — `develop`→`main` 병합, 태그 `v0.3.0` (사용자 요청으로 2026-10-06 전환)
 
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-04)**: 3단계 마일스톤 M24.5a~M30 모두 완료·합격. **남은 것은 사용자 요청이 필요한 단계 마무리**: `develop`→`main` merge commit + 태그(`v0.3.0` 제안). 권장 구성: 임베딩 `bge-m3`(RAG_EMBEDDING_DIMENSION=1024) + LLM `qwen2.5:3b`(7b는 선택), 임계값 0.54·문맥 상한 1500(기본값). 색인 `scripts/rag-index`, 평가 `POSTGRES_URL=… scripts/rag-eval --confirm-eval-db [--eval.set=final|all]`, 확인 `scripts/rag-roundtrip`. 후속 후보: (처리됨, 2026-10-05) 스레드 문맥의 봇 신원 조회 실패 시 fail-closed — EXPERIMENT-LOG §36. ⓪ (완료 — EXPERIMENT-LOG §37: 컨테이너 전체 스택 RAG 켬·단절 폴백, 알람형 왕복, 중복·언어) ① 프롬프트에서 `<reference>`·문서 ID를 답변에 쓰지 않게 하기(재측정 필요) ② (실제 Slack 이벤트 경로는 §38에서 확인) 스레드 안 질문 + RAG 문맥의 4K 검증 ③ 임베딩 상주(`OLLAMA_KEEP_ALIVE`) 운영 가이드 ④ M28·M29 리뷰를 codex(오후 8시 복구)로 재검토. 사용자 조치: 기존 로컬 `postgres-data` 볼륨은 새 pgvector 이미지에서 백업(`pg_dump`) 후 `docker compose down -v`로 초기화. 검증(§37 포함)이 끝나 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`.
+- **상태(2026-10-06)**: **3단계 완료 — `develop`→`main` 병합, 태그 `v0.3.0`.** 4단계는 착수 전(단계 번호 전환은 사용자 요청 시). 권장 구성: 임베딩 `bge-m3`(RAG_EMBEDDING_DIMENSION=1024) + LLM `qwen2.5:3b`(7b는 선택), 임계값 0.54·문맥 상한 1500(기본값). 색인 `scripts/rag-index`, 평가 `POSTGRES_URL=… scripts/rag-eval --confirm-eval-db [--eval.set=final|all]`, 확인 `scripts/rag-roundtrip`. 후속 후보: (처리됨, 2026-10-05) 스레드 문맥의 봇 신원 조회 실패 시 fail-closed — EXPERIMENT-LOG §36. ⓪ (완료 — EXPERIMENT-LOG §37: 컨테이너 전체 스택 RAG 켬·단절 폴백, 알람형 왕복, 중복·언어) ① 프롬프트에서 `<reference>`·문서 ID를 답변에 쓰지 않게 하기(재측정 필요) ② (실제 Slack 이벤트 경로는 §38에서 확인) 스레드 안 질문 + RAG 문맥의 4K 검증 ③ 임베딩 상주(`OLLAMA_KEEP_ALIVE`) 운영 가이드 ④ M28·M29 리뷰를 codex(오후 8시 복구)로 재검토. 사용자 조치: 기존 로컬 `postgres-data` 볼륨은 새 pgvector 이미지에서 백업(`pg_dump`) 후 `docker compose down -v`로 초기화. 검증(§37 포함)이 끝나 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
