@@ -10,6 +10,7 @@ import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.core.model.SlackMessageEvent;
 import com.slack.lab.core.port.ThreadContextSource;
 import com.slack.lab.core.model.LlmMessage;
+import com.slack.lab.core.model.ReplyFooter;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -59,7 +60,8 @@ public class SlackThreadContext implements ThreadContextSource {
                     result.error(), fetchMs);
             return List.of();
         }
-        // 식별은 캐시되므로 첫 호출에만 비용이 든다. 실패하면 null이고, 그 경우 봇 메시지는 모두 assistant로 본다.
+        // 식별은 캐시되므로 첫 호출에만 비용이 든다. 실패하면 null이고, 그 경우 이벤트(서명 검증된 페이로드의 authorizations)가 알려 주는
+        // 우리 봇 사용자 ID로만 우리 봇 메시지를 판별한다 — 판별할 수 없는 봇 메시지는 모델에 넘기지 않는다(fail-closed).
         BotIdentity self = client.identity(Math.max(1, deadline - fetchMs));
         List<LlmMessage> context = assemble(result.messages(), event, self);
         int chars = context.stream().mapToInt(m -> m.content().length()).sum();
@@ -73,6 +75,7 @@ public class SlackThreadContext implements ThreadContextSource {
         String botUserId = self != null && !self.userId().isBlank() ? self.userId() : event.botUserId();
         BigDecimal current = parseTs(event.ts());
         List<LlmMessage> all = new ArrayList<>();
+        int unidentifiedBots = 0;
         for (ThreadMessage m : messages) {
             // 이번 메시지와 그 뒤에 올라온 메시지는 "이전 대화"가 아니다. conversations.replies는 조회 시점의
             // 스레드 전체를 주므로(큐 지연·재시도 사이에 쌓임) 시각 순서로 걸러야 한다. ts는 소수 문자열이라
@@ -81,16 +84,26 @@ public class SlackThreadContext implements ThreadContextSource {
             if (m.ts().equals(event.ts()) || (current != null && ts != null && ts.compareTo(current) >= 0)) {
                 continue;
             }
-            String text = SlackMessageEvent.cleanText(m.text(), botUserId);
+            // 서버가 붙인 참고 문서·검색 안내는 모델이 쓴 말이 아니다. cleanText가 줄바꿈을 접기 전에(표지가 줄 단위다) 걷어내지
+            // 않으면 모델이 그 서식을 흉내 내 본문에 가짜 출처를 쓴다.
+            String raw = m.botId().isBlank() ? m.text() : ReplyFooter.stripFooter(m.text());
+            String text = SlackMessageEvent.cleanText(raw, botUserId);
             if (text.isBlank()) {
                 continue;
             }
             if (m.botId().isBlank()) {
                 all.add(LlmMessage.user(text));
-            } else if (self == null || self.botId().isBlank() || self.botId().equals(m.botId())) {
+            } else if (isOurBot(m, self, botUserId)) {
                 all.add(LlmMessage.assistant(text));
+            } else {
+                // 다른 앱의 봇 메시지이거나 누구 것인지 판별할 수 없는 봇 메시지는 버린다: assistant로 넣으면 모델이 자기 말로 믿는
+                // 주입 경로가 된다.
+                unidentifiedBots++;
             }
-            // 다른 앱의 봇 메시지는 버린다: assistant로 넣으면 모델이 자기 말로 믿는 주입 경로가 된다.
+        }
+        if (self == null && unidentifiedBots > 0) {
+            log.warn("봇 신원 조회 실패 — 이벤트의 봇 식별 정보로 판별되지 않은 봇 메시지 {}건을 문맥에서 제외 event_id={}", unidentifiedBots,
+                    event.eventId());
         }
         int from = Math.max(0, all.size() - props.maxMessages());
         List<LlmMessage> recent = all.subList(from, all.size());
@@ -112,6 +125,17 @@ public class SlackThreadContext implements ThreadContextSource {
         }
         Collections.reverse(picked);
         return picked;
+    }
+
+    /**
+     * 우리 봇이 쓴 메시지인가. 봇 ID(bot_id)를 알면 그것으로, 모르면(식별 조회 실패·ID 없음) 이벤트가 준 우리 봇 사용자 ID가 메시지의
+     * {@code user}와 같을 때만 그렇다고 본다. 둘 다 없으면 판별 불가이므로 아니다 — "모르면 우리 것"으로 단정하지 않는다.
+     */
+    static boolean isOurBot(ThreadMessage m, BotIdentity self, String botUserId) {
+        if (self != null && !self.botId().isBlank()) {
+            return self.botId().equals(m.botId());
+        }
+        return botUserId != null && !botUserId.isBlank() && botUserId.equals(m.user());
     }
 
     /** Slack ts("1700000000.000100")를 숫자로. 파싱할 수 없으면 null. */

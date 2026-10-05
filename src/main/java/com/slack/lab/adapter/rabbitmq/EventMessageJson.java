@@ -21,6 +21,9 @@ final class EventMessageJson {
         node.put("ts", e.ts());
         node.put("thread_ts", e.threadTs() == null ? "" : e.threadTs());
         node.put("user", e.user() == null ? "" : e.user());
+        // 우리 봇 사용자 ID(서명 검증된 이벤트의 authorizations). 스레드 문맥이 봇 신원 조회에 실패해도 우리 메시지를 가려내는 신뢰 근거라
+        // 큐를 건너서도 보존해야 한다. 이전 형식의 메시지에는 없으므로 읽을 때 null이어도 된다.
+        node.put("bot_user_id", e.botUserId() == null ? "" : e.botUserId());
         node.put("text", e.text() == null ? "" : e.text());
         node.put("retry_num", retryNum == null ? "" : retryNum);
         try {
@@ -41,7 +44,7 @@ final class EventMessageJson {
                 return null;
             }
             SlackMessageEvent event = new SlackMessageEvent(eventId, text(n, "channel"), text(n, "user"),
-                    text(n, "text"), text(n, "ts"), text(n, "thread_ts"), null, null, null);
+                    text(n, "text"), text(n, "ts"), text(n, "thread_ts"), null, null, text(n, "bot_user_id"));
             long received = n.path("received_at").asLong(-1);
             boolean missing = received < 0;
             return new Parsed(event, n.path("gen").asLong(0), missing ? System.currentTimeMillis() : received, missing);

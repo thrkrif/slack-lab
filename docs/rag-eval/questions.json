@@ -1,0 +1,368 @@
+{
+ "questions": [
+  {
+   "id": "F-A01",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "DB-001"
+   ],
+   "title": "HikariPool-1 - Connection is not available, request timed out after 30000ms",
+   "body": "payment-api 인스턴스 3대에서 active connections 10/10, pending threads 87"
+  },
+  {
+   "id": "F-A02",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "DB-002"
+   ],
+   "title": "PostgreSQL lock wait on orders UPDATE",
+   "body": "pg_stat_activity에서 orders 갱신 세션 45개가 transactionid 락을 대기 중, 야간 통계 배치가 실행 중"
+  },
+  {
+   "id": "F-A03",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "DB-003"
+   ],
+   "title": "ReplicaLagSeconds > 300",
+   "body": "reporting replica 2대 지연, 조회 API가 어제 데이터를 반환한다는 문의 접수"
+  },
+  {
+   "id": "F-A04",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "OPS-001"
+   ],
+   "title": "DiskUsage /data 91%",
+   "body": "node-12 /data 사용률 91%, 증가 속도 시간당 2%"
+  },
+  {
+   "id": "F-A05",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "NET-001"
+   ],
+   "title": "UnknownHostException: inventory-service",
+   "body": "order-service 로그에서 간헐적으로 호스트 이름 해석 실패, kube-dns 파드 재시작 3회"
+  },
+  {
+   "id": "F-A06",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "APP-001"
+   ],
+   "title": "Container OOMKilled (exit code 137)",
+   "body": "recommendation-api 파드가 하루 12번 재시작, 메모리 사용량이 계속 우상향"
+  },
+  {
+   "id": "F-A07",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "MQ-001"
+   ],
+   "title": "RabbitMQ queue notification.events ready=48210",
+   "body": "consumer 1개만 연결됨, 배포 이후 처리 속도 급감"
+  },
+  {
+   "id": "F-A08",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "CACHE-001"
+   ],
+   "title": "Redis used_memory 96% and evicted_keys increasing",
+   "body": "세션 캐시 히트율 92%에서 61%로 하락, DB CPU 상승"
+  },
+  {
+   "id": "F-A09",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "DEPLOY-001"
+   ],
+   "title": "5xx error rate 6.2% for 5m",
+   "body": "v2.14.0 배포 5분 경과, 카나리 단계에서는 정상으로 판단되어 100% 전환됨"
+  },
+  {
+   "id": "F-A10",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "K8S-001"
+   ],
+   "title": "KubePodCrashLooping",
+   "body": "billing-worker pod restarting, back-off 5m, last state terminated reason Error"
+  },
+  {
+   "id": "F-A11",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "BATCH-001"
+   ],
+   "title": "nightly-settlement duration 2h (baseline 20m)",
+   "body": "read replica CPU 95%, 전날 schema migration이 적용됨"
+  },
+  {
+   "id": "F-A12",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [
+    "OPS-003"
+   ],
+   "title": "SSL certificate expired for partner-gateway.example.com",
+   "body": "외부 연동 호출이 모두 handshake_failure, 갱신 잡 로그에 최근 성공 기록이 없음"
+  },
+  {
+   "id": "F-A13",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [],
+   "title": "Elasticsearch cluster status yellow",
+   "body": "unassigned shards 4, 샤드 재할당 필요 여부 확인"
+  },
+  {
+   "id": "F-A14",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [],
+   "title": "Kafka consumer group rebalancing frequently",
+   "body": "partition assignment가 계속 바뀜, session.timeout.ms 조정 필요 여부"
+  },
+  {
+   "id": "F-A15",
+   "set": "final",
+   "kind": "alarm",
+   "expected": [],
+   "title": "Terraform state lock held",
+   "body": "CI 파이프라인이 state lock을 획득하지 못해 apply가 대기 중"
+  },
+  {
+   "id": "F-M01",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "DB-001"
+   ],
+   "text": "결제 서비스에서 DB 연결을 못 얻어서 요청이 계속 타임아웃 나는데 어디부터 봐야 해?"
+  },
+  {
+   "id": "F-M02",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "DB-002"
+   ],
+   "text": "주문 업데이트가 몇 분씩 멈추는데 DB에서 뭐가 서로 기다리고 있는지 확인하는 방법 있어?"
+  },
+  {
+   "id": "F-M03",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "SEC-001"
+   ],
+   "text": "실수로 깃허브에 API 키를 올렸어요. 지금 뭐부터 해야 하죠?"
+  },
+  {
+   "id": "F-M04",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "OPS-002"
+   ],
+   "text": "서버 로그 파일이 너무 커져서 디스크가 꽉 찼어요. 재발 방지는 어떻게 하죠?"
+  },
+  {
+   "id": "F-M05",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "NET-002"
+   ],
+   "text": "LB 뒤 인스턴스들이 한꺼번에 unhealthy가 되면서 502가 났어요. 헬스체크를 어떻게 설계해야 해요?"
+  },
+  {
+   "id": "F-M06",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "APP-002"
+   ],
+   "text": "외부 API가 느려졌을 때 우리 서버가 전체적으로 멈추는 걸 막으려면 어떻게 해야 해?"
+  },
+  {
+   "id": "F-M07",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "APP-003"
+   ],
+   "text": "하위 서비스가 죽었을 때 클라이언트 재시도 때문에 더 악화되는 걸 어떻게 막아?"
+  },
+  {
+   "id": "F-M08",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "MQ-002"
+   ],
+   "text": "DLQ에 같은 메시지가 계속 쌓이는데 원인이 뭘까?"
+  },
+  {
+   "id": "F-M09",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "CACHE-002"
+   ],
+   "text": "인기 상품 캐시가 동시에 만료되면서 DB가 터졌어요. 어떻게 방지해?"
+  },
+  {
+   "id": "F-M10",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "DEPLOY-002"
+   ],
+   "text": "새 환경에 배포했더니 파드가 뜨지 않는데 설정 값이 빠진 것 같아요. 이런 걸 미리 막을 방법?"
+  },
+  {
+   "id": "F-M11",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "K8S-001"
+   ],
+   "text": "pod가 계속 재시작하는데 마지막으로 죽은 원인을 어떻게 확인해?"
+  },
+  {
+   "id": "F-M12",
+   "set": "final",
+   "kind": "mention",
+   "expected": [
+    "DB-003"
+   ],
+   "text": "replica에서 읽은 데이터가 최신이 아닌데 지연이 클 때 임시로 어떻게 우회하죠?"
+  },
+  {
+   "id": "F-M13",
+   "set": "final",
+   "kind": "mention",
+   "expected": [],
+   "text": "오늘 점심 메뉴 추천해줘."
+  },
+  {
+   "id": "F-M14",
+   "set": "final",
+   "kind": "mention",
+   "expected": [],
+   "text": "연차 신청은 어디서 하는지 알려줘."
+  },
+  {
+   "id": "F-M15",
+   "set": "final",
+   "kind": "mention",
+   "expected": [],
+   "text": "파이썬에서 리스트 컴프리헨션 문법 알려줘."
+  },
+  {
+   "id": "T-A01",
+   "set": "tuning",
+   "kind": "alarm",
+   "expected": [
+    "OPS-001"
+   ],
+   "title": "Filesystem usage warning",
+   "body": "/var 파티션 88% 사용 중, 로그 디렉터리가 큼"
+  },
+  {
+   "id": "T-A02",
+   "set": "tuning",
+   "kind": "alarm",
+   "expected": [
+    "APP-002"
+   ],
+   "title": "Tomcat busy threads 200/200",
+   "body": "요청 큐 적체, 외부 결제 API 응답 지연"
+  },
+  {
+   "id": "T-A03",
+   "set": "tuning",
+   "kind": "alarm",
+   "expected": [
+    "MQ-002"
+   ],
+   "title": "DLQ depth increasing",
+   "body": "order.dlq 길이 1200 증가 중, 동일 메시지 ID가 반복됨"
+  },
+  {
+   "id": "T-A04",
+   "set": "tuning",
+   "kind": "alarm",
+   "expected": [
+    "CACHE-002"
+   ],
+   "title": "DB CPU spike every day at 00:00",
+   "body": "인기 상품 캐시 키가 자정에 일괄 만료되는 것으로 보임"
+  },
+  {
+   "id": "T-A05",
+   "set": "tuning",
+   "kind": "alarm",
+   "expected": [],
+   "title": "Jenkins build queue stuck",
+   "body": "에이전트 3대 offline, 빌드 대기 20건"
+  },
+  {
+   "id": "T-M01",
+   "set": "tuning",
+   "kind": "mention",
+   "expected": [
+    "NET-001"
+   ],
+   "text": "서비스 이름으로 호출하면 가끔 Name or service not known 오류가 나요"
+  },
+  {
+   "id": "T-M02",
+   "set": "tuning",
+   "kind": "mention",
+   "expected": [
+    "SEC-001"
+   ],
+   "text": "개발자 PC에서 토큰이 들어 있는 .env 파일이 푸시된 것 같아요. 대응 절차 알려줘"
+  },
+  {
+   "id": "T-M03",
+   "set": "tuning",
+   "kind": "mention",
+   "expected": [
+    "DEPLOY-001"
+   ],
+   "text": "배포 후 에러율이 올라갔을 때 롤백은 언제 결정해?"
+  },
+  {
+   "id": "T-M04",
+   "set": "tuning",
+   "kind": "mention",
+   "expected": [
+    "BATCH-001"
+   ],
+   "text": "정산 배치가 갑자기 느려졌어요. 스키마 변경 뒤부터예요"
+  },
+  {
+   "id": "T-M05",
+   "set": "tuning",
+   "kind": "mention",
+   "expected": [],
+   "text": "회의실 예약 시스템은 어떻게 쓰는지 알려줘"
+  }
+ ]
+}

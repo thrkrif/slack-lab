@@ -126,12 +126,14 @@ com.slack.lab
 │  ├─ model/                  값 객체·결과 타입 (SlackMessageEvent, HandlingResult, ClaimOutcome, ...)
 │  ├─ port/                   인터페이스: EventPublisher, ProcessingStateStore, QueueDelivery, ChatNotifier,
 │  │                          LlmClient, ThreadLookup, ThreadContextSource, RecoveryStore, HealthProbe, BacklogProbe,
-│  │                          EmbeddingClient·VectorStore (3단계 자리만 잡음)
+│  │                          EmbeddingClient·VectorStore·DocumentSource·IndexLock (M24.5b 계약 확정, 구현체는 M25~M27)
 │  └─ service/                SlackEventHandler, EventProcessor(선점→처리→확정→ACK), RetryPolicy,
 │                             RecoveryService, SlackThreadContext, RetryRelay, UnknownResolver, BacklogReporter(BacklogProbe 포트)
 ├─ adapter/                   구현체 — 서로를 모른다
 │  ├─ alert/                  AlertController(/alerts/{source}, 시크릿 인증), CloudWatchAlertNormalizer(SNS), AlertConfig (M23)
-│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22)
+│  ├─ docs/                   LocalMarkdownDocumentSource(DocumentSource), DocsConfig → IndexingService (M27)
+│  ├─ embedding/              OpenAiCompatibleEmbeddingClient(EmbeddingClient), EmbeddingConfig (M26)
+│  ├─ postgres/               PostgresProcessingStateStore(+RetryOutbox), PostgresRecoveryStore, PostgresMaintenance, PostgresBacklogProbe, PostgresConfig (M20~M22), PostgresVectorStore (M25), PostgresIndexLock (M27)
 │  ├─ rabbitmq/               RabbitBroker, RabbitEventPublisher(+EventRepublisher), RabbitConsumer, RabbitDelivery, RabbitReactionConsumer, RabbitBacklogProbe, RabbitConfig (M21~M22)
 │  ├─ slack/                  SlackClient(ChatNotifier), SlackThreadClient(ThreadLookup), SlackEventController, ...
 │  ├─ llm/                    OpenAiCompatibleLlmClient, EchoLlmClient
@@ -494,6 +496,26 @@ ADR-8을 **대체**한다(큐·공유 상태 부분). ADR-8의 판단 기준 중
 - **대안**: SQS(AWS 한정), Kafka(이 규모와 메시지별 재시도·DLQ 요구에 과함), Redis 유지(별도 인프라와 자체 Lua 유지 부담), 저장소 없음(같은 알람의 중복 리포트는 UX 문제라 받아들일 수 없음).
 - **대가**: 2단계의 Redis 구현(Lua, 스케줄러, 복구 CLI의 Redis 부분)을 폐기하고 새 어댑터로 다시 만든다. 검증된 것은 **프로토콜**(멱등 키, 선점·임대, 보존 → 상태 → ACK 순서, 결과 불명 처리, 24시간 창)과 실험 설계이며 승계한다. 기반이 바뀌므로 성능·중복·복구 실험(P·D·R)을 다시 수행한다. Postgres가 필수 인프라가 된다. RabbitMQ에는 메시지별 임대가 없어 처리 시간이 길면(LLM 최대 50초) 소비자 타임아웃과 prefetch 설정을 맞춰야 한다.
 - **미결**: CloudWatch 알람 SNS 메시지의 식별 필드 확인, 대표 리포트 갱신(`chat.update`) 시점, Postgres 선점의 실제 지연 측정, 지연 재시도를 TTL 큐로 할지 플러그인으로 할지.
+
+#### ADR-9 보충 (3단계 착수, 2026-10-04)
+
+RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 결과 타입(`EmbeddingResult`·`SearchResult`: Success/TimedOut/Failed)이고, 그 밖의 저장·출처 호출은 `PortResult<T>`다. 검색은 연결 대기와 쿼리 실행을 합친 기한을 받아 넘으면 쿼리를 취소한다. `DocumentHit.score`는 코사인 유사도(클수록 가까움)로 저장소 구현의 거리 척도를 가린다. `DocumentHit`·`SourceDocument.id`에는 파일 경로를 담지 않는다(불투명 공개 ID). `ReferenceList`는 의미 모델이고 Slack 렌더링·이스케이프는 채팅 어댑터 몫이다. 모델·차원 변경 시 전체 재색인은 대기 세대 → 커밋(`beginRebuild`/`commitRebuild`/`abortRebuild`)으로 기존 색인을 지킨다.
+
+**pgvector 어댑터(M25)**: V3 마이그레이션(`rag_generation`·`rag_index_state`·`rag_document`·`rag_chunk`, 차원 없는 `vector`·무인덱스 전수 검색). 문서 교체는 한 트랜잭션이고, 쓰기는 상태 행 `FOR SHARE`·세대 전환은 `FOR UPDATE`로 직렬화하며, 읽기(메타·해시·검색)는 `REPEATABLE READ` 스냅샷이라 전환 중에도 어긋나지 않는다. 검색은 별도 스레드(동시 4개 상한, 초과 시 대기 없이 실패)에서 돌고 기한이 지나면 호출자가 즉시 `TimedOut`으로 반환하며 취소는 비동기로 보낸다(`statement_timeout`이 서버 쪽 안전망). 운영 빈은 M26에서 RAG 스위치와 함께 배선했다.
+
+**RAG 스위치·기동 검사(M26)**: `rag.enabled`(기본 false)가 꺼져 있으면 임베딩·벡터 저장소 빈이 없고 어떤 검사도 하지 않는다(값 검증도 켰을 때만 — 꺼 둔 설정이 틀려도 기동한다). 켜면 `RagGuard`가 모델 ID·차원 필수, 호스트 허용 검사(`rag.allowed-hosts` 정확/접미사/IPv4 CIDR, URL을 파싱해 비교하고 리다이렉트는 따라가지 않음), 임베딩과 LLM 각각의 외부 허용 플래그(`rag.allow-external-embedding`·`rag.allow-external-llm`)를 보고 어긋나면 기동을 거부한다(색인 CLI는 LLM을 안 쓰므로 LLM 검사 제외). 허용했을 때는 호스트 이름만 경고 로그에 남기고 문서 내용은 남기지 않는다. `RagStartupCheck`가 빈 생성 시점에 ① 임베딩 프로브(영구 실패 — 모델 없음·차원 불일치·응답 오류 — 는 거부, 연결 실패·5xx·기한 초과는 경고 후 폴백에 맡김) ② (워커) 색인 메타와 설정의 모델·차원 비교(불일치 거부)를 하고, 큐 소비자는 이 빈을 먼저 만든 뒤 시작해 거부할 기동이 메시지를 처리하는 일이 없다. 유출 정책 검사 `RagGuard`는 `RagStartupCheck`의 생성자 의존이라 허용되지 않은 호스트로 프로브가 나가거나 소비가 시작되기 전에 끝난다(의존이 없으면 순서가 컴포넌트 스캔 순서에 달려 보장되지 않는다). `AppRole.INDEXER`는 웹 포트·큐 소비자 없이 DB·임베딩·벡터 저장소만 갖고 ②를 하지 않는다(전체 재색인이 이 불일치를 푸는 경로). `OpenAiCompatibleEmbeddingClient`는 LLM 클라이언트와 같은 취소 패턴이고 파싱 뒤에도 기한을 다시 본다.
+
+**색인 파이프라인(M27)**: `scripts/rag-index`(= `app.role=indexer`, 웹 포트·큐 소비자 없는 일회성 CLI)가 코어 `IndexingService`를 한 번 실행한다(스케줄러가 같은 서비스를 부를 수 있다). 출처는 `DocumentSource` 포트의 로컬 마크다운 어댑터(`rag.index.docs-dir`, 저장소 밖 경로): 문서 ID는 front matter `id` 또는 파일 이름 stem을 정리한 불투명 공개 ID이고 경로 모양의 ID·중복 ID·심볼릭 링크·1MB 초과는 거부하며, 제목은 해시에 포함한다. 증분 키 = 내용(제목 포함) 해시 + 청킹 설정 + 모델·차원. 한 문서는 모든 청크 임베딩이 성공했을 때만 한 트랜잭션으로 교체한다(일부 실패 시 옛 문서 유지). 한 문서가 실패해도 나머지는 계속하고 실패 목록과 비0 종료 코드(0 성공·1 일부 실패·2 출처/설정·3 다른 색인 진행 중·4 저장소/메타·5 삭제 임계 초과·6 재색인 실패)로 알린다. 삭제는 "출처에 없는 문서만" 하되 `rag.index.max-delete-ratio`(기본 0.5) 초과 시 아무것도 쓰지 않고 멈춘다(`--confirm-delete`로 진행) — 전체 재색인에도 적용한다. 동시 실행은 Postgres advisory lock(`IndexLock` 포트, 연결을 쥐고 있다 닫을 때 해제, 쓰기 전 `isHeld()` 확인)으로 막는다. 모델·차원이 바뀌면 `--rebuild`가 대기 세대에 쓰고 전부 성공해야 게시하며, 죽은 실행이 남긴 대기 세대는 다음 실행이 먼저 버린다. 청킹은 문단 단위 묶음(`chunk-size` 기본 800자)이고 한도를 넘는 문단만 `chunk-overlap`만큼 겹쳐 자른다.
+
+**검색 주입·출처·폴백(M28)**: `SlackEventHandler`는 스레드 문맥 조회 뒤·`llmClient.chat` 앞에서 코어 `RetrievalService`(RAG 켠 워커에만 빈이 있고 `Optional`로 주입)를 한 번 부른다. 검색(질의 임베딩 + 벡터 조회)은 LLM 단계 예산 안에서 `min(rag.search-deadline-ms=5초, 남은 예산)` 한 개의 기한을 두 단계가 나눠 쓰고, 쓴 만큼 LLM 몫이 줄며, 기한 뒤에 도착한 결과는 버린다. 결과 타입은 `Found`(임계값 `rag.retrieval.min-score`·문맥 상한 `max-context-chars`·`top-k`를 통과한 조각)·`NoRelevant`(검색 성공, 쓸 문서 없음)·`Unavailable`(오류·기한 초과·예상 못한 예외, 서비스가 예외를 삼켜 변환)이고, **어느 것도 처리 실패나 재시도 사유가 아니다**: RAG 없이 답하며 시도마다 새로 검색한다(결과를 저장하지 않는다). 프롬프트는 `RagPrompt`가 문서를 `<references>` 데이터 블록으로 감싸 지시와 분리하고 문서 안의 `<reference` 태그 변형(공백·제로폭·전각 꺾쇠)을 무력화한다. 알람 이벤트의 검색 질의는 고정 안내문과 바깥 `<alarm>` 표지만 한 번씩 떼고 쓴다. 답변 뒤 덧붙임은 모델이 아니라 서버가 정한다(`ReplyFooter`: 참고 문서 목록 / 근거 없음 / 검색 불가). 코어는 의미만 넘기고 문구·서식·이스케이프는 `ChatNotifier`의 6인자 `postMessage`를 구현한 `SlackClient`(`SlackFooterRenderer`)가 맡는다 — 제목의 `& < >`는 엔티티로, 서식 문자·제어 문자는 제거하고, 답변 본문의 `<!`·`<@`·`<#`는 멘션이 되지 않게 이스케이프한다. 덧붙임이 없는 호출은 기존 5인자 경로를 그대로 쓴다. 단 RAG를 꺼도 렌더러가 답변 본문의 `<!`·`<@`·`<#`를 이스케이프하는 것은 모든 답변에 적용된다(안전을 위한 의도된 변경이며 "RAG 끔 = 3단계 이전과 완전히 같음"의 유일한 예외다). 검색은 질의마다 live 세대의 모델 ID·차원이 이 프로세스의 설정과 같은지 확인하고 다르면 `INDEX_META_MISMATCH`로 폴백한다(재색인 게시 뒤 워커 재시작 전의 틈). **스레드 문맥의 봇 판별은 fail-closed다**: 봇 ID를 알면 그것으로, 신원 조회가 실패하면 이벤트(서명 검증된 `authorizations`)의 우리 봇 사용자 ID로만 우리 메시지를 가려내고, 판별할 수 없는 봇 메시지는 모델에 넘기지 않으며 경고 로그를 남긴다. 이전 봇 답글의 덧붙임은 스레드 문맥에서 걷어낸다(모델이 서식을 흉내 내 가짜 출처를 쓰지 않게). 실패 안내에는 덧붙임을 붙이지 않는다.
+
+**평가 하니스(M29)**: `docs/rag-eval/`에 가상 문서 20개(한/영/혼합)와 질문 40개(final 30 = 알람형 15 + 멘션형 15, 정답 24 + 없음 6 / tuning 10 = 정답 8 + 없음 2, 두 세트는 겹치지 않음)를 커밋한다. 코어 `RagEvaluator`가 운영과 같은 `RetrievalService`(질의 추출·임베딩·검색·임계값·문맥 상한)로 LLM 없이 잰다: **hit@3** = 정답이 임계값 적용 전 순위의 문서 3개 안(청크 순위를 문서 순위로 접음), **근거 미주입** = 정답 없는 질문에서 임계값·문맥 상한 뒤 주입 0건, 검색 불가는 불합격. 합격선(final만 판정)은 정답 24개 중 20개 이상·정답 없음 6개 중 5개 이상을 정수 비교로 고정하고, 조정은 K·청크·임계값에만 tuning 세트로 한다. 실행은 `scripts/rag-eval --confirm-eval-db`(= indexer 역할의 `--eval`; 현재 DB 색인을 가상 문서로 바꾸므로 `POSTGRES_URL`을 명시한 평가용 DB 전용)이고 기본은 tuning 세트만 돌리며(`--eval.set=final|all`로 명시해야 final 판정) final이 규격(24·6)이 아니면 종료 코드 2로 판정을 거부한다. `--eval.pairs`는 답변 쌍 사람 비교용 빈 표를 낸다. `RetrievalService.rank`/`select`로 순위와 선택을 나눠 평가가 raw 순위를 본다.
+
+**후속 보강(2026-10-05)**: `RetrievalService.select`는 한 조각이 문맥 상한보다 크면 상한까지만 자르고(과거 큰 청크로 색인된 DB 방어), `RagGuard`는 켰을 때 `rag.index.chunk-size ≤ rag.retrieval.max-context-chars`를 설정 단계에서 강제하며, 반응 소비자도 질의 소비자처럼 기동 검사 뒤에 시작한다. 평가 요약은 "정답 문서가 실제 주입됨"을 함께 출력해 임계값을 높여 근거 주입을 지우는 튜닝(hit@K는 그대로, 근거 미주입만 좋아짐)이 드러나게 한다.
+
+**3단계 실측 결론(M30, `EXPERIMENT-LOG.md` §31)**: 임베딩은 **bge-m3**(final hit@3 24/24, 근거 미주입 6/6; nomic-embed-text는 19/24, 4/6으로 불합격). 검색 임계값 `0.54`는 tuning 세트로만 정했고 문맥 상한은 Ollama 4K 컨텍스트에서 조용한 잘림을 피하려고 `1500`자로 낮췄다(프롬프트가 컨텍스트를 넘으면 Ollama가 앞부분을 잘라낸다). LLM은 합격선을 넘은 qwen2.5 3b/7b 중 더 가벼운 **3b를 권장 기본**으로 하고 7b는 선택이다(둘 다 응답 p95 45초 이내, 한자·가나 혼용 실패 0). Ollama `/v1/embeddings`는 `keep_alive`를 무시하므로 임베딩 모델을 상주시키려면 서버의 `OLLAMA_KEEP_ALIVE`를 쓴다(코드는 벤더 API에 묶지 않는다). 임베딩 콜드 적재는 2초대였고 5초 상한을 넘으면 폴백이 흡수한다.
+
+"RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
 
 #### ADR-9 이행 결과 (M22-2, 2026-10-02)
 

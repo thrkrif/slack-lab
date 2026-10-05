@@ -15,6 +15,7 @@ final class PreservedInputJson {
         node.put("event_id", e.eventId());
         node.put("channel", e.channel());
         node.put("user", e.user());
+        node.put("bot_user_id", e.botUserId()); // 큐 본문과 같은 이유(스레드 문맥의 우리 봇 판별 근거)로 재처리에도 남긴다
         node.put("text", e.text());
         node.put("ts", e.ts());
         node.put("thread_ts", e.threadTs());
@@ -42,7 +43,7 @@ final class PreservedInputJson {
         try {
             JsonNode n = mapper.readTree(json);
             return new SlackMessageEvent(text(n, "event_id"), text(n, "channel"), text(n, "user"), text(n, "text"),
-                    text(n, "ts"), text(n, "thread_ts"), null, null, null);
+                    text(n, "ts"), text(n, "thread_ts"), null, null, text(n, "bot_user_id"));
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("입력 역직렬화 실패", ex);
         }

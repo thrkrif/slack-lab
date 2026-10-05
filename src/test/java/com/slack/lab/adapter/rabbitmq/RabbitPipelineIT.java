@@ -69,7 +69,7 @@ class RabbitPipelineIT {
     static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3.13-alpine");
 
     @Container
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(com.slack.lab.TestImages.POSTGRES);
 
     static final ObjectMapper MAPPER = new ObjectMapper();
     static final StateProperties STATE = new StateProperties(1_500, 300, 7, 24);
@@ -132,8 +132,8 @@ class RabbitPipelineIT {
     ChatNotifier notifier() {
         return new ChatNotifier() {
             @Override
-            public SlackSendResult postMessage(String channel, String threadTs, String text, long remainingMs,
-                    ReplyMetadata metadata) {
+            public SlackSendResult postMessage(String channel, String threadTs, String text,
+                    com.slack.lab.core.model.ReplyFooter footer, long remainingMs, ReplyMetadata metadata) {
                 posts.add(metadata.eventId() + "|" + text);
                 return new SlackSendResult.Success("ts-" + posts.size());
             }

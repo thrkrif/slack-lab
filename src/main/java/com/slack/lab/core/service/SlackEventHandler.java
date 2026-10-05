@@ -21,8 +21,13 @@ import com.slack.lab.core.model.ProcessingStage;
 import com.slack.lab.core.model.ReplyMetadata;
 import com.slack.lab.config.SlackProperties;
 import com.slack.lab.core.model.SlackSendResult;
+import com.slack.lab.core.model.ReferenceList;
+import com.slack.lab.core.model.ReplyFooter;
+import com.slack.lab.core.model.Retrieval;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -48,12 +53,22 @@ public class SlackEventHandler {
     private final ProcessingProperties processingProps;
     private final ExperimentProperties experimentProps;
     private final ThreadContextSource threadContext;
+    // RAG를 끄면 비어 있고 흐름은 3단계 이전과 같다(꺼도 동작). 있으면 스레드 문맥 조회 뒤·LLM 호출 앞에서 한 번 검색한다.
+    private final Optional<RetrievalService> retrieval;
     // 테스트가 프로세스를 죽이지 않고 halt 지점 도달만 확인하려고 바꿔 끼운다. 운영 경로는 항상 halt다.
     private Runnable halter = () -> Runtime.getRuntime().halt(137);
 
     public SlackEventHandler(LlmClient llmClient, ChatNotifier chatNotifier, LlmProperties llmProps,
             SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps,
             ThreadContextSource threadContext) {
+        this(llmClient, chatNotifier, llmProps, slackProps, processingProps, experimentProps, threadContext,
+                Optional.empty());
+    }
+
+    @Autowired
+    public SlackEventHandler(LlmClient llmClient, ChatNotifier chatNotifier, LlmProperties llmProps,
+            SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps,
+            ThreadContextSource threadContext, Optional<RetrievalService> retrieval) {
         this.llmClient = llmClient;
         this.chatNotifier = chatNotifier;
         this.llmProps = llmProps;
@@ -61,6 +76,7 @@ public class SlackEventHandler {
         this.processingProps = processingProps;
         this.experimentProps = experimentProps;
         this.threadContext = threadContext;
+        this.retrieval = retrieval;
     }
 
     void setHalter(Runnable halter) {
@@ -92,7 +108,43 @@ public class SlackEventHandler {
         if (event.threadTs() != null && contextBudgetMs > 0) {
             messages.addAll(threadContext.fetch(event, contextBudgetMs));
         }
-        messages.add(LlmMessage.user(event.promptText()));
+
+        // RAG(3단계): 검색 시간도 같은 LLM 단계 예산에서 쓰고, 쓴 만큼 아래 LLM 예산이 줄어든다. 검색이 실패하거나 기한을 넘겨도
+        // 처리 실패나 재시도 사유가 아니다 — RAG 없이 답하고 서버가 안내를 붙인다. 시도마다 새로 검색한다(결과를 저장하지 않는다).
+        ReplyFooter footer = ReplyFooter.NONE;
+        String question = event.promptText();
+        if (retrieval.isPresent()) {
+            long ragStart = System.nanoTime();
+            Retrieval found = retrieval.get().retrieve(event.promptText(), llmBudgetMs(t0));
+            attempt.recordPhase("rag_ms", elapsedMs(ragStart));
+            switch (found) {
+                case Retrieval.Found f -> {
+                    try {
+                        question = RagPrompt.compose(event.promptText(), f.hits());
+                        footer = new ReplyFooter.References(ReferenceList.fromInjected(f.hits()));
+                        log.info("RAG 검색 event_id={} attempt_id={} result=found injected={} elapsed_ms={}", event.eventId(),
+                                attempt.attemptId(), f.hits().size(), f.elapsedMs());
+                    } catch (RuntimeException e) {
+                        // 프롬프트 조립 실패도 RAG 없이 답하는 폴백이다 — 처리 실패·재시도로 번지게 두지 않는다.
+                        question = event.promptText();
+                        footer = new ReplyFooter.SearchUnavailable();
+                        log.warn("RAG 프롬프트 조립 실패 → RAG 없이 진행 event_id={} attempt_id={} reason={}", event.eventId(),
+                                attempt.attemptId(), e.getClass().getSimpleName());
+                    }
+                }
+                case Retrieval.NoRelevant n -> {
+                    footer = new ReplyFooter.NoRelevantDocuments();
+                    log.info("RAG 검색 event_id={} attempt_id={} result=none elapsed_ms={}", event.eventId(),
+                            attempt.attemptId(), n.elapsedMs());
+                }
+                case Retrieval.Unavailable u -> {
+                    footer = new ReplyFooter.SearchUnavailable();
+                    log.warn("RAG 검색 불가 → RAG 없이 진행 event_id={} attempt_id={} error={} elapsed_ms={}", event.eventId(),
+                            attempt.attemptId(), u.error().text(), u.elapsedMs());
+                }
+            }
+        }
+        messages.add(LlmMessage.user(question));
 
         long llmRemainingMs = llmBudgetMs(t0);
         long llmStart = System.nanoTime();
@@ -103,6 +155,7 @@ public class SlackEventHandler {
 
         String text;
         MessageKind kind;
+        ReplyFooter replyFooter = footer;
         if (llmResult instanceof LlmResult.Success success) {
             kind = MessageKind.ANSWER;
             text = success.text();
@@ -124,13 +177,14 @@ public class SlackEventHandler {
                         new Failure(ProcessingStage.LLM, MessageKind.ANSWER, llmError), 0);
             }
             kind = MessageKind.FAILURE_NOTICE;
+            replyFooter = ReplyFooter.NONE; // 실패 안내에는 참고 문서·검색 안내를 붙이지 않는다
             // 알람 리포트에는 "다시 멘션" 안내가 맞지 않는다(멘션할 원 메시지가 없다).
             text = event.ts() == null ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
             log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} error={} final_attempt={}", event.eventId(),
                     attempt.attemptId(), llmError.text(), finalAttempt);
         }
 
-        HandlingResult result = send(event, attempt, t0, text, kind, finalAttempt);
+        HandlingResult result = send(event, attempt, t0, text, replyFooter, kind, finalAttempt);
         log.info("처리 종료 event_id={} attempt_id={} kind={} result={} 총_소요_ms={}",
                 event.eventId(), attempt.attemptId(), kind.code(), result.getClass().getSimpleName(), elapsedMs(t0));
         return result;
@@ -145,8 +199,8 @@ public class SlackEventHandler {
         return Math.min(llmProps.deadlineMs() - elapsedMs(t0), totalRemainingMs(t0) - slackProps.sendDeadlineMs());
     }
 
-    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, MessageKind kind,
-            boolean finalAttempt) {
+    private HandlingResult send(SlackMessageEvent event, AttemptHandle attempt, long t0, String text, ReplyFooter footer,
+            MessageKind kind, boolean finalAttempt) {
         attempt.recordKind(kind);
         if (!attempt.markSending()) {
             // 소유권을 잃었다는 뜻이다 — 이미 다른 시도가 처리 중이거나 끝났으므로 발신하지 않는다.
@@ -156,8 +210,11 @@ public class SlackEventHandler {
 
         long remainingMs = Math.min(slackProps.sendDeadlineMs(), totalRemainingMs(t0));
         long sendStart = System.nanoTime();
-        SlackSendResult sendResult = chatNotifier.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs,
-                new ReplyMetadata(event.eventId(), attempt.attemptId()));
+        ReplyMetadata metadata = new ReplyMetadata(event.eventId(), attempt.attemptId());
+        // 덧붙임이 없으면 3단계 이전과 같은 호출 경로를 쓴다.
+        SlackSendResult sendResult = footer.isNone()
+                ? chatNotifier.postMessage(event.channel(), event.replyThreadTs(), text, remainingMs, metadata)
+                : chatNotifier.postMessage(event.channel(), event.replyThreadTs(), text, footer, remainingMs, metadata);
 
         attempt.recordPhase("send_ms", elapsedMs(sendStart));
 

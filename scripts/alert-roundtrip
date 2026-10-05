@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""알람 입력 왕복 확인(M23·3단계 검증). CloudWatch(SNS) 형식의 알림을 /alerts/cloudwatch로 보내고, 알람 채널에 봇이 올린 리포트를 읽는다.
+실제 테스트 채널에 글이 올라간다(확인 단계 없음). 같은 알람 이름·상태 변경 시각(밀리초)은 같은 작업이므로 실행마다 시각을 새로 만든다.
+
+사용: ALERT_SECRET=... scripts/alert-roundtrip "<알람 이름>" "<알람 설명>" "<상태 변경 사유>" [재전송 횟수=0]
+환경: .env의 SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL(알람 채널과 같아야 한다), ALERT_SECRET(서버와 같은 값), ALERT_URL(기본 http://localhost:8080)
+재전송 횟수 N: 같은 알림을 N번 더 보낸다(SNS 재전송 흉내) — 리포트는 정확히 하나여야 한다.
+
+이번 실행의 리포트만 센다: 우리 봇(user 또는 bot_id)이 쓴 메시지 중 메타데이터의 event_id가 이 알람의 이벤트 ID("alert-" + SHA-256(cloudwatch|계정|
+리전|이름|시각) 앞 16바이트 hex)와 같은 것. 대화 이력은 모든 페이지를 읽어 ts별로 누적한다. 실패 안내는 리포트가 아니라 실패다.
+첫 리포트를 기다리는 데는 180초 상한이 있고, 첫 리포트를 본 뒤에는 상한과 관계없이 15초를 끝까지 더 관찰해 늦은 중복을 잡는다(성공은
+관찰을 마친 뒤에만). 종료 코드: 0 리포트 정확히 1개, 1 없음(시간 초과)·2개 이상·실패 안내, 2 수신 거절(HTTP 200이 아님), 3 Slack API·네트워크 오류
+"""
+import datetime
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_env():
+    env = dict(os.environ)
+    path = os.path.join(ROOT, ".env")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env.setdefault(k, v.strip().strip('"').strip("'"))
+    return env
+
+
+ENV = load_env()
+TOKEN, CHANNEL, SECRET = ENV["SLACK_BOT_TOKEN"], ENV["SLACK_TEST_CHANNEL"], ENV["ALERT_SECRET"]
+URL = ENV.get("ALERT_URL", "http://localhost:8080").rstrip("/")
+
+
+class SlackError(Exception):
+    pass
+
+
+def slack(method, query=None):
+    """Slack Web API 호출. HTTP·네트워크 오류와 ok:false를 모두 SlackError로 통일한다."""
+    req = urllib.request.Request(f"https://slack.com/api/{method}" + ("?" + urllib.parse.urlencode(query) if query else ""),
+                                 headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            res = json.load(r)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise SlackError(f"{method}: {type(e).__name__}") from e
+    if not res.get("ok"):
+        raise SlackError(f"{method}: {res.get('error')}")
+    return res
+
+
+def history(channel, oldest, slack_fn):
+    """oldest 이후의 모든 메시지를 페이지를 따라 읽는다."""
+    out, cursor = [], None
+    while True:
+        q = {"channel": channel, "oldest": f"{oldest:.6f}", "limit": 100, "include_all_metadata": "true"}
+        if cursor:
+            q["cursor"] = cursor
+        res = slack_fn("conversations.history", q)
+        out.extend(res.get("messages", []))
+        cursor = (res.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            return out
+
+
+def send(body):
+    req = urllib.request.Request(f"{URL}/alerts/cloudwatch", data=body.encode(), method="POST",
+                                 headers={"Content-Type": "text/plain; charset=UTF-8", "X-Alert-Secret": SECRET})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except (urllib.error.URLError, OSError):
+        return -1  # 수신 서버에 연결하지 못함 → 호출자가 200이 아니므로 종료 코드 2로 처리한다
+
+
+FAILURE_PREFIXES = ("죄송해요, 지금 답변을 만들지 못했어요", "알람 분석을 만들지 못했어요")
+OBSERVE_AFTER_FIRST = 15
+WAIT_FIRST = 180
+ACCOUNT, REGION = "000000000000", "ap-northeast-2"
+
+
+def event_id(name, changed):
+    # CloudWatchAlertNormalizer: "alert-" + SHA-256("cloudwatch|계정|리전|이름|시각")의 앞 16바이트(hex 32자). 공식은 단위 테스트가 고정한다.
+    return "alert-" + hashlib.sha256(f"cloudwatch|{ACCOUNT}|{REGION}|{name}|{changed}".encode()).hexdigest()[:32]
+
+
+def is_report(msg, bot_user, bot_id, eid):
+    meta = (msg.get("metadata") or {}).get("event_payload") or {}
+    ours = msg.get("user") == bot_user or (bool(bot_id) and msg.get("bot_id") == bot_id)
+    return ours and meta.get("event_id") == eid
+
+
+def run(name, desc, reason, repeats, clock=time, send_fn=None, slack_fn=None, out=print):
+    """종료 코드를 돌려준다. clock·send_fn·slack_fn은 테스트가 갈아 끼운다."""
+    send_fn = send_fn or send
+    slack_fn = slack_fn or slack
+    try:
+        auth = slack_fn("auth.test")
+        bot_user, bot_id = auth["user_id"], auth.get("bot_id")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        changed = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}+0000"
+        eid = event_id(name, changed)
+        alarm = {"AlarmName": name, "AlarmDescription": desc, "NewStateValue": "ALARM", "NewStateReason": reason,
+                 "StateChangeTime": changed, "Region": REGION, "AWSAccountId": ACCOUNT,
+                 "Trigger": {"MetricName": "PendingThreads", "Namespace": "Custom/Hikari"}}
+        body = json.dumps({"Type": "Notification", "MessageId": f"m-{int(clock.time() * 1000)}",
+                           "Message": json.dumps(alarm, ensure_ascii=False)}, ensure_ascii=False)
+        since = clock.time() - 1
+        codes = [send_fn(body) for _ in range(1 + repeats)]
+        out(f"수신 응답 {codes}")
+        if any(c != 200 for c in codes):
+            return 2
+        deadline = clock.time() + WAIT_FIRST
+        first_seen, found = None, {}
+        while True:
+            for m in history(CHANNEL, since, slack_fn):
+                if is_report(m, bot_user, bot_id, eid):
+                    found[m["ts"]] = m  # 폴링마다 덮어쓰지 않고 ts별로 누적한다(늦게 온 중복도 남는다)
+            if found and first_seen is None:
+                first_seen = clock.time()
+            if first_seen is not None and clock.time() - first_seen >= OBSERVE_AFTER_FIRST:
+                break
+            if first_seen is None and clock.time() >= deadline:
+                break
+            clock.sleep(2)
+    except SlackError as e:
+        out(f"Slack 오류: {e}")
+        return 3
+    if not found:
+        out("시간 초과: 이 알람의 리포트 없음")
+        return 1
+    mine = [found[k] for k in sorted(found)]
+    out(f"이 알람의 봇 메시지 {len(mine)}개 (첫 리포트까지 {first_seen - since:.1f}s, 이후 {OBSERVE_AFTER_FIRST}s 관찰 완료)")
+    for m in mine:
+        out("-----")
+        out(m.get("text", ""))
+    out("-----")
+    if any(m.get("text", "").startswith(FAILURE_PREFIXES) for m in mine):
+        out("실패 안내가 올라왔다")
+        return 1
+    if len(mine) != 1:
+        out(f"리포트가 정확히 1개여야 하는데 {len(mine)}개다")
+        return 1
+    return 0
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.exit(__doc__)
+    sys.exit(run(sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 0))
+
+
+if __name__ == "__main__":
+    main()

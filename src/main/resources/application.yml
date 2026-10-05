@@ -21,6 +21,22 @@ slack:
   signing-secret: ${SLACK_SIGNING_SECRET:}
   bot-token: ${SLACK_BOT_TOKEN:}
 
+# 3단계 RAG(기본 꺼짐 — 꺼도 기존 흐름 그대로). 켜려면 모델 ID·차원이 필요하다(기본값 없음). 외부 호스트는 허용 플래그가 있어야 한다.
+rag:
+  enabled: ${RAG_ENABLED:false}
+  embedding-base-url: ${RAG_EMBEDDING_BASE_URL:http://localhost:11434/v1}
+  embedding-model: ${RAG_EMBEDDING_MODEL:}
+  embedding-dimension: ${RAG_EMBEDDING_DIMENSION:0}
+  allow-external-llm: ${RAG_ALLOW_EXTERNAL_LLM:false}
+  allow-external-embedding: ${RAG_ALLOW_EXTERNAL_EMBEDDING:false}
+  index:
+    docs-dir: ${RAG_DOCS_DIR:}
+  retrieval:
+    # 기본값은 코드(RagRetrievalProperties)가 정한다 — M30 실측값. 환경변수로 덮어쓸 때만 쓴다.
+    top-k: ${RAG_RETRIEVAL_TOP_K:3}
+    min-score: ${RAG_RETRIEVAL_MIN_SCORE:0.54}
+    max-context-chars: ${RAG_RETRIEVAL_MAX_CONTEXT_CHARS:1500}
+
 llm:
   client: ${LLM_CLIENT:ollama}
   base-url: ${LLM_BASE_URL:http://localhost:11434/v1}

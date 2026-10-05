@@ -15,6 +15,7 @@ import com.slack.lab.core.service.RetryRelay;
 import com.slack.lab.core.service.UnknownResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -26,7 +27,7 @@ import org.springframework.context.annotation.Configuration;
 class PostgresConfig {
 
     @Bean(destroyMethod = "close")
-    @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.ALL})
+    @ConditionalOnRole({AppRole.WORKER, AppRole.RECOVERY, AppRole.INDEXER, AppRole.ALL})
     HikariDataSource postgresDataSource(PostgresProperties props) {
         if (props.password().isBlank()) {
             throw new IllegalStateException("postgres.password(POSTGRES_PASSWORD)가 비어 있다. .env에 값을 넣는다.");
@@ -53,6 +54,21 @@ class PostgresConfig {
     @ConditionalOnRole({AppRole.WORKER, AppRole.ALL})
     PostgresProcessingStateStore processingStateStore(HikariDataSource ds, StateProperties state, ObjectMapper mapper) {
         return new PostgresProcessingStateStore(ds, state, mapper);
+    }
+
+    /** RAG 벡터 저장소(M25 어댑터, M26 배선). rag.enabled=true일 때만 만든다 — 꺼도 동작한다. */
+    @Bean
+    @ConditionalOnRole({AppRole.WORKER, AppRole.INDEXER, AppRole.ALL})
+    @ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true")
+    PostgresVectorStore vectorStore(HikariDataSource ds, com.slack.lab.config.RagProperties rag) {
+        return new PostgresVectorStore(ds, new com.slack.lab.core.model.IndexMeta(rag.embeddingModel(), rag.embeddingDimension()));
+    }
+
+    @Bean
+    @ConditionalOnRole(AppRole.INDEXER)
+    @ConditionalOnProperty(prefix = "rag", name = "enabled", havingValue = "true")
+    PostgresIndexLock indexLock(HikariDataSource ds) {
+        return new PostgresIndexLock(ds);
     }
 
     @Bean

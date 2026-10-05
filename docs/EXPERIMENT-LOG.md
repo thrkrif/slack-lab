@@ -981,3 +981,162 @@ MAJOR: SNS 구독 확인 URL이 로그에 없어 구독을 확인할 수 없었�
 ### 23.1 리뷰 대응 (codex 위임, MAJOR 0·MINOR 4)
 
 참고: 이 회차 codex는 `--model/--effort`를 프롬프트에 넣어 설정이 적용되지 않았고 `gpt-6-astra`/medium으로 돌았다(`omc ask`에는 모델 플래그가 없고 `~/.codex/config.toml`을 따른다 — 이후 sol/low). MINOR 반영: ① 재시도 저장 때 `kind` 누락 → 함께 저장하고 테스트 단언 추가 ② 수동·자동 완료가 `error_code/error_detail`을 지우지 않음 → 지우고 회귀 테스트 ③ 실패 안내 발신 중 예상 못한 예외가 `ANSWER`로 기록됨 → `AttemptHandle.recordKind`로 실제 종류를 전달하고 테스트 추가 ④ 작업 디렉터리 때문에 하위 경로에 생긴 `.omc` 상태 파일이 스테이징됨 → 제거, `.gitignore`에 `**/.omc/state/` 추가. 알려진 불안정 테스트: `임대가_유효하면_갱신되고_BUSY로_지켜진다`는 실제 sleep 기반이라 부하가 큰 전체 빌드에서 한 번 실패했고(재실행 2회 통과) 이번 변경과 무관하다.
+
+## 24. 3단계 M24.5a 임베딩 스파이크 (2026-10-04)
+
+상세는 `docs/spikes/rag-embedding-spike.md`. 요약: Ollama 0.34.0의 `/v1/embeddings`가 OpenAI 호환으로 동작하고(배열 입력 포함, 없는 모델은 404 JSON), bge-m3는 1024차원·L2 정규화 벡터를 돌려준다. 콜드 1.18~2.19s, 웜 약 0.05s, 적재 메모리 673MB. 검색 상한 5s 안에 콜드도 들어오지만 채팅 모델과의 동시 적재는 M30에서 잰다. 멈춤 조건(임베딩 미지원)은 해당 없음. 이 절은 설계 입력이며 합격 판정이 아니다.
+
+## 25. 3단계 M24.5b RAG 포트 계약 확정 (2026-10-04)
+
+코드는 포트·모델·테스트뿐이고 구현체는 없다(M25~M27). 검증: `./gradlew build` 통과(`ArchitectureTest` 포함, 포트·모델이 인프라 라이브러리와 `com.pgvector..`를 모름), 신규 `ReferenceListTest`(문서 ID 중복 제거·주입 0건 생략·검색 성공(빈 결과)과 장애 구분·벡터 방어적 복사). 외부 왕복·오류 유도는 구현체가 생기는 M25부터 해당한다.
+
+### 25.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 2·MINOR 3)
+① MAJOR 전체 재색인 경로 없음 → `VectorStore.beginRebuild/commitRebuild/abortRebuild`(대기 세대, 중단해도 기존 색인 보존) 추가, `IndexMeta`에서 청킹 해시를 빼고 문서별 증분 키에 접음 ② MAJOR 문서 ID로 경로 노출 가능 → `SourceDocument.id`를 불투명 공개 ID로 계약(경로 금지) ③ MINOR `float[]` 가변성 → 방어적 복사·테스트 ④ MINOR `retryable` 의미 → 색인 CLI 재시도 판단 전용, 질의 임베딩 실패는 RetryRequested를 만들지 않음 명시 ⑤ MINOR `PortResult.Ok`→`Success`.
+
+## 26. 3단계 M25 pgvector 기반 (2026-10-04)
+
+변경: compose·테스트 이미지를 `pgvector/pgvector:pg16`으로 교체(테스트 5개는 `TestImages.POSTGRES` 한 곳으로), V3 마이그레이션, `PostgresVectorStore`(운영 빈 없음 — M26에서 배선). 이미지는 RAG를 꺼도 공통이다(ADR-9 보충).
+
+검증: ① `PostgresVectorStoreTest` 16건(실제 pgvector Postgres) — 메타 초기화·불일치 거부, 코사인 유사도 순서·점수, 문서 재삽입 시 옛 청크 없음, 차원 불일치·삽입 중 실패(기본키 위반) 때 옛 문서 보존(롤백), 삭제, 비유한 값 거부, 전체 재색인(커밋 전 기존 보존·커밋 시 전환·중단 시 기존 유지·동시 재색인 거부), **검색 기한(오류 유도)**: `ACCESS EXCLUSIVE` 잠금으로 검색을 막자 400ms 기한에 `TimedOut`(1.5s 안), 서버에 활성 쿼리가 남지 않음, 잠금 해제 후 정상 검색 / 막힌 검색 4개가 쌓이면 다음 검색은 대기 없이 `search_saturated` ② `./gradlew build` 전체 통과(옮긴 통합 테스트 5개 포함) ③ **compose 이미지 외부 확인**: 별도 프로젝트·새 볼륨으로 `docker compose -p ragcheck up -d postgres` → `CREATE EXTENSION vector`(0.8.7) 성공, 코사인 거리 질의 동작, `down -v`로 정리. 사용자의 기존 `postgres-data` 볼륨은 건드리지 않았다.
+
+**사용자 조치 필요(멈춤 지점)**: 기존 alpine 볼륨(`postgres-data`)을 쓰던 로컬 DB는 collation이 달라 새 이미지로 바로 올리면 텍스트 인덱스가 어긋날 수 있다. 데이터가 필요하면 먼저 `pg_dump`로 백업하고, 필요 없으면 `docker compose down -v`로 볼륨을 지운 뒤 올린다(로컬 상태 DB는 초기화 전제, M24와 동일).
+
+### 26.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 3·MINOR 2)
+① MAJOR 읽기 중 `commitRebuild`가 이전 세대를 지우면 조회가 어긋남 → 메타·해시·검색을 `REPEATABLE READ` 스냅샷으로 ② MAJOR 취소(`Statement.cancel`)가 호출자를 붙잡음(기본 취소 통신 10초) → 취소를 별도 풀에서 비동기로, 호출자는 기한에 반환 ③ MAJOR 실행 전 취소 무시·무제한 스레드 → 포기 플래그로 새 문장 시작 차단, 검색 풀 동시 4개 상한과 포화 시 즉시 실패, `statement_timeout`은 서버 쪽 안전망 ④ MINOR 테스트에서 store 미종료 → `@AfterEach close()`, 포화 테스트 추가 ⑤ MINOR 읽기 도중 커밋·연결 풀 고갈·취소 통신 지연 테스트는 미작성(알려진 공백).
+
+## 27. 3단계 M26 임베딩 어댑터·RAG 스위치·기동 검사 (2026-10-04)
+
+변경: `RagProperties`(`rag.*`, 기본 꺼짐), `RagGuard`(호스트 허용·모델/차원 필수·외부 허용 플래그 독립), `OpenAiCompatibleEmbeddingClient`(OpenAI 호환 `/embeddings`), `RagStartupCheck`(임베딩 프로브 + 색인 메타 비교), `AppRole.INDEXER`, `PostgresVectorStore`·임베딩 빈 배선(`rag.enabled`일 때만), 큐 소비자가 기동 검사를 먼저 만들도록 의존. `ArchitectureTest` 허용 설정 목록에 `RagProperties` 추가.
+
+검증: ① 단위: `RagGuardTest`(URL 파싱 우회 `localhost.evil.com`·`http://localhost@evil.com`·`127.0.0.1.evil.com`·정수 IP·비 http 거부, 접미사·CIDR 허용, 임베딩/LLM 독립 플래그, Echo LLM·색인 역할 LLM 검사 제외, RAG 꺼짐+잘못된 설정도 기동, 실제 바인딩 컨텍스트에서 위반 시 실패·허용 시 기동), `RagStartupCheckTest`(색인 메타 일치/없음/불일치/읽기 실패, 프로브의 영구 실패 거부·일시 실패 경고), `OpenAiCompatibleEmbeddingClientTest`(정상, 차원 불일치, 404 재시도 불가·503 재시도 가능, 깨진 응답, 기한 초과 400ms→1.5s 안 반환, 연결 거부, 예산 0, 리다이렉트 비추종) ② 통합 `RoleWiringIT`(실제 RabbitMQ·pgvector Postgres): RAG 꺼짐=빈 없음, 켜짐=워커/색인 역할 배선, 색인 역할은 웹 컨텍스트·소비자·LLM 없음, 외부 LLM 미허용 거부, **색인이 다른 모델이면 워커 기동 거부 + 이벤트 큐 소비자 0명** + 같은 상태에서 색인 역할은 기동 ③ **실제 환경(오류 유도)**: 별도 compose 프로젝트의 새 볼륨 Postgres와 실제 Ollama bge-m3로 `bootRun`(indexer 역할) — 정상(`임베딩 모델 확인됨 model=bge-m3 dimension=1024 elapsed_ms=2197`, 콜드), 차원 768 → `embedding_dimension_mismatch:got=1024 expected=768`로 기동 거부, 없는 모델 → `embedding_http_error:404` 거부, 허용 목록 밖 호스트 → `RAG 설정 위반: ... rag.allow-external-embedding=true` 거부, `--rag.allow-external-embedding=true` → 경고 로그 한 줄(호스트만) 후 기동·프로브 성공(144ms, 웜), RAG 꺼짐+외부 URL → 영향 없이 기동. 측정 뒤 `ollama stop`, 임시 Postgres `down -v`.
+
+### 27.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 3·MINOR 3)
+① MAJOR `@NotBlank/@Positive`가 RAG 꺼짐에도 적용 → 어노테이션 제거, `RagGuard`가 켰을 때만 검사(꺼짐+잘못된 설정 기동 테스트) ② MAJOR 검사가 `ApplicationRunner`라 큐 소비자(빈 초기화 중 시작)가 먼저 돌 수 있음 → `RagStartupCheck`를 빈 생성 시점 게이트로 바꾸고 `RabbitConfig.rabbitConsumer`가 먼저 만들게 함, 소비자 0명 검증 ③ MAJOR 파싱 뒤 기한 미확인 → 파싱 후 전체 기한 재확인, 늦은 성공 폐기 ④ MINOR 색인 역할에 LLM 검사 적용 → 제외 ⑤ MINOR `close()`가 HTTP 클라이언트를 안 닫음 → `shutdownNow()` ⑥ MINOR 영구 오류 정책 불명확 → 비재시도 실패는 모두 거부로 통일, 프로브 분기 테스트 추가. 알려진 공백: 늦은 성공 폐기(③)와 `close()` 중 진행 요청 정리(⑤)의 전용 테스트는 없다. 
+
+## 28. 3단계 M27 색인 파이프라인 (2026-10-04)
+
+변경: 코어 `IndexingService`·`MarkdownChunker`·`IndexReport`, 어댑터 `LocalMarkdownDocumentSource`·`PostgresIndexLock`·`RagIndexRunner`(+비활성 안내 러너)·`DocsConfig`, `scripts/rag-index`, `rag.index.*` 설정. 상세는 ARCHITECTURE ADR-9 보충.
+
+검증: ① 단위·Testcontainers(실제 pgvector): `MarkdownChunkerTest` 6, `LocalMarkdownDocumentSourceTest` 11, `IndexingPipelineTest` 19(처음 색인·변경 없음=임베딩 호출 0, 수정분만 재색인·검색 반영, 삭제, 삭제 임계 중단→`--confirm-delete`, 빈 문서, 부분 실패+재실행 시 실패분만, 재시도 가능/영구 실패, 청킹·모델 변경 시 재색인, 모델 변경은 `--rebuild` 요구, 재색인 성공 시 게시·실패 시 기존 유지·빈 출처 재색인 방어, 잠금 거부(코드 3)·핸들 `isHeld`, 예외로 중단 후 문서 단위 무결·이어받기, 죽은 재색인의 대기 세대 정리, 출처 실패 시 불변, **잠금 세션이 끊기면 더 쓰지 않음**), `RagIndexerIT`(indexer 역할 컨텍스트: 러너→로컬 마크다운→임베딩 HTTP 스텁→pgvector→검색, 웹·소비자 없음, 두 번째 실행 unchanged, 경로 없음이면 색인 불변) ② 전체 `./gradlew build` 통과 ③ **실제 환경**(별도 compose 프로젝트 새 볼륨, 실제 Ollama bge-m3, 저장소 밖 가상 문서, `scripts/rag-index`): 첫 색인 added=4 → 재실행 unchanged=4 → 문서 1개 수정 updated=1 → 문서 1개 삭제(1/4) deleted=1 → **빈 폴더 경로 오류 유도 exit=5 DELETE_ABORTED, 색인 3건 그대로** → **임베딩 서버 단절(포트 9) + 새 문서 exit=1 PARTIAL_FAILURE, `실패 NEW-001 embedding_connect_failed:ConnectException`, 기존 3건 유지** → 복구 후 재실행 added=1(실패분만) exit=0 → 없는 경로 exit=2 SOURCE_FAILED → 임베딩 차원 불일치 설정은 프로브가 기동 거부 → 150개 문서 대량 색인 중 **동시 실행 exit=3 LOCKED** → **`kill -9` 후 청크 없는 문서 0·문서 없는 청크 0·남은 advisory lock 0**(20건 색인된 상태) → 재실행 added=134 unchanged=20 exit=0, 최종 154건. 측정 뒤 `ollama stop`, `down -v`, 가상 문서 삭제.
+
+### 28.1 리뷰 대응 (codex gpt-6.1-sol/low, MAJOR 2·MINOR 5)
+① MAJOR `--rebuild`가 삭제 방어를 생략(빈 폴더 재색인이 확인 없이 전체 삭제) → 대기 세대를 만들기 전에 지금 게시된 색인을 기준으로 방어를 재색인에도 적용 ② MAJOR 잠금 연결이 끊겨도 별도 연결로 계속 씀 → `IndexLock.Handle.isHeld()`(연결 유효 + `pg_locks`에서 이 세션의 advisory lock 확인)를 문서 쓰기·삭제·게시 전에 확인, 잃으면 `lock_lost`로 멈추고 대기 세대는 건드리지 않음(확인과 쓰기 사이의 짧은 틈은 남는다 — 분산 락 보증이 아니다) ③ MINOR `abortRebuild` 실패 무시 → 보고서·로그에 남김 ④ MINOR 제목만 바꾸면 unchanged → 제목을 해시에 포함 ⑤ MINOR 경로 모양 ID 정리 시 조각이 남음 → 정리하지 않고 `invalid_id`로 거부 ⑥ MINOR front matter 종료선 오판 → 독립 행만 인정, 빈 front matter 처리 ⑦ MINOR NaN 삭제 비율이 방어를 무력화 → `isFinite` 검사. 알려진 공백: 실제 `kill -9`는 자동 테스트가 아니라 위 수동 실측으로만 확인했고(자동 테스트는 예외 전파로 모사), `abortRebuild` 실패 보고와 CLI 종료 코드 전체는 자동 테스트가 없다.
+
+## 29. 3단계 M28 검색 주입·출처·폴백 (2026-10-04)
+
+변경: 코어 `RetrievalService`·`RagPrompt`·`Retrieval`·`ReplyFooter`, `SlackEventHandler` 연동, `ChatNotifier` 6인자 오버로드, `SlackFooterRenderer`, `rag.retrieval.*` 설정, `scripts/rag-roundtrip`(합성 서명 app_mention을 실제 테스트 채널에 보내 답글을 출력). 상세는 ARCHITECTURE ADR-9 보충.
+
+자동 검증: `RetrievalServiceTest` 13, `RagPromptTest` 6(태그 변형 7종 무력화·알람 질의 추출·서로게이트), `SlackFooterRendererTest` 8(멘션·링크·서식 이스케이프, 렌더↔`stripFooter` 왕복, 실제 `chat.postMessage` 본문), `SlackEventHandlerRagTest` 12(주입·근거 없음·폴백·예산 차감·LLM 실패 시 덧붙임 없음·재시도 가능 실패 시 RetryRequested 유지·발신 재시도 시 재검색·Unknown은 재검색/재발신 없음·예외 변환·알람 경로·예산 소진 시 검색 안 함), `SlackThreadContextTest`(덧붙임 제거), `RoleWiringIT`, 전체 `./gradlew build` 통과.
+
+**외부 왕복(실제 환경, 합성 이벤트 + 실제 Slack 테스트 채널·Ollama qwen2.5:7b·bge-m3·pgvector·RabbitMQ)**. 색인은 저장소 밖 가상 문서 4건(`scripts/rag-index` added=4). 서버는 호스트 `bootRun`(ALL 역할). 이벤트 전달 경로(ngrok→Slack)는 합성이라 검증하지 않았다.
+- **A (RAG 켬, 임베딩 모델이 밀려난 상태 = 현실적 콜드)**: 세 질문 모두 `embedding_timeout elapsed_ms≈5005`(5초 상한)로 **폴백** — 답변은 정상 전송(`Delivered`, 총 8~15초), 본문 뒤에 "문서 검색을 완료하지 못해 일반 지식으로 답변합니다…" 안내, 재시도 없음. 원인 측정: 채팅 모델(qwen2.5:7b)이 올라간 상태에서 밀려난 bge-m3를 다시 적재하는 첫 호출이 **23.4초**, 이후 호출은 0.06초(둘 다 상주). 설계대로 폴백이 흡수했고, 이 값이 M30(모델 상주 정책·`OLLAMA_MAX_LOADED_MODELS`·상한 조정)의 핵심 입력이다.
+- **B (임베딩 모델을 미리 데운 뒤)**: B1 "커넥션 풀 고갈" 질문 → `result=found injected=2 elapsed_ms=314`, 답변이 가상 문서의 구체 수치(풀 크기 30, connectionTimeout 3초, 알람 80%)를 근거로 나오고 `*참고 문서*` 목록(DB-003, MEM-007)이 붙음. B2 디스크 질문 → OPS-012 근거(`df -h`, `du -sh /var/log/*`) + 목록(OPS-012, CPU-001). B3 "점심 메뉴" → `result=none` + "관련 문서 근거를 찾지 못해…" 안내. **관찰**: 관련 질문에서 두 번째로 주입된 문서(MEM-007, CPU-001)는 질문과 무관했다 → 초기 임계값 `min-score=0.5`가 bge-m3에는 느슨하다(M30에서 튜닝 세트로 올린다).
+- **C (RAG 끔, 같은 질문)**: 수신·답변 정상(15.3초), 일반 지식 답변("커넥션 수를 늘리기…")으로 문서의 구체 수치 없음, 덧붙임 없음, 서버 로그에 `RAG 검색` 줄 0건 — **꺼도 기존 흐름 그대로**. (B1 vs C1이 P2-4 답변 쌍의 첫 기록이다.)
+- **D (RAG 켬, 임베딩 서버 단절 `127.0.0.1:9`)**: 기동은 경고만 하고 계속(`임베딩 서버를 확인하지 못했지만 기동은 계속한다`), 질문에는 연결 거부를 1ms에 감지(`embedding_connect_failed:ConnectException`)해 폴백 안내와 함께 답변 전송, 총 13.9초(LLM 시간), 재시도 없음. (이 회차 모델 답변 끝에 대화 형식 잔여 텍스트가 섞였다 — 모델 생성 품질 문제로 RAG와 무관.)
+측정 뒤 서버·Ollama 두 모델·임시 Postgres/RabbitMQ를 내렸다. 테스트 채널에는 검증 메시지가 남아 있다.
+
+### 29.1 리뷰 대응 (codex가 사용 한도로 실패해 `code-reviewer` 에이전트로 대체, MAJOR 2·MINOR 5)
+① MAJOR 태그 무력화 정규식 빈틈(`< /reference>`, 줄바꿈, 제로폭, 전각 `＜`) → 정규식에 공백·`\p{Cf}` 허용, 전각 꺾쇠 접기, 7종 테스트 ② MAJOR 검색 중 런타임 예외가 재시도·실패로 샐 수 있음 → `retrieve`가 예외를 `Unavailable`로 변환, 캐스트를 sealed switch로, 깨진 행(null) 건너뜀, 프롬프트 조립 실패도 폴백 ③ MINOR 봇 덧붙임이 다음 질문 문맥으로 되먹임 → `ReplyFooter.stripFooter`(cleanText 이전 원문에서) ④ MINOR 답변 본문 `<!channel>` 주입 경로 → 본문의 `<!`·`<@`·`<#` 이스케이프 ⑤ MINOR `minScore` 범위 → −1~1 검증 ⑥ MINOR 서로게이트 쌍·주석 정정 ⑦ 테스트 공백(발신 재시도 시 재검색, Unknown, 예외) 보강. **보류**: `ChatNotifier` 오버로드 통일(기존 목 기반 테스트 호환을 위해 두 경로 유지 — 이유를 인터페이스에 적음), 스레드 4000자 + 문맥 3000자가 Ollama 기본 `num_ctx`(4096 토큰)를 넘을 수 있는지는 M30 측정 항목.
+
+## 30. 3단계 M29 평가 데이터·하니스 (2026-10-04)
+
+변경: `docs/rag-eval/`(가상 문서 20 + 질문 final 30·tuning 10 + README), 코어 `RagEvaluator`·`EvalQuestion`·`EvalReport`·`AnswerFormatChecker`, `RetrievalService.rank`/`select` 분리, `RagEvalRunner`(indexer `--eval`), `EvalSetLoader`, `scripts/rag-eval`.
+
+검증: ① 단위: `RagEvaluatorTest` 8(정답이 임계값 미달이어도 hit으로 셈·청크→문서 접기·K 경계·정답 없음 근거 미주입·검색 불가=불합격·**합격선 경계 20/24 합격 19/24 불합격, 5/6 합격 4/6 불합격**·튜닝 세트는 판정하지 않음·요약에 본문 없음·답변 쌍 양식), `AnswerFormatCheckerTest` 4 ② 데이터 규격 `RagEvalDataTest` 7(문서 20·한/영/혼합 존재, final 30 = 알람 15·멘션 15·정답 24·없음 6이고 두 종류 모두에 정답 없는 질문 존재, tuning 10 = 8·2이고 final과 겹치지 않음, 정답 ID가 실제 문서이고 모든 문서가 final 정답 하나 이상, 실제 경로·토큰 없음, 알람 질문의 질의 추출, 잘못된 질문 파일 거부) ③ 정합성 기준선 `RagEvalLexicalBaselineTest`: **실제 임베딩이 아니라 글자 2-gram 벡터 + 메모리 저장소**로 final 24개 중 **18개 hit**(미스한 질문 ID와 점수는 final을 조정에 쓰지 않으려고 기록하지 않는다), tuning 8/8 — 라벨이 어휘만으로도 대체로 찾아진다는 정합성 확인이며 모델 품질도 합격 판정도 아니다. 이 결과를 보고 데이터나 라벨을 바꾸지 않았다. ④ 통합 `RagEvalRunnerIT`(실제 pgvector, 임베딩 스텁): 색인 → `--eval`로 final 합격 요약(hit@3 6/6, 근거 미주입 1/1), 못 찾으면 MISS와 "판정: 불합격", `--eval.set=tuning`은 final 없이 판정 줄 없음, `--eval.pairs`는 표만, 질문 파일 없음은 이유 출력 ⑤ 전체 `./gradlew build` 통과.
+
+정직한 한계: 실제 임베딩(bge-m3)으로 final을 돌린 결과(합격 여부)는 아직 없다 — M30의 몫이다. 이 단계의 완료는 "하니스가 경계를 맞게 계산하고 데이터가 규격대로이며 CLI가 색인된 DB에서 돈다"까지다.
+
+### 30.1 리뷰 대응 (codex 사용 한도로 `code-reviewer`, MAJOR 2·MINOR 8)
+① MAJOR `scripts/rag-eval`이 `RAG_DOCS_DIR`를 export했지만 `scripts/rag-index`가 `.env`를 다시 읽어 덮어쓸 수 있었음(실제 문서를 `--confirm-delete`로 색인할 위험) → 문서 경로를 **인자**(`--rag.index.docs-dir=`)로 전달, 그리고 **`POSTGRES_URL`을 호출자가 명시**해야 실행(기본 DB 보호)하며 대상 DB를 출력 ② MAJOR `--eval.set` 기본값이 `all`이라 튜닝 때마다 final 순위가 출력됨 → 기본 **tuning**, final은 명시해야 실행, 어휘 기준선 테스트는 final 집계 수치만 출력, 이 로그에서 final 미스 ID 삭제 ③ MINOR 빈 세트가 공허하게 합격 → `passes()`가 질문 수 0이면 불합격, 러너가 final이 24·6 규격이 아니면 종료 코드 2 ④ MINOR hit@3이 운영 topK에 묶임 → 평가가 `rank(k)`로 `max(topK, 3K)`개를 가져와 문서 3개로 센다(주입은 운영 topK 조각만 임계값 통과) ⑤ MINOR 콜드 임베딩으로 첫 질문 검색 불가 → 평가 시작 시 데우기(최대 6회) ⑥ MINOR 종료 코드 미검증 → `RagEvalRunner.lastExitCode()`로 통합 테스트가 0/1/2 확인(7건) ⑦ MINOR 불필요한 테스트 래퍼 제거, 알람형 20개 모두 질의 추출 검사 ⑧ 문서화: `AnswerFormatChecker`는 자동 연결하지 않음(M30 사람 기록용), tuning 정답 없음 2개뿐·정답 문서 공유(README 한계).
+
+## 31. 3단계 M30 통합 실측·판정 (2026-10-04)
+
+**환경**: MacBook Air(RAM 16GB, 노트북 한 대), Ollama 0.34.0(호스트), 모델 `qwen2.5:7b`(4.7GB)·`qwen2.5:3b`(2.2GB)·`bge-m3`(673MB 적재)·`nomic-embed-text`(274MB), Docker는 별도 compose 프로젝트의 새 볼륨 `pgvector/pgvector:pg16`(상한 384m)·`rabbitmq:3.13-alpine`(상한 512m), 서버는 호스트 `bootRun`(ALL 역할). Slack은 실제 테스트 채널이지만 **이벤트는 합성 서명 요청**(`scripts/rag-roundtrip --batch`)이라 Slack→ngrok→수신 경로와 **알람형 Slack 왕복은 이번에 검증하지 않았다**(알람형은 검색 하니스로만 측정). 실험은 이 마일스톤 끝에 한 번 돌렸고 끝나자 서버·Ollama 모델·컨테이너를 모두 내렸다. 평가 데이터·방법은 `docs/rag-eval/README.md`.
+
+### 31.1 검색 품질 (LLM 무관, `scripts/rag-eval`, 실제 임베딩)
+| 임베딩 | tuning hit@3 | tuning 근거 미주입 | 조정한 임계값 | **final hit@3** | **final 근거 미주입** | 판정 |
+|---|---|---|---|---|---|---|
+| **bge-m3**(1024) | 8/8 | 0/2 (당시 기본 임계 0.5) | **0.54** | **24/24** | **6/6** | **합격** |
+| nomic-embed-text(768) | 5/8 | 0/2 | 분리 불가 → 가장 보수적 0.79 | 19/24 | 4/6 | 불합격 |
+- 임계값은 tuning 세트의 점수 분포로만 정했다: bge-m3에서 정답 문서의 최고 점수 0.55~0.77(최저 SEC-001 0.55), 정답 없는 질문 2개의 최고 점수 0.52·0.50 → 사이인 0.54. final은 이 값을 고정한 뒤 **처음** 봤고 그 결과로 값이나 라벨을 바꾸지 않았다. 정답 없음이 2개뿐이라 근거가 약하다. nomic은 정답 없는 질문의 최고 점수(0.70·0.78)가 정답 문서 점수와 겹쳐 임계값으로 분리할 수 없었다(영어 중심 모델이라 한국어 입력에 불리하다는 가설과 맞는다).
+- bge-m3 final에서 정답 질문당 정답이 아닌 문서가 평균 1건 함께 주입됐다(24건/24문항): 임계값 0.54로도 무관 문서가 섞인다. 정답 질문 24개 모두 최소 1건이 주입됐다(임계값 때문에 주입이 0건이 된 질문은 없음). 점수 여유: final 기준 정답 문서 최저 0.58, 정답 없는 질문 최고 0.53(tuning의 정답 없는 질문 최고는 0.52, 정답 문서 최저는 0.55) → 임계값 0.54는 위쪽 여유가 **0.01**뿐이라 다른 데이터에서는 쉽게 흔들린다.
+
+### 31.2 Slack 왕복: 멘션형 15문항(final의 멘션형, 정답 12 + 없음 3) × 구성 3
+| 구성 | 응답 없음 | 실패 안내 | 한자·가나 혼용 | 중복 | 참고 문서 | 근거 없음 안내 | 정상 답변 p50 / **p95** / max |
+|---|---|---|---|---|---|---|---|
+| qwen2.5:7b + RAG 켬 | 0 | 0 | 0 | 0 | 12 | 3 | 10.3s / **30.8s** / 30.8s |
+| qwen2.5:7b + RAG 끔 | 0 | 0 | 0 | 0 | 0 | 0 | 8.1s / 37.4s / 37.4s |
+| **qwen2.5:3b + RAG 켬** | 0 | 0 | 0 | 0 | 12 | 3 | 5.5s / **15.6s** / 15.6s |
+- 참고 문서/근거 없음 안내가 정답 유무와 15/15 일치(7B 켬). 시간은 수신 직후부터 답글이 보일 때까지(2초 간격 폴링 포함, 큐 대기 없음, 표본이 15건뿐이라 **p95는 최댓값과 같다**(nearest-rank, n=15). 즉 표의 p95는 "15건 중 가장 느린 값"이며 통계적 p95가 아니다.
+- **답변 쌍(P2-4, 같은 모델 7B끼리의 끔/켬)** — 질문 F-M12 "replica에서 읽은 데이터가 최신이 아닌데 지연이 클 때 임시로 어떻게 우회하죠?": 끔 = "레디스에서 읽은 데이터가 … 캐시 갱신·타임아웃 조정"(문서 없이 엉뚱한 추측), 켬 = "primary로 읽기 요청을 우회하는 플래그를 켜볼 수 있습니다" + `*참고 문서* • [DB-003] Read replica lag 증가`. F-M01 "결제 서비스에서 DB 연결을 못 얻어…": 끔 = 일반론(연결 수·로그 확인), 켬 = "HikariCP 커넥션 풀의 크기를 확인…느린 쿼리·인덱스 추가" + 참고 문서 목록(DB-001 포함). (3B 켬 답변은 별도 구성이라 쌍으로 쓰지 않았다.)
+- **근거 활용(사람이 읽은 뒤 센 보조 지표: 정답 문서에만 있는 구체 표현이 답변에 들어갔는가, 정답 12문항 중)**: 7B 켬 8, **3B 켬 11**, 7B 끔 1. 3B 켬이 7B 켬보다 문서 표현을 더 많이 옮긴 것으로 **관찰**됐다(12문항, 한 사람이 센 값이라 결론이 아니다). **근거 없음 안내**: 정답 없는 3문항 모두 안내가 붙었고 억지로 문서를 끼우지 않았다(두 켬 구성 모두).
+- 관찰: ① 7B 켬 F-M07 답변이 "…지수 백"에서 끊겼다(원인 미규명, RAG 외 생성 문제 가능) ② 7B 켬 F-M12가 답변 본문에 프롬프트 표지 `<reference id="DB-003">`를 언급했다(이스케이프되어 안전하지만 거슬린다 → 프롬프트에 "태그·ID를 쓰지 말라"를 더하는 후속 개선, 재측정 없이 바꾸지 않았다) ③ 7B 끔 F-M07은 37.4s로 가장 느렸다(모델 생성 길이 편차).
+
+### 31.3 임베딩 콜드/웜과 상주
+- 채팅 모델(7B) 상주 + bge-m3 내림 → 첫 임베딩 **1.4~2.1s**(3회), 웜 0.06s. 서버(bootRun)가 도는 실제 조건에서 `ollama stop bge-m3` 후 질문 3회 → `RAG 검색 elapsed_ms` **2.16~2.51s**(검색 상한 5s 안). **M28에서 본 23.4s는 재현되지 않았다**(6회) — 그때는 서버·컨테이너 기동 직후여서 메모리 압박이 있었을 것으로 **추정**하며 원인은 확인하지 못했다(일회성 관찰로 기록). 그래도 5s 상한을 넘으면 폴백(M28에서 실증)이 흡수한다.
+- Ollama의 `/v1/embeddings`는 요청의 `keep_alive`를 **무시**한다(UNTIL 기본 약 5분), 네이티브 `/api/embed`는 따른다(29분). 규칙 3(벤더를 코드에 박지 않음) 때문에 네이티브 API를 쓰지 않았다. 임베딩 모델을 오래 올려 두려면 서버 환경변수 `OLLAMA_KEEP_ALIVE`로 한다 — 상주시킬지(673MB)는 운영자 선택이고 기본은 하지 않는다.
+
+### 31.4 컨텍스트 4K
+- Ollama는 입력이 컨텍스트(4096)를 넘으면 앞부분을 조용히 잘라낸다: 한글 7,340자가 3,925토큰, 9,000자는 오히려 **2,050토큰**으로 보고됐다(잘림). 스레드 문맥 상한(4,000자) + RAG 문맥 상한(3,000자) + 시스템 프롬프트(≈600자) + 질문 + 답변(512토큰)을 합치면 4K를 넘을 수 있다 → `rag.retrieval.max-context-chars` 기본을 **3000 → 1500**으로 낮췄다(전형적 주입은 3조각 ≈ 1,100자라 영향이 거의 없고, 검색 판정에도 영향이 없다). `OLLAMA_CONTEXT_LENGTH`를 올리면 여유가 생기지만 메모리를 더 쓴다.
+- 이번 왕복은 최상위 멘션이라 스레드 문맥이 없었다. 스레드 안 질문 + RAG 조합은 위 계산으로만 검토했고 Slack 왕복으로 재지 않았다.
+
+### 31.5 판정 (미리 고정한 합격선, PLAN 3단계 M30)
+| 조건 | 결과 | 판정 |
+|---|---|---|
+| final hit@3 ≥ 20/24 | bge-m3 24/24 | ✅ |
+| final 근거 미주입 ≥ 5/6 | bge-m3 6/6 | ✅ |
+| 검색 불가 0 | 0 | ✅ |
+| 정상 답변 p95 ≤ 45s | 3B 15.6s, 7B 30.8s | ✅ |
+| 한자·가나 혼용 최종 실패 0건 | 3B·7B 모두 0/15 | ✅ |
+**미리 고정한 합격선을 모두 충족했다(수행 완료 + 합격).** 기본 모델 규칙(합격선을 넘는 쪽 중 더 가벼운 것) → **임베딩 bge-m3 + LLM qwen2.5:3b를 권장 기본으로**, qwen2.5:7b는 선택 사항(16GB 노트북에서 메모리 여유가 있고 더 긴 답을 원할 때). 2단계 7B 측정값(`§15`)은 보존한다.
+**한계(정직하게)**: ① 멘션형만 Slack 왕복(알람형 Slack 왕복 미검증) ② 구성당 15문항·순차라 p95는 거친 값 ③ 이벤트 전달 경로는 합성 ④ tuning의 정답 없음 2개 ⑤ 근거 활용은 사람이 읽고 센 보조 지표 ⑥ 코드 리뷰는 M28·M29·M30에서 codex 한도로 `code-reviewer`가 대신했다 ⑦ "중복 0"·한자/가나 검사는 **첫 답글만** 본다(첫 답글이 보이면 폴링을 끝내므로 늦게 오는 중복은 잡지 못한다) ⑧ `--batch`는 질문 수만큼 실제 채널에 글을 올린다(확인 단계 없음).
+
+## 32. 3단계 AI-slop 점검 (리뷰어 모드) 뒤 정리 (2026-10-04)
+
+M24.5a~M30에서 추가·변경한 main 소스를 `code-reviewer`로 점검했다(수정 없이 보고만). 판정은 "후속 조치 필요"였고 **동작을 바꾸지 않는** 항목만 처리했다: ① MAJOR 운영에서 쓰이지 않고 코어가 Slack 서식을 파싱하던 `AnswerFormatChecker`와 그 테스트 삭제(참고 문서 줄 형식은 `SlackFooterRendererTest`가 이미 고정한다. §30에 적은 "형식 검사기"는 이 삭제로 더 이상 없다) ② `ReplyFooter`의 틀린 주석 정정(표지·문구 상수를 코어에 두는 이유 = 렌더링과 `stripFooter`의 대칭), `SlackFooterRenderer`의 별칭 상수 제거 ③ sha256 헬퍼를 `HexFormat`으로 단순화 ④ 테스트에서만 쓰이던 `ReferenceList.empty()` 삭제 ⑤ 평가 규격(24·6·20/24·5/6·K=3)을 `EvalReport` 상수로 묶어 판정·검사·요약이 같은 값을 쓰게 함.
+**보류**(위험 대비 이득이 작음): `PortResult`를 꺼내는 instanceof 캐스트 패턴 반복(`IndexingService`·`RagStartupCheck`), 임베딩·LLM 클라이언트의 HTTP 취소 타이머 코드 중복, `SlackEventHandler`의 `footer.isNone()` 분기(기존 5인자 모킹 테스트가 의존). 검증: 전체 `./gradlew build` 통과.
+
+## 33. 3단계 최종 리뷰 반영 (2026-10-04)
+
+최종 게이트 리뷰(`code-reviewer`, 3단계 전체 diff) 판정은 REQUEST CHANGES(MAJOR 2·MINOR 5)였고 모두 반영했다. ① MAJOR **전체 스택(`--profile app`)에서 RAG가 항상 폴백**: `x-app-env`에 `RAG_EMBEDDING_BASE_URL`이 없어 컨테이너 워커가 자기 `localhost`를 써서 임베딩을 못 불렀다(M30은 bootRun으로만 측정해 가려져 있었다) → compose에 임베딩 주소와 `RAG_*` 전달 추가, `docker compose config`로 컨테이너 환경에 변수가 들어가는 것만 확인(**컨테이너 안 왕복은 하지 않았다**) ② MAJOR 검색이 색인 **모델 ID를 확인하지 않음**(기동 때만 비교하므로 같은 차원의 다른 모델로 재색인이 게시된 뒤 워커 재시작 전에는 비교할 수 없는 벡터로 검색) → `PostgresVectorStore`가 기대 모델·차원을 받아 검색마다 live 세대와 비교, 다르면 `INDEX_META_MISMATCH`로 폴백(테스트 추가) ③ MINOR `scripts/rag-eval`의 DB 보호가 `.env`의 `POSTGRES_URL`에 우회됨 → `--postgres.url` 인자로 전달 ④ PLAN 완료 표기를 실제 범위(알람형 Slack 왕복·컨테이너 왕복 제외)로 좁힘 ⑤ `ArchitectureTest`의 불필요한 `RagProperties` 허용 제거 ⑥ 참고 문서 제목 자르기를 코드 포인트 기준으로(서로게이트 테스트 추가) ⑦ RAG를 꺼도 답변 본문 멘션 이스케이프가 적용된다는 점을 ARCHITECTURE에 기록.
+
+## 34. 3단계 아키텍트 서명 검토 반영 (2026-10-04)
+
+구현된 아키텍처에 대한 아키텍트 검토(`architect`) 판정은 WATCH였다. 경계(ArchitectureTest), 결과 타입 폴백, 예산, 메타 이중 방어, 잠금·세대 설계, 소비 시작 순서는 적합하다고 봤고 구조적 우려 하나를 지적했다: **유출 정책 검사 `RagGuard`가 임베딩 프로브·큐 소비 시작보다 먼저 실행된다는 보장이 없다**(독립 `@Component`라 생성 순서가 스캔 순서에 달림). → `RagStartupCheck`가 `RagGuard`를 생성자 인자로 받아 순서를 의존으로 확정, 회귀 테스트 추가(`RagStartupCheck`를 `RagGuard`보다 먼저 등록해도 외부 호스트 설정이면 임베딩이 한 번도 불리지 않고 기동이 거부됨). 추적만 하는 항목: ① `ReplyFooter` 표지 문자열에 Slack mrkdwn이 코어에 있어 두 번째 채팅 어댑터를 붙이면 `stripFooter` 대칭이 깨짐(걷어내기를 스레드 문맥 어댑터로 옮길 후보) ② `select`가 첫 조각을 항상 넣으므로 청크 크기가 `max-context-chars`보다 크면 문맥 상한이 의미를 잃음 → "청크 크기 ≤ 문맥 상한" 불변식을 `RagGuard`에 추가할 후보.
+
+## 35. 3단계 후속 보강과 Codex 독립 재검토 (2026-10-05)
+
+Codex 한도가 풀려 M28~M30의 질의 경로·평가 하니스를 Codex(gpt-6.1-sol/low)로 독립 재검토했다(그동안 `code-reviewer`·`architect` 에이전트가 대신 봤다). 판정 REQUEST CHANGES(MAJOR 3·MINOR 2). 처리: ① MAJOR `scripts/rag-eval`이 `.env`를 읽은 뒤 `POSTGRES_URL`로 평가해 색인한 DB와 평가하는 DB가 달라질 수 있었음 → 호출자의 DB 주소를 `.env` 로딩 전에 `EVAL_DB_URL`로 보존해 두 단계에 같은 값을 인자로 전달 ② MAJOR `select`가 첫 조각은 상한을 넘어도 주입(과거 2,000자 청크로 색인된 DB를 새 설정 워커가 읽으면 상한 초과) → 한 조각이 상한보다 크면 상한까지만 잘라 주입(테스트가 초과 주입을 정상으로 고정하던 것을 수정), 설정 단계에서도 `chunk-size ≤ max-context-chars`를 `RagGuard`가 강제 ③ MINOR 임계값을 높여 근거 주입을 지우면 hit@3은 그대로이고 근거 미주입만 좋아지는 게임화 가능 → 평가 요약에 "정답 문서가 실제 주입됨 n/N"을 추가하고 회귀 테스트 ④ 반응 소비자도 기동 검사 뒤 시작(아키텍트 권고) ⑤ 설정 정리: 컨테이너 임베딩 주소 `RAG_EMBEDDING_BASE_URL_CONTAINER`로 재정의 가능, `application.yml`에 `rag.retrieval.*` 명시 연결.
+**처리하지 않고 결정을 올린 것**: MAJOR 스레드 문맥(`SlackThreadContext`, 2단계 M16 설계)이 봇 신원 조회에 실패하면 다른 앱의 봇 메시지까지 모두 assistant 역할로 모델에 전달한다 — 3단계 범위 밖의 기존 동작이고 fail-closed로 바꾸면 우리 이전 답변도 문맥에서 빠지므로 사용자 결정이 필요하다(PLAN 후속에 기록). **알려진 한계로 둔 것**: 중복 답글은 첫 답글 발견 즉시 관찰을 끝내 늦은 중복을 집계하지 못함(§31 한계 ⑦과 같음), 본문의 Slack 링크 서식(`<https://…>`)은 의도적으로 보존한다(멘션 `<!`·`<@`·`<#`만 이스케이프).
+
+## 36. 스레드 문맥의 봇 판별을 fail-closed로 (2026-10-05)
+
+§35에서 사용자 결정으로 올렸던 항목을 사용자 판단(fail-closed가 타당, 가능하면 이벤트의 신뢰할 수 있는 식별 정보를 먼저 쓰고 없을 때만 제외, 조회 실패는 로그)에 따라 처리했다. 변경(`SlackThreadContext`): 우리 봇 메시지 판별을 `isOurBot`으로 모았다 — ① 봇 ID(`auth.test`)를 알면 `bot_id`가 같을 때만 ② 모르면(조회 실패·ID 없음) 이벤트의 우리 봇 사용자 ID(서명 검증된 페이로드 `authorizations[0].user_id`)가 메시지의 `user`와 같을 때만 ③ 둘 다 없으면 판별 불가이므로 **제외**(이전에는 "모르면 우리 것"으로 assistant 단정). 판별되지 않아 제외한 봇 메시지가 있고 신원 조회가 실패한 상태이면 `event_id`와 건수를 경고 로그로 남긴다. 식별 정보의 보장 범위: 이벤트의 `authorizations`는 Events API 페이로드에 들어 있고 서명 검증을 거치지만 알람 이벤트에는 없다(null → 제외), 메시지의 `user` 필드는 봇 앱 메시지에서 일반적으로 있으나 보장은 아니다(없으면 제외 — 안전한 쪽으로 실패). 대가: 신원 조회가 실패한 순간에는 `user`로 판별되지 않는 우리 이전 답변이 문맥에서 빠질 수 있다. 테스트: `SlackThreadContextTest` 4건 추가·1건 대체(조회 실패 시 사용자 ID 판별, 둘 다 없으면 전부 제외, 봇 ID 없는 식별은 사용자 ID로, 봇 ID가 있으면 사용자 ID가 같아도 봇 ID가 다르면 제외). 전체 빌드 통과.
+
+### 36.1 Codex 리뷰 대응 (gpt-6.1-sol/low, MAJOR 1·MINOR 1)
+① MAJOR 이벤트의 봇 사용자 ID 폴백이 **실제 워커 경로에서는 작동하지 않았다** — 큐 본문 직렬화(`EventMessageJson`)와 재처리 보존 입력(`PreservedInputJson`)이 `botUserId`를 버려 항상 null이었다(새 테스트가 값을 직접 주입해 가려졌음). → 두 직렬화에 `bot_user_id`를 추가하고(이전 형식·알람 이벤트는 null로 읽힘) 왕복·세대 변경·이전 형식 테스트 추가. **부수 효과**: 워커의 `promptText()`가 이전에는 ID를 몰라 "문장 앞의 멘션 전부"를 지웠는데 이제는 설계대로 "우리 봇 멘션만" 지운다(다른 사람 멘션은 질문의 일부로 남음). ② MINOR `user` 필드 누락·공백 ID 사례 테스트 추가(봇 ID가 일치하면 `user`가 없어도 허용, 폴백에서는 제외, 공백 ID는 폴백으로 쓰지 않음).
+
+## 37. 3단계 전체 스택 확인 세션 (2026-10-06)
+
+Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②컨테이너 전체 스택 왕복 ④실제 모델의 알람 자동 리포트 ⑦중복·언어를 한 세션으로 확인했다. **환경**: `docker compose -p ragfull --profile app up --build -d`(별도 프로젝트·새 볼륨 — 사용자의 `slack-lab_postgres-data`는 건드리지 않음; receiver·worker·reactor 컨테이너 + rabbitmq + `pgvector/pgvector:pg16`), 호스트 Ollama(`qwen2.5:3b`, `bge-m3`), 현재 `develop`(PR #58 이후) 코드. 검증용 override(커밋 안 함)로 모델 3B와 알람 입력을 켰고 문서는 호스트에서 `scripts/rag-index`로 색인(added=20). Slack은 실제 테스트 채널, 이벤트는 합성 서명 요청.
+- **②컨테이너 정상 흐름(RAG 켬)**: 워커 기동 로그 `임베딩 모델 확인됨 model=bge-m3 elapsed_ms=2588`(컨테이너→`host.docker.internal` 임베딩 도달 — §33에서 고친 주소 누락이 실제로 해결됨), `LLM 모델 확인됨 qwen2.5:3b`. 관련 질문 → `RAG 검색 result=found injected=3 elapsed_ms=235`, 답변이 문서 수치(풀 크기 30, connectionTimeout 3초, 알람 80%)를 담고 `*참고 문서*`(DB-001 …) 부착, 10.8s. 무관 질문 → `result=none`, "관련 문서 근거를 찾지 못해" 안내, 3.1s.
+- **②오류 유도(임베딩 서버 단절)**: `RAG_EMBEDDING_BASE_URL_CONTAINER=http://host.docker.internal:9/v1`로 워커 재생성(환경 확인됨) → 기동은 경고만 하고 계속(`임베딩 서버를 확인하지 못했지만 기동은 계속한다`), 질문에 `RAG 검색 불가 error=embedding_connect_failed elapsed_ms=7`, 답변 정상 전송(`Delivered`, 6.2s)에 "문서 검색을 완료하지 못해 일반 지식으로 답변합니다…" 안내, 재시도 없음. (처음 한 번은 내 명령 실수로 워커가 재생성되지 않아 무효였고 다시 했다.)
+- **①④알람형 Slack 왕복**(`scripts/alert-roundtrip`, CloudWatch(SNS) 형식을 `/alerts/cloudwatch`로, 시크릿 헤더 인증): RAG 켬 — 같은 알림을 SNS 재전송처럼 **3번**(200×3) 보냈는데 **리포트는 1개**, 13.1s, `RAG 검색 result=found injected=3`, 본문 "원인: HikariCP 커넥션 풀 고갈. 먼저 확인할 것: 느린 쿼리 인덱스 추가, 커넥션 풀 크기 증가, connectionTimeout 줄임." + `*참고 문서* • [DB-001] …`. RAG 끔(같은 알람, 워커 재생성·`RAG_ENABLED=false`) — 리포트 1개, 13.1s, 일반론("연결을 강제로 해제…"), 참고 문서·RAG 로그 없음. 실제 모델이 문서 근거를 활용해 알람 리포트를 자동 생성했으므로 PRD 체크박스 "모니터링 알림 하나로 리포트가 자동 생성된다"에 증거를 연결했다(실제 AWS 연동·CloudWatch 서명 검증은 하지 않음 — 시크릿 헤더 경로).
+- **⑦중복·언어(RAG 켬, 기술 질문 세트, `scripts/p1-load`가 종료 뒤 스레드 전체 답글을 재조회)**: D1 동일 event_id 10회 동시 → http 200×10, 정상 답글 1개·중복 0·실패 안내 0·한자/가나 0 (**RAG 검색 로그도 1건뿐 — 중복 억제가 검색보다 앞섬**), D2 완료 뒤 재전달 → 답글 1개 유지, D3 서로 다른 10건 동시 → 정상 10·유실 0·중복 0·실패 안내 0·한자/가나 0(응답 7.8~58.5s, 워커 1개·LLM 동시성 1이라 순차 처리), RAG 검색은 D3 10건 모두 실행(found 9·none 1), D1·D2는 이벤트당 1회뿐.
+- 메모리(`docker stats`, 부하 후): worker 241MiB·receiver 210MiB·reactor 167MiB(상한 512MiB), postgres 42MiB·rabbitmq 131MiB, Ollama qwen2.5:3b 2.2GB + bge-m3 673MB 적재.
+**끝나고**: 컨테이너·볼륨(`ragfull_*`)·Ollama 모델을 모두 내렸고 임시 override/시크릿 파일도 지웠다. **여전히 미검증(범위 명시)**: ① 실제 Slack 이벤트 → ngrok → 수신 서버 전달 경로(사용자가 Slack 앱 설정에서 Request URL을 ngrok URL로 재등록하고 봇을 멘션해야 함 — AGENTS.md 멈춤 지점; 합성 서명 요청은 같은 수신 컨트롤러·서명 검증을 거치지만 Slack 쪽 이벤트 구독·재전송 동작은 검증하지 않았다) ② 알람 입력은 **시크릿 헤더 인증**만 확인했다(SNS 서명 검증은 구현되어 있지 않음 — ARCHITECTURE M23 한계) ③ 위 수치는 설정당 1회 실행이고 답변 예시는 일반적인 품질을 보장하지 않는다 ④ PRD의 알람 체크박스는 "직접 수신 어댑터 → 실제 LLM → Slack 리포트" 기능 확인으로 한정한다.
+
+### 37.1 Codex 리뷰 대응 (REQUEST CHANGES, MAJOR 2·MINOR 3)
+① MAJOR `scripts/alert-roundtrip`이 전송 2초 전 메시지·다른 봇의 메시지·실패 안내를 리포트로 오인할 수 있었음 → 이번 실행의 알람 이벤트 ID(`alert-` + SHA-256 앞 16바이트)를 스크립트가 다시 계산해 **우리 봇 메시지의 메타데이터 `event_id`와 일치하는 것만** 세고(공식은 `CloudWatchAlertNormalizerTest`가 고정), 실패 안내는 리포트로 세지 않고 실패 처리 ② MAJOR 관찰 시간을 폴링 시작이 아니라 **첫 리포트 발견 뒤 15초**로 계산하고 정확히 1개일 때만 성공 ③ MINOR HTTP가 200이 아니면 종료 코드 2, Slack `ok:false`는 종료 코드 3, 전체 실행 상한 180초 ④ MINOR 문서 범위 명시(위 "여전히 미검증") ⑤ MINOR PLAN 핸드오프 문구·D3 집계(found 9·none 1) 정정. 고친 스크립트를 스택을 다시 올려 확인: 정상(재전송 2회) 이 알람의 리포트 1개·종료 코드 0, 잘못된 시크릿 HTTP 401·종료 코드 2.
+
+### 37.2 Codex 재검토 대응 (REQUEST CHANGES, MAJOR 2·MINOR 5)
+37.1의 스크립트 수정 뒤에도 남아 있던 결함: ① MAJOR 마감(180초) 직전에 첫 리포트를 보면 15초 관찰 없이 성공 → 상한은 "첫 리포트를 기다리는 시간"에만 적용하고 첫 리포트를 본 뒤에는 15초를 끝까지 관찰해야만 성공 ② MAJOR 대화 이력 첫 페이지만 읽고 폴링마다 덮어써 중복·실패 안내가 다음 페이지로 밀리면 놓침 → 모든 페이지를 읽어 `ts`별로 누적 ③ MINOR Slack HTTP·네트워크 오류와 `ok:false`를 모두 종료 코드 3으로 통일, 수신 서버 연결 실패는 종료 코드 2 ④ MINOR 상태 변경 시각을 밀리초로(같은 이름의 동시 실행 충돌 방지) ⑤ MINOR `user`가 없는 봇 메시지도 `auth.test`의 `bot_id`로 인식 ⑥ MINOR 문서의 보장 범위 표현 정정("15초 관찰·180초 상한"은 위처럼 정의). 검증: 가짜 시계·가짜 Slack으로 14개 시나리오(`python3 scripts/test_alert_roundtrip.py` — 정상, 마감 직전 첫 리포트 뒤 관찰 유지, 늦은 중복, 관찰 막바지 중복, 2페이지 중복, 실패 안내, 수신 거절·연결 실패(2), auth 오류(3), 리포트 없음(180초 후 1), bot_id 판별, 다른 봇의 같은 event_id 무시, 마감 직전 첫 리포트 뒤 182초의 늦은 중복, 먼저 본 리포트가 사라져도 누적)를 확인했다. 재검토가 지적한 "테스트가 핵심 회귀를 못 잡음"은 두 회귀(첫 리포트 뒤에도 180초 강제 종료, 폴링마다 누적 초기화)를 직접 주입해 각각 13/14로 **실패하는 것**을 확인한 뒤 원복해 14/14로 닫았다. **실제 Slack으로는 37.1 버전을 한 번 돌렸고(정상 종료 코드 0, 시크릿 오류 2) 이 최종 버전은 가짜 Slack 시나리오로만 검증했다.** 알려진 한계: 전체 180초 상한은 첫 리포트 대기 단계에만 있고 개별 HTTP 요청 지연(요청당 15초)은 상한에 합산하지 않는다.
+
+## 38. 3단계 실제 Slack 이벤트 경로 확인 (2026-10-06)
+
+§37에서 남았던 "실제 Slack 이벤트 → ngrok → 수신 서버" 경로를 사용자가 ngrok(`localhost:8080` 전달)을 띄우고 Slack 앱의 Request URL로 등록한 상태에서 실제 멘션 한 건으로 확인했다. 구성은 §37과 같다(컨테이너 전체 스택 `docker compose -p ragfull --profile app`, 새 볼륨, RAG 켬 bge-m3, `qwen2.5:3b`, 문서 20건 색인). 질문(사용자가 Slack에서 직접 입력): "결제 API에서 커넥션 풀이 고갈돼서 타임아웃이 나는데 원인과 조치가 뭐야?"
+- **수신**: Slack이 보낸 실제 이벤트(`Ev0…`)가 서명 검증을 통과(`ack_delivered=true recv_ms=209`), `slack 수신 retry_num=null`(Slack 재전송 없음), 큐 저장 확인(`enqueue_ms=22`) 뒤 200, 반응 항목도 같이 저장(`reaction_enqueue_ms=13`).
+- **처리**: 워커 `RAG 검색 result=found injected=3 elapsed_ms=161` → LLM 호출 8.5s → `Slack 발신 성공 elapsed_ms=744` → `result=Delivered 총_소요_ms=9444`, 이벤트 처리 완료·종료 기록(`finalized=true`), 적체 스냅샷은 retry/dlq/recovery/queue 모두 0.
+- **Slack 화면**: 멘션 메시지에 👀 반응(`reaction_ms=1291`), 스레드에 봇 답글 **1개** — 문서 수치(풀 크기 30, connectionTimeout 3초, 풀 사용률 80% 알람)를 담고 `*참고 문서* • [DB-001] 커넥션 풀 고갈로 인한 결제 API 타임아웃 • [APP-002] … • [OPS-003] …`가 붙었다(관련 없는 두 문서가 함께 주입되는 점은 §31 관찰과 같다).
+- **한계**: 실제 이벤트는 **한 건**(멘션형, RAG 켬)이다. 실제 Slack 경로에서의 RAG 끔·임베딩 단절·알람형·재전송은 보지 않았고(합성 이벤트로 §29·§37에서 확인) Slack이 재전송하는 상황은 만들지 않았다.
+끝나고 스택·`ragfull_*` 볼륨·Ollama 모델을 내렸다(ngrok 프로세스는 사용자가 관리).

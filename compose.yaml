@@ -24,6 +24,13 @@ x-app-env: &app-env
   RABBITMQ_HOST: rabbitmq
   POSTGRES_URL: jdbc:postgresql://postgres:5432/slacklab
   LLM_BASE_URL: http://host.docker.internal:11434/v1
+  # 3단계 RAG(기본 꺼짐). 컨테이너의 localhost는 호스트 Ollama가 아니므로 임베딩 주소를 LLM과 같이 host.docker.internal로 준다.
+  # 켜려면 .env(또는 셸)에 RAG_ENABLED=true RAG_EMBEDDING_MODEL RAG_EMBEDDING_DIMENSION을 둔다. 문서 색인은 호스트에서 scripts/rag-index.
+  RAG_EMBEDDING_BASE_URL: ${RAG_EMBEDDING_BASE_URL_CONTAINER:-http://host.docker.internal:11434/v1}
+  RAG_ENABLED: ${RAG_ENABLED:-false}
+  RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-}
+  RAG_EMBEDDING_DIMENSION: ${RAG_EMBEDDING_DIMENSION:-0}
+  RAG_RETRIEVAL_MIN_SCORE: ${RAG_RETRIEVAL_MIN_SCORE:-0.54}
 
 services:
   rabbitmq:
@@ -40,7 +47,9 @@ services:
     mem_limit: 512m
 
   postgres:
-    image: postgres:16-alpine
+    # pgvector 확장이 들어 있는 이미지(3단계 RAG, V3 마이그레이션이 extension을 만든다). RAG를 꺼도 같은 이미지를 쓴다.
+    # 주의: 옛 postgres:16-alpine 볼륨(musl)과 collation이 달라 기존 postgres-data 볼륨은 백업(pg_dump) 후 초기화해야 한다.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: slacklab
       POSTGRES_USER: slacklab

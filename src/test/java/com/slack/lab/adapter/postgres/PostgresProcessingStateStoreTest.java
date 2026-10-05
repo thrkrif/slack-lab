@@ -44,7 +44,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class PostgresProcessingStateStoreTest {
 
     @Container
-    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>(com.slack.lab.TestImages.POSTGRES);
 
     static final long LEASE_MS = 400;
     static final StateProperties STATE = new StateProperties(LEASE_MS, 100, 7, 24);
