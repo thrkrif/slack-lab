@@ -103,7 +103,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-06)**: 3단계 완료(`v0.3.0`). 4단계 착수 전. 완료: ADR-5 재검토 기록(LangGraph 보류·Java 워커 유지, 재검토 트리거 3개), ARCHITECTURE §5 단계 표·PRD P2-5·P2-6·열린 질문 반영. **다음**: ① 4단계 요구사항 인터뷰(deep-interview, 열린 결정만): 요청 종류 구분(장애/단순/정보 부족), 검색용·답변용 모델 분리의 이득, 무관 문서 주입(임계값 0.54가 느슨)을 4단계가 다룰지, 런타임 LLM 벤더 선택 범위(로컬 다중 모델 vs 클라우드 opt-in) ② 인터뷰 결과를 PRD §6에 확정하고 4단계 계획 작성 ③ 5단계(n8n 선택 어댑터·모니터링 지표)·설치 자동화는 4단계 뒤. 참고: `docs/EXPERIMENT-LOG.md` §31·§37·§38. 로컬 `postgres-data` 볼륨은 사용자가 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다.
+- **상태(2026-10-06)**: 3단계 완료(`v0.3.0`). 4단계 착수 전. 완료: ADR-5 재검토(LangGraph 보류), 단계 표·PRD 반영, 4단계 범위 인터뷰 → PRD §4 "4단계 범위 확정"(요청 3종·분류·검색 경량 모델·무관 문서는 분류로 흡수·로컬 다중 모델까지). **다음**: 4단계 계획 작성(PLAN.md, 마일스톤·합격선 사전 고정 — 분류 정확도 기준, 3단계 평가 세트 회귀, 모델 분리 전후 지연·메모리 측정 조건)과 사용자 승인(단계 전환은 사용자 요청 시에만, `AGENTS.md` 현재 단계 줄 변경 포함). 5단계(n8n 선택 어댑터·모니터링 지표)·설치 자동화는 4단계 뒤. 참고: `docs/EXPERIMENT-LOG.md` §31·§37·§38. 로컬 `postgres-data` 볼륨은 사용자가 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
