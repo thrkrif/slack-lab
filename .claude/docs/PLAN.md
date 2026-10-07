@@ -105,7 +105,7 @@
 - [x] **M31 스파이크** — 완료(`docs/spikes/classification-spike.md`, `EXPERIMENT-LOG.md` §39): 3b·7b 모두 15/20·장애 재현율 8/8(멈춤선 통과), **3b와 7b는 이 장비에서 동시 상주 불가**(서로 축출, 7b 재적재 8.6s) → 분류 모델 = `llm.model` 구성으로 계속, P2-6 의도 재결정은 사용자 몫
 - [x] **M32 데이터·라벨 정의·하니스·합격선 고정** — 완료(`EXPERIMENT-LOG.md` §40): 세트 tuning 30·final 60(blob 해시 `e8746b55…` 고정), `ClassificationEvaluator`·`ClassificationReport`(합격선 정수 경계 테스트), 분류 off 주입 기준선 final 14/40 < 15 → **C3은 합격선에서 빼고 보고 항목으로**, 판정 구성 3b+3b 고정. 정확도 CLI(`scripts/classify-eval`)는 분류기 어댑터가 생기는 M33에서
 - [x] **M33 계약·분류 어댑터** — 완료(`EXPERIMENT-LOG.md` §41): `LlmTransport` 추출(기존 테스트 23건 무변경 통과), `RequestClassifier` 포트·`OpenAiCompatibleRequestClassifier`, `ClassificationStartupCheck`(큐 소비자 선행), `isAlert()`, `AppRole.EVALUATOR`·`scripts/classify-eval`. tuning 25/30(장애 10/10·단순 10/10·정보 부족 5/10, 오답은 모두 안전한 방향), 프롬프트 3회 상한 도달
-- [ ] **M34 핸들러 분기·단위**
+- [x] **M34 핸들러 분기·단위** — 완료(`EXPERIMENT-LOG.md` §42): `SlackEventHandler`에 `Optional<RequestClassifier>`(9인자 `@Autowired`, 7·8인자 위임), 최상위 멘션만 분류, 알람·스레드 생략, 실패·예외 fail-open, `AskBackPrompt`, 단위 17건·기존 테스트 무변경
 - [ ] **M35 외부 왕복·오류 유도**
 - [ ] **M36 통합 실측·판정**(ADR-10·PRD 체크·EXPERIMENT-LOG)
 - [ ] **4단계 완료** — `develop`→`main` 병합·태그(`v0.4.0`)는 사용자 요청 시에만
@@ -114,7 +114,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-07)**: M31~M33 완료(§39~§41). 판정 구성 = 분류=답변=`qwen2.5:3b`. M33: 분류 어댑터·기동 검사·`scripts/classify-eval`(app.role=evaluator, Postgres 불필요) 완료, tuning 25/30(정보 부족 5/10이 약점, 오답은 안전한 방향), 프롬프트 조정 3회 상한 도달 — final은 아직 안 봤다(M36). **C2 미달 가능성**(tuning 83% < 85%)을 M36 전에 염두에 둘 것. **다음**: M34 핸들러 분기·단위 — `SlackEventHandler`에 `Optional<RequestClassifier>`(8·7인자 위임 생성자 유지, `SlackEventHandlerRagTest`가 8인자 사용), 최상위 멘션만 분류(`isAlert()`·`threadTs != null`은 생략→TROUBLE), SIMPLE·NEEDS_INFO는 검색 생략·푸터 없음, 되묻기는 사용자 메시지 지시 합성, 시도별 라벨 로그(`request_kind`·`classify_ms`·`classify_fallback`), 분류 off 회귀 0, `FullStackWiringIT`류 배선. Ollama·Docker는 내려 있다. 로컬 `postgres-data` 볼륨은 사용자가 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(M36 전). 5단계·설치 자동화는 4단계 뒤.
+- **상태(2026-10-07)**: M31~M34 완료(§39~§42). 판정 구성 = 분류=답변=`qwen2.5:3b`. M33 tuning 25/30(정보 부족 5/10이 약점, 오답은 안전한 방향), 프롬프트 3회 상한 도달, final 미관찰 — **C2 미달 가능성**을 M36에서 처리(미달 시 멈춤). **다음**: M35 외부 왕복·오류 유도 — 호스트 bootRun(`CLASSIFICATION_ENABLED=true CLASSIFICATION_MODEL=qwen2.5:3b`, `LLM_MODEL=qwen2.5:3b`, RAG는 평가용 DB가 필요하므로 켤지 먼저 정한다)에서 합성 서명 이벤트(`scripts/rag-roundtrip` 방식)로 최상위 멘션 3종·되묻기→스레드 답변 왕복, 분류 모델 단절/무효 출력/타임아웃 유도 후 장애 질문 폴백 확인. **Slack 화면 조작·ngrok이 필요하면 멈추고 사용자에게 요청**(합성 이벤트는 불필요). 끝나면 서버·Ollama·Docker 내림. 로컬 `postgres-data` 볼륨은 사용자가 백업(`pg_dump`) 후 `docker compose down -v`로 초기화해야 한다(M36 전). 5단계·설치 자동화는 4단계 뒤.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
