@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# 분류 off 주입 기준선(M32, 4단계 C3). 예: scripts/classify-baseline --confirm-eval-db
+# 평가 DB의 색인을 가상 문서 20개로 바꾼 뒤 단순·정보 부족 질문에 문서가 주입되는지만 센다(LLM 불필요, 임베딩만). scripts/rag-eval과 같은 안전장치를 쓴다.
+# 필요: POSTGRES_URL(평가용 DB를 명시), RAG_ENABLED=true RAG_EMBEDDING_MODEL RAG_EMBEDDING_DIMENSION. 종료 코드: 0 측정 완료, 2 검색 불가·입력 오류
+set -euo pipefail
+cd "$(dirname "$0")/.."
+confirmed=false
+args=()
+for a in "$@"; do
+  if [ "$a" = "--confirm-eval-db" ]; then confirmed=true; else args+=("$a"); fi
+done
+if [ "$confirmed" != true ]; then
+  sed -n '2,5p' "$0" >&2
+  echo "중단: 이 명령은 현재 DB의 RAG 색인을 평가용 가상 문서로 바꾼다. 그래도 진행하려면 --confirm-eval-db를 붙인다." >&2
+  exit 2
+fi
+# 호출자가 명시한 DB 주소를 .env를 읽기 전에 보존한다 — 아래에서 .env를 source하면 POSTGRES_URL이 덮어써져 색인한 DB와 평가하는 DB가
+# 달라질 수 있다(두 단계 모두 이 값을 인자로 넘긴다).
+EVAL_DB_URL="${POSTGRES_URL:-}"
+# 어느 DB를 덮어쓰는지 호출자가 명시해야 한다. 기본값(= .env나 메인 DB)으로 우연히 돌지 않게 환경에 POSTGRES_URL이 있어야 한다.
+if [ -z "$EVAL_DB_URL" ]; then
+  echo "중단: 평가용 DB를 POSTGRES_URL로 명시한다(예: POSTGRES_URL=jdbc:postgresql://localhost:5432/slacklab). 기본 DB를 덮어쓰지 않으려는 안전장치다." >&2
+  exit 2
+fi
+echo "평가용 DB로 사용: ${EVAL_DB_URL} (색인이 가상 문서로 교체된다)" >&2
+# 문서 경로는 환경변수가 아니라 인자로 넘긴다 — scripts/rag-index가 .env를 다시 읽어 환경변수를 덮어쓰기 때문이다.
+# DB 주소도 인자로 넘긴다 — scripts/rag-index가 .env를 다시 읽어 POSTGRES_URL을 덮어쓸 수 있어서(보호 장치가 우회된다).
+scripts/rag-index --confirm-delete "--rag.index.docs-dir=$PWD/docs/rag-eval/documents" "--postgres.url=$EVAL_DB_URL"
+./gradlew -q bootJar -x test
+JAR=$(ls build/libs/*.jar | grep -v -- '-plain' | head -1)
+set -a; source .env; set +a
+APP_ROLE=indexer exec java -jar "$JAR" --spring.main.banner-mode=off --logging.level.root=WARN \
+  --classify-baseline "--postgres.url=$EVAL_DB_URL" "${args[@]+"${args[@]}"}"
