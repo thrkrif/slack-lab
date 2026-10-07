@@ -7,7 +7,10 @@ package com.slack.lab.config;
 public enum AppRole {
     RECEIVER, WORKER, REACTOR, RECOVERY,
     /** RAG 색인 CLI(3단계). 복구처럼 웹 포트 없이 일회성으로 돈다. */
-    INDEXER, ALL;
+    INDEXER,
+    /** 분류 평가 CLI(4단계). Postgres·큐·Slack 없이 분류 모델만 부른다(DB가 필요한 INDEXER와 분리). */
+    EVALUATOR,
+    ALL;
 
     /** 웹 서버가 필요한 역할. ngrok에 노출되는 포트는 수신 서버 하나뿐이어야 한다. */
     public boolean servesHttp() {

@@ -42,4 +42,36 @@ public record ClassificationReport(List<SetResult> sets) {
     public boolean finalPassed() {
         return sets.stream().anyMatch(SetResult::passed);
     }
+
+    /** 사람이 읽는 요약. 오답 행과 혼동 행렬을 함께 보여 줘 어떤 라벨이 어디로 새는지 보게 한다. */
+    public String summary() {
+        StringBuilder sb = new StringBuilder();
+        for (SetResult r : sets) {
+            sb.append("[").append(r.set()).append("] 정확 ").append(r.correct()).append("/").append(r.total())
+                    .append(", 분류 실패 ").append(r.failed()).append(", 장애 재현율 ").append(r.troubleCorrect()).append("/")
+                    .append(r.troubleTotal()).append(", 정보 부족 오판(장애·단순→정보 부족) ").append(r.needsInfoFalse()).append("\n");
+            for (RequestKind gold : RequestKind.values()) {
+                sb.append("  정답 ").append(gold).append(" → ");
+                for (RequestKind pred : RequestKind.values()) {
+                    sb.append(pred).append(" ").append(r.confusion().get(gold).getOrDefault(pred, 0)).append("  ");
+                }
+                sb.append("\n");
+            }
+            for (Row row : r.rows()) {
+                if (!row.correct()) {
+                    sb.append("    오답 ").append(row.question().id()).append(" 정답=").append(row.question().expected())
+                            .append(" 예측=").append(row.predicted() == null ? "실패" : row.predicted().name()).append(" :: ")
+                            .append(row.question().text()).append("\n");
+                }
+            }
+            if (r.judgeable()) {
+                sb.append("  합격선(≥").append(MIN_CORRECT).append("/").append(FINAL_TOTAL).append(", 장애 재현율 ≥")
+                        .append(MIN_TROUBLE_RECALL).append("/20, 정보 부족 오판 ≤").append(MAX_NEEDS_INFO_FALSE).append(") → ")
+                        .append(r.passed() ? "합격" : "불합격").append("\n");
+            } else if (r.set().equals(ClassifyQuestion.FINAL)) {
+                sb.append("  final이 규격(").append(FINAL_TOTAL).append("문항)이 아니라 판정하지 않는다\n");
+            }
+        }
+        return sb.toString();
+    }
 }
