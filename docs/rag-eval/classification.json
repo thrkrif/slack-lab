@@ -1,0 +1,544 @@
+{
+ "questions": [
+  {
+   "id": "CT-T01",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "주문 서비스에서 Hikari 커넥션을 못 얻는다는 에러가 계속 떠요. 풀 크기를 늘리면 되나요?"
+  },
+  {
+   "id": "CT-T02",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "스레드 덤프를 보니 톰캣 워커 스레드가 전부 대기 중이고 응답이 멈췄어요. 어떻게 풀죠?"
+  },
+  {
+   "id": "CT-T03",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "배치 서버 CPU가 새벽마다 100%로 치솟고 작업이 늦어져요. 어디부터 볼까요?"
+  },
+  {
+   "id": "CT-T04",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "RabbitMQ 큐에 메시지가 만 건 넘게 쌓여서 consumer가 못 따라가고 있어요."
+  },
+  {
+   "id": "CT-T05",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "인증서가 만료돼서 사내 API 호출이 SSL 오류로 실패해요. 급하게 어떻게 갱신하죠?"
+  },
+  {
+   "id": "CT-T06",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "캐시 서버 evict가 급증하면서 DB 조회가 두 배로 늘었어요. 원인이 뭘까요?"
+  },
+  {
+   "id": "CT-T07",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "배포한 뒤 에러율이 5%까지 올랐는데 롤백 기준이 어떻게 되죠?"
+  },
+  {
+   "id": "CT-T08",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "서비스 간 호출에서 간헐적으로 이름 해석 실패(DNS)가 나요. 어떻게 확인해요?"
+  },
+  {
+   "id": "CT-T09",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "파드가 CrashLoopBackOff에 빠졌는데 로그에는 아무것도 안 남아 있어요."
+  },
+  {
+   "id": "CT-T10",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "디스크가 95%라고 알람이 왔어요. 뭘 지워도 되는지 확인 절차가 있나요?"
+  },
+  {
+   "id": "CT-S01",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "DLQ가 정확히 뭘 말하는 거예요?"
+  },
+  {
+   "id": "CT-S02",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "커넥션 풀을 쓰는 이유가 뭐죠?"
+  },
+  {
+   "id": "CT-S03",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "TCP와 UDP의 차이를 한 줄로 알려줘."
+  },
+  {
+   "id": "CT-S04",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "회의실 예약은 어디서 해?"
+  },
+  {
+   "id": "CT-S05",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "안녕, 오늘도 수고 많아!"
+  },
+  {
+   "id": "CT-S06",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "REST와 GraphQL 중 언제 뭘 써?"
+  },
+  {
+   "id": "CT-S07",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "캐시 TTL이 무슨 뜻이야?"
+  },
+  {
+   "id": "CT-S08",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "SQL의 INNER JOIN과 LEFT JOIN 차이 알려줘."
+  },
+  {
+   "id": "CT-S09",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "고마워, 이해됐어."
+  },
+  {
+   "id": "CT-S10",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "리눅스에서 파일 권한 755는 무슨 의미야?"
+  },
+  {
+   "id": "CT-N01",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "서비스가 안 돼요."
+  },
+  {
+   "id": "CT-N02",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "방금 그 건 처리됐나요?"
+  },
+  {
+   "id": "CT-N03",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "DB 좀 봐주세요."
+  },
+  {
+   "id": "CT-N04",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "배포하고 나서 이상해요."
+  },
+  {
+   "id": "CT-N05",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "에러가 계속 떠요, 도와주세요."
+  },
+  {
+   "id": "CT-N06",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "그거 다시 해줘요."
+  },
+  {
+   "id": "CT-N07",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "캐시가 문제인 것 같아요."
+  },
+  {
+   "id": "CT-N08",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "응답이 이상해요"
+  },
+  {
+   "id": "CT-N09",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "서버 확인 부탁해요."
+  },
+  {
+   "id": "CT-N10",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "큐가 이상한 것 같은데요."
+  },
+  {
+   "id": "CF-T01",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "결제 API가 커넥션 풀 고갈로 30초 타임아웃을 내고 있어요. 지금 당장 뭘 해야 하죠?"
+  },
+  {
+   "id": "CF-T02",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "주문 테이블 업데이트가 락 대기로 몇 분씩 걸리는데 어떤 쿼리가 막고 있는지 어떻게 찾아요?"
+  },
+  {
+   "id": "CF-T03",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "깃허브에 비밀 키가 올라간 걸 발견했어요. 폐기하고 나서 뭘 점검해야 해요?"
+  },
+  {
+   "id": "CF-T04",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "로그 로테이션이 안 돼서 /var 디스크가 가득 찼어요. 지금 정리하고 재발 막는 법 알려줘."
+  },
+  {
+   "id": "CF-T05",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "로드밸런서 헬스체크가 실패하면서 502가 늘고 있어요. 임계값을 조정해야 하나요?"
+  },
+  {
+   "id": "CF-T06",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "외부 결제사 API가 느려졌더니 우리 서버 스레드가 다 묶여서 전체가 멈췄어요."
+  },
+  {
+   "id": "CF-T07",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "다운스트림이 죽었는데 클라이언트 재시도가 몰려서 상황이 더 나빠지고 있어요."
+  },
+  {
+   "id": "CF-T08",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "DLQ에 같은 메시지가 반복해서 쌓여요. 왜 이럴까요?"
+  },
+  {
+   "id": "CF-T09",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "인기 상품 캐시가 한꺼번에 만료돼서 DB CPU가 치솟았어요. 어떻게 막죠?"
+  },
+  {
+   "id": "CF-T10",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "새 환경에 배포했더니 환경변수가 없어서 앱이 기동에 실패해요."
+  },
+  {
+   "id": "CF-T11",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "pod가 OOMKilled로 계속 재시작해요. 힙 덤프는 어디서 보죠?"
+  },
+  {
+   "id": "CF-T12",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "read replica 지연이 수십 초라 방금 쓴 데이터가 안 읽혀요."
+  },
+  {
+   "id": "CF-T13",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "Redis maxmemory에 도달해서 키가 계속 evict돼요. 캐시 미스율이 급상승했어요."
+  },
+  {
+   "id": "CF-T14",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "야간 배치가 평소보다 두 시간 늦게 끝나고 CPU가 급증했어요."
+  },
+  {
+   "id": "CF-T15",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "TLS 인증서 만료로 모바일 앱 연결이 전부 실패하고 있어요."
+  },
+  {
+   "id": "CF-T16",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "DNS 조회가 실패하면서 서비스 간 호출이 간헐적으로 오류를 내요."
+  },
+  {
+   "id": "CF-T17",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "배포 직후 5xx가 급증했어요. 바로 롤백해도 되는 기준이 있나요?"
+  },
+  {
+   "id": "CF-T18",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "consumer lag이 계속 늘어서 메시지 처리가 한 시간 밀렸어요."
+  },
+  {
+   "id": "CF-T19",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "슬로우 쿼리 때문에 주문 목록 API가 5초 넘게 걸려요. 인덱스를 봐야 하나요?"
+  },
+  {
+   "id": "CF-T20",
+   "set": "final",
+   "expected": "TROUBLE",
+   "text": "CrashLoopBackOff인데 이전 컨테이너의 종료 코드를 어디서 확인하죠?"
+  },
+  {
+   "id": "CF-S01",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "OOM이 무슨 약자야?"
+  },
+  {
+   "id": "CF-S02",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "캐시 스탬피드가 뭔지 개념만 설명해줘."
+  },
+  {
+   "id": "CF-S03",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "헬스체크 엔드포인트는 보통 어떻게 만들어?"
+  },
+  {
+   "id": "CF-S04",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "Kubernetes에서 Pod와 Deployment 차이가 뭐야?"
+  },
+  {
+   "id": "CF-S05",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "점심 메뉴 추천해줘."
+  },
+  {
+   "id": "CF-S06",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "연차 신청 방법 좀 알려줘."
+  },
+  {
+   "id": "CF-S07",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "파이썬 딕셔너리를 값 기준으로 정렬하는 법 알려줘."
+  },
+  {
+   "id": "CF-S08",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "JWT가 뭐고 세션과 뭐가 달라?"
+  },
+  {
+   "id": "CF-S09",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "안녕하세요, 처음 써보는데 인사드려요."
+  },
+  {
+   "id": "CF-S10",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "롤백이랑 롤포워드 용어 차이를 알려줘."
+  },
+  {
+   "id": "CF-S11",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "데이터베이스 인덱스는 왜 쓰는 거야?"
+  },
+  {
+   "id": "CF-S12",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "수고하셨어요, 퇴근합니다!"
+  },
+  {
+   "id": "CF-S13",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "메시지 큐를 쓰는 이유를 간단히 설명해줘."
+  },
+  {
+   "id": "CF-S14",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "HTTPS 인증서는 보통 어떤 기관에서 발급해?"
+  },
+  {
+   "id": "CF-S15",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "자바 가비지 컬렉션이 뭐야?"
+  },
+  {
+   "id": "CF-S16",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "docker run과 docker compose up 차이가 뭐야?"
+  },
+  {
+   "id": "CF-S17",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "비동기와 논블로킹이 같은 말이야?"
+  },
+  {
+   "id": "CF-S18",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "슬랙 스레드에서 답글 다는 방법이 뭐야?"
+  },
+  {
+   "id": "CF-S19",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "Redis와 Memcached 차이를 한두 줄로 알려줘."
+  },
+  {
+   "id": "CF-S20",
+   "set": "final",
+   "expected": "SIMPLE",
+   "text": "재시도 정책에서 지수 백오프가 뭐야?"
+  },
+  {
+   "id": "CF-N01",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "결제 쪽이 이상한 것 같아요."
+  },
+  {
+   "id": "CF-N02",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "아까 알려준 거 다시 확인해주세요."
+  },
+  {
+   "id": "CF-N03",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "배포 끝났는데 확인 한번 해주세요."
+  },
+  {
+   "id": "CF-N04",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "DB가 문제예요."
+  },
+  {
+   "id": "CF-N05",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "알람이 왔는데 어떻게 해야 해요?"
+  },
+  {
+   "id": "CF-N06",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "서비스가 가끔 안 돼요."
+  },
+  {
+   "id": "CF-N07",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "그 서버 좀 봐줘요."
+  },
+  {
+   "id": "CF-N08",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "큐 상태 어때요?"
+  },
+  {
+   "id": "CF-N09",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "에러 났어요 급해요!"
+  },
+  {
+   "id": "CF-N10",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "캐시 확인 부탁드려요."
+  },
+  {
+   "id": "CF-N11",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "뭔가 계속 실패하는데요."
+  },
+  {
+   "id": "CF-N12",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "인증서 관련해서 문의드려요."
+  },
+  {
+   "id": "CF-N13",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "주문이 이상해요."
+  },
+  {
+   "id": "CF-N14",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "로그 좀 봐주세요."
+  },
+  {
+   "id": "CF-N15",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "저번이랑 같은 문제인 것 같아요."
+  },
+  {
+   "id": "CF-N16",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "디스크 관련 문제가 있어요."
+  },
+  {
+   "id": "CF-N17",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "지금 안 되는 거 맞죠?"
+  },
+  {
+   "id": "CF-N18",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "배포가 잘못된 것 같아요."
+  },
+  {
+   "id": "CF-N19",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "파드 상태 좀 알려주세요."
+  },
+  {
+   "id": "CF-N20",
+   "set": "final",
+   "expected": "NEEDS_INFO",
+   "text": "네트워크 쪽 확인해주세요."
+  }
+ ]
+}
