@@ -123,6 +123,19 @@ class OpenAiCompatibleRequestClassifierTest {
     }
 
     @Test
+    void 기동_확인은_호출별_상한을_적용하지_않아_느린_콜드_적재를_흡수한다() throws Exception {
+        // 모델이 내려가 있으면 첫 호출이 호출 상한(0.4초)을 넘는다(M35 실측: 3b 콜드 > 5초). 일반 호출은 폴백하지만 기동 확인은 기다린다.
+        try (var stub = StubOpenAiServer.chatRespondsAfter(content("TROUBLE"), 1_000)) {
+            var c = classifier(stub.baseUrl(), "qwen2.5:3b", 400);
+            var normal = c.classify("q", 60_000);
+            assertThat(((ClassifyResult.Failed) normal).error().code()).isEqualTo(ErrorCode.CLASSIFY_TIMEOUT);
+            var probe = c.probe(5_000);
+            assertThat(probe).isInstanceOf(ClassifyResult.Classified.class);
+            assertThat(((ClassifyResult.Classified) probe).kind()).isEqualTo(RequestKind.TROUBLE);
+        }
+    }
+
+    @Test
     void 남은_예산이_없으면_호출하지_않는다() {
         var failed = (ClassifyResult.Failed) classifier("http://127.0.0.1:1", "m", 5_000).classify("q", 0);
         assertThat(failed.error().code()).isEqualTo(ErrorCode.CLASSIFY_NO_BUDGET);

@@ -57,6 +57,34 @@ class ClassificationStartupCheckTest {
     }
 
     @Test
+    void 기동_확인은_probe로_부르고_기본_구현은_classify로_위임한다() {
+        java.util.List<String> calls = new java.util.ArrayList<>();
+        RequestClassifier recording = new RequestClassifier() {
+            @Override
+            public ClassifyResult classify(String q, long ms) {
+                calls.add("classify:" + q + ":" + ms);
+                return new ClassifyResult.Classified(RequestKind.SIMPLE, 1);
+            }
+
+            @Override
+            public ClassifyResult probe(long ms) {
+                calls.add("probe:" + ms);
+                return new ClassifyResult.Classified(RequestKind.SIMPLE, 1);
+            }
+        };
+        new ClassificationStartupCheck(props("m"), llm(LlmProperties.Client.OLLAMA), recording);
+        assertThat(calls).containsExactly("probe:10000");
+        // 기본 구현(probe 미재정의)은 classify("ping", ms)로 위임한다.
+        var delegating = new java.util.ArrayList<String>();
+        RequestClassifier plain = (q, ms) -> {
+            delegating.add(q + ":" + ms);
+            return new ClassifyResult.Classified(RequestKind.SIMPLE, 1);
+        };
+        plain.probe(7_000);
+        assertThat(delegating).containsExactly("ping:7000");
+    }
+
+    @Test
     void 확인을_끄면_분류기를_부르지_않는다() {
         var off = new ClassificationProperties(true, "m", 5_000, "30m", false);
         RequestClassifier boom = (q, ms) -> {
