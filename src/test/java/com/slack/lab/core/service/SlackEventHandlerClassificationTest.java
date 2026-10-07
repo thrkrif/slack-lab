@@ -220,6 +220,31 @@ class SlackEventHandlerClassificationTest {
     }
 
     @Test
+    void 되묻기_답글의_겹친_물음표만_정리하고_다른_종류의_답은_그대로_둔다() {
+        when(llm.chat(anyList(), anyLong())).thenReturn(new LlmResult.Success("어떤 서버인가요? ?", 10));
+        when(slack.postMessage(anyString(), any(), anyString(), anyLong(), any(ReplyMetadata.class)))
+                .thenReturn(new SlackSendResult.Success("200.1"));
+        handler(returning(RequestKind.NEEDS_INFO), false).handle(mention("그 서버 봐줘요"), attempt, false);
+        var text = ArgumentCaptor.forClass(String.class);
+        verify(slack).postMessage(anyString(), any(), text.capture(), anyLong(), any(ReplyMetadata.class));
+        assertThat(text.getValue()).isEqualTo("어떤 서버인가요?");
+
+        assertThat(AskBackPrompt.tidy("뭐가 문제인가요??")).isEqualTo("뭐가 문제인가요?");
+        assertThat(AskBackPrompt.tidy("언제인가요? 어디인가요?")).as("서로 다른 질문 둘은 그대로").isEqualTo("언제인가요? 어디인가요?");
+    }
+
+    @Test
+    void 단순_질문_답은_그대로_둔다() {
+        when(llm.chat(anyList(), anyLong())).thenReturn(new LlmResult.Success("이게 뭘까? ?", 10));
+        when(slack.postMessage(anyString(), any(), anyString(), anyLong(), any(ReplyMetadata.class)))
+                .thenReturn(new SlackSendResult.Success("200.1"));
+        handler(returning(RequestKind.SIMPLE), false).handle(mention("DLQ가 뭐예요?"), attempt, false);
+        var text = ArgumentCaptor.forClass(String.class);
+        verify(slack).postMessage(anyString(), any(), text.capture(), anyLong(), any(ReplyMetadata.class));
+        assertThat(text.getValue()).isEqualTo("이게 뭘까? ?");
+    }
+
+    @Test
     void RAG를_꺼도_정보_부족은_되묻는다() {
         run(handler(returning(RequestKind.NEEDS_INFO), false), mention("에러 나요"));
 

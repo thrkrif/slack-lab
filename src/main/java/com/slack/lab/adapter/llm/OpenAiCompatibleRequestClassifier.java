@@ -80,7 +80,16 @@ public class OpenAiCompatibleRequestClassifier implements RequestClassifier {
 
     @Override
     public ClassifyResult classify(String question, long remainingMs) {
-        long budgetMs = Math.min(props.timeoutMs(), remainingMs);
+        return classifyWithin(question, Math.min(props.timeoutMs(), remainingMs));
+    }
+
+    /** 호출별 상한({@code classification.timeout-ms})을 적용하지 않는다 — 기동 확인이 모델 콜드 적재를 흡수하게 한다. */
+    @Override
+    public ClassifyResult probe(long remainingMs) {
+        return classifyWithin("ping", remainingMs);
+    }
+
+    private ClassifyResult classifyWithin(String question, long budgetMs) {
         if (budgetMs <= 0) {
             return new ClassifyResult.Failed(ErrorInfo.of(ErrorCode.CLASSIFY_NO_BUDGET), 0, false);
         }

@@ -177,7 +177,8 @@ public class SlackEventHandler {
         ReplyFooter replyFooter = footer;
         if (llmResult instanceof LlmResult.Success success) {
             kind = MessageKind.ANSWER;
-            text = success.text();
+            // 되묻기 답글은 3b가 물음표를 겹쳐 쓰는 형식 결함이 있어(M35 실측 "…나요? ?") 중복만 정리한다. 내용은 건드리지 않는다.
+            text = requestKind == RequestKind.NEEDS_INFO ? AskBackPrompt.tidy(success.text()) : success.text();
             log.info("LLM 성공 event_id={} attempt_id={} elapsed_ms={}", event.eventId(), attempt.attemptId(),
                     success.elapsedMs());
         } else {

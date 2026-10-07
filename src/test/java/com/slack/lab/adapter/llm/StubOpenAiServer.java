@@ -44,6 +44,18 @@ final class StubOpenAiServer implements AutoCloseable {
         return start("/v1/chat/completions", ex -> json, statusCode);
     }
 
+    /** 정해진 시간 뒤에 응답한다(모델 콜드 적재 모사). */
+    static StubOpenAiServer chatRespondsAfter(String json, long delayMs) throws IOException {
+        return start("/v1/chat/completions", ex -> {
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return json;
+        }, 200);
+    }
+
     static StubOpenAiServer chatHangs() throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         server.createContext("/v1/chat/completions", ex -> {

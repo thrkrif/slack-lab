@@ -43,7 +43,8 @@ public class ClassificationStartupCheck {
     }
 
     static void probe(RequestClassifier classifier, ClassificationProperties props) {
-        ClassifyResult r = classifier.classify("ping", Math.max(props.timeoutMs(), 10_000));
+        // 호출별 상한이 아니라 기동 확인용 마감(최소 10초)을 쓴다: 첫 호출은 모델 콜드 적재라 5초 상한을 넘을 수 있다(M35 실측).
+        ClassifyResult r = classifier.probe(Math.max(props.timeoutMs(), 10_000));
         if (r instanceof ClassifyResult.Classified c) {
             log.info("분류 모델 확인됨 model={} elapsed_ms={}", props.model(), c.elapsedMs());
         } else if (r instanceof ClassifyResult.Failed f && !f.retryable()
