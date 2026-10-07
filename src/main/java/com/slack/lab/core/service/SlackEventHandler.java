@@ -179,7 +179,7 @@ public class SlackEventHandler {
             kind = MessageKind.FAILURE_NOTICE;
             replyFooter = ReplyFooter.NONE; // 실패 안내에는 참고 문서·검색 안내를 붙이지 않는다
             // 알람 리포트에는 "다시 멘션" 안내가 맞지 않는다(멘션할 원 메시지가 없다).
-            text = event.ts() == null ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
+            text = event.isAlert() ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
             log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} error={} final_attempt={}", event.eventId(),
                     attempt.attemptId(), llmError.text(), finalAttempt);
         }

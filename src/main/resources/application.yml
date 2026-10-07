@@ -37,6 +37,14 @@ rag:
     min-score: ${RAG_RETRIEVAL_MIN_SCORE:0.54}
     max-context-chars: ${RAG_RETRIEVAL_MAX_CONTEXT_CHARS:1500}
 
+# 4단계 요청 분류(기본 꺼짐 — 꺼도 3단계 흐름 그대로). 켜려면 모델 ID가 필요하다(기본값 없음, `ollama list`). llm.base-url을 공유하므로
+# 로컬 Ollama 안의 다중 모델까지만 가능하다. 16GB 노트북에서는 답변 모델과 같은 모델을 쓴다(EXPERIMENT-LOG §39).
+classification:
+  enabled: ${CLASSIFICATION_ENABLED:false}
+  model: ${CLASSIFICATION_MODEL:}
+  timeout-ms: ${CLASSIFICATION_TIMEOUT_MS:5000}
+  keep-alive: ${CLASSIFICATION_KEEP_ALIVE:30m}
+
 llm:
   client: ${LLM_CLIENT:ollama}
   base-url: ${LLM_BASE_URL:http://localhost:11434/v1}

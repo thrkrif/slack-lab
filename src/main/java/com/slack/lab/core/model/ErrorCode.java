@@ -20,6 +20,12 @@ public enum ErrorCode {
     LLM_HTTP_ERROR("llm_http_error"),
     LLM_RESPONSE_INVALID("llm_response_invalid"),
 
+    /** 4단계 요청 분류. 분류 실패는 재시도 사유가 아니라 장애 질문(TROUBLE)으로 폴백하는 사유다(PLAN M34). */
+    CLASSIFY_TIMEOUT("classify_timeout"),
+    CLASSIFY_NO_BUDGET("classify_no_budget"),
+    CLASSIFY_FAILED("classify_failed"),
+    CLASSIFY_INVALID_OUTPUT("classify_invalid_output"),
+
     /** 3단계 RAG: 임베딩·벡터 저장소. 검색 실패는 재시도 사유가 아니라 RAG 없이 답하는 폴백 사유다(PLAN M28). */
     EMBEDDING_TIMEOUT("embedding_timeout"),
     EMBEDDING_NO_BUDGET("embedding_no_budget"),
