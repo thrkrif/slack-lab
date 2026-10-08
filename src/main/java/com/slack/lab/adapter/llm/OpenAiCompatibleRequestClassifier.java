@@ -49,6 +49,10 @@ public class OpenAiCompatibleRequestClassifier implements RequestClassifier {
             "큐에 메시지가 3만 건 쌓였는데 어떻게 처리하죠?" -> TROUBLE
             "스토리지 사용률이 90%라고 알람이 왔어요. 뭘 정리해도 되나요?" -> TROUBLE
             "인증서가 만료돼서 연결이 거부돼요" -> TROUBLE
+            "VPN 접속 비밀번호를 슬랙에 올려 버렸어요. 어떻게 수습하죠?" -> TROUBLE
+            "VPN이 문제예요" -> NEEDS_INFO
+            "정산 쪽이 이상해요" -> NEEDS_INFO
+            "알림 서버 상태 좀 알려주세요" -> NEEDS_INFO
             "운영 설정 파일을 실수로 지워 버렸어요. 어떻게 복구하죠?" -> TROUBLE
             "고객 목록을 외부 폴더에 공개로 공유해 버렸어요. 지금 뭘 해야 하죠?" -> TROUBLE
             "로드 밸런서가 뭐예요?" -> SIMPLE
