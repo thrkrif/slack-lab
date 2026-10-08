@@ -43,6 +43,22 @@ class ClassificationSetTest {
     }
 
     @Test
+    void 보강_tuning_세트는_tuning이고_다른_세트와_질문이_겹치지_않는다() throws Exception {
+        List<ClassifyQuestion> extra = ClassificationSetLoader.load(DIR.resolve("classification-tuning-extra.json"), MAPPER);
+        assertThat(extra).isNotEmpty().allSatisfy(q -> assertThat(q.set()).isEqualTo(ClassifyQuestion.TUNING));
+        assertThat(extra.stream().map(ClassifyQuestion::id).collect(Collectors.toSet())).hasSameSizeAs(extra);
+        Set<String> main = load().stream().map(ClassifyQuestion::text).collect(Collectors.toSet());
+        Set<String> rag = new HashSet<>();
+        for (JsonNode n : MAPPER.readTree(DIR.resolve("questions.json").toFile()).path("questions")) {
+            rag.add(n.path("text").asText(""));
+        }
+        for (ClassifyQuestion q : extra) {
+            assertThat(main).as(q.id()).doesNotContain(q.text());
+            assertThat(rag).as(q.id()).doesNotContain(q.text());
+        }
+    }
+
+    @Test
     void 이전_3단계_평가_질문과_겹치지_않는다() throws Exception {
         Set<String> rag = new HashSet<>();
         for (JsonNode n : MAPPER.readTree(DIR.resolve("questions.json").toFile()).path("questions")) {

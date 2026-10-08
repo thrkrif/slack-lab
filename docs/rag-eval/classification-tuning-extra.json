@@ -1,0 +1,136 @@
+{
+ "questions": [
+  {
+   "id": "CX-T01",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "실수로 슬랙 채널에 DB 비밀번호를 공유했어요. 지금 어떻게 해야 하죠?"
+  },
+  {
+   "id": "CX-T02",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "퍼블릭 S3 버킷에 고객 파일이 열려 있는 걸 방금 발견했어요. 먼저 뭘 해야 하나요?"
+  },
+  {
+   "id": "CX-T03",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "개발 서버 SSH 키가 노트북과 함께 분실됐어요. 어떻게 대응해야 해요?"
+  },
+  {
+   "id": "CX-T04",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "운영 DB에서 실수로 DELETE를 WHERE 없이 실행했어요. 복구 방법이 있을까요?"
+  },
+  {
+   "id": "CX-T05",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "토큰을 코드에 하드코딩한 채 저장소에 푸시했어요. 이미 외부에 노출됐을까요?"
+  },
+  {
+   "id": "CX-T06",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "배포 스크립트가 잘못 돌아서 운영 설정이 덮어씌워졌어요. 롤백은 어떻게 하죠?"
+  },
+  {
+   "id": "CX-T07",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "관리자 계정으로 낯선 IP에서 로그인한 기록이 보여요. 어떻게 확인하죠?"
+  },
+  {
+   "id": "CX-T08",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "메일 발송 큐가 멈춰서 알림이 세 시간째 안 나가요. 어디부터 볼까요?"
+  },
+  {
+   "id": "CX-T09",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "사내 위키 인증서가 오늘 아침 만료됐어요. 급하게 갱신하는 방법이 뭔가요?"
+  },
+  {
+   "id": "CX-T10",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "크론 작업이 같은 시간에 두 번씩 실행돼서 데이터가 중복돼요. 원인이 뭘까요?"
+  },
+  {
+   "id": "CX-S01",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "API 키는 어떻게 안전하게 보관하는 게 좋아요?"
+  },
+  {
+   "id": "CX-S02",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "S3 버킷 정책이 뭐예요?"
+  },
+  {
+   "id": "CX-S03",
+   "set": "tuning",
+   "expected": "SIMPLE",
+   "text": "SSH 키 쌍이 어떻게 동작하는지 알려줘."
+  },
+  {
+   "id": "CX-N01",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "계정 쪽에 문제가 생긴 것 같아요."
+  },
+  {
+   "id": "CX-N02",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "키 관련해서 도움이 필요해요."
+  },
+  {
+   "id": "CX-N03",
+   "set": "tuning",
+   "expected": "NEEDS_INFO",
+   "text": "보안 이슈가 있어요."
+  },
+  {
+   "id": "CX-T11",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "운영 서버 비밀번호를 메신저에 올려 버렸어요. 지금 뭐부터 해야 하죠?"
+  },
+  {
+   "id": "CX-T12",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "인증 토큰을 커밋해 버렸는데 이제 뭘 해야 해요?"
+  },
+  {
+   "id": "CX-T13",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "개인 액세스 토큰을 위키 페이지에 붙여 넣었어요. 어떻게 수습하죠?"
+  },
+  {
+   "id": "CX-T14",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "회사 계정 비밀번호를 외부 사이트에 입력해 버렸어요. 바로 뭘 해야 하죠?"
+  },
+  {
+   "id": "CX-T15",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "고객 데이터가 담긴 CSV를 개인 메일로 잘못 보냈어요. 지금 뭐부터 해야 하죠?"
+  },
+  {
+   "id": "CX-T16",
+   "set": "tuning",
+   "expected": "TROUBLE",
+   "text": "결제 서버 설정 파일을 공용 드라이브에 공개로 올렸어요. 먼저 뭘 해야 할까요?"
+  }
+ ]
+}

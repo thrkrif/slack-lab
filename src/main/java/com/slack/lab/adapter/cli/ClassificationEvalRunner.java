@@ -22,7 +22,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * {@code app.role=evaluator --classify-eval}일 때 분류 정확도와 지연을 잰다(PLAN 4단계 M33·M36). 옵션 {@code --eval.dir}
- * (기본 docs/rag-eval), {@code --eval.set=tuning|final|all}(기본 tuning — 프롬프트를 조정하는 동안 final을 보지 않게 final은
+ * (기본 docs/rag-eval), {@code --eval.file}(기본 classification.json, 보강 세트는 classification-tuning-extra.json), {@code --eval.set=tuning|final|all}(기본 tuning — 프롬프트를 조정하는 동안 final을 보지 않게 final은
  * 명시해야 돌린다). 지연은 워밍업 1회 뒤 모든 호출을 센다(사후 제외 없음, C5 "웜" 정의).
  * 종료 코드: 0 합격(또는 final 미실행), 1 불합격, 2 입력 오류.
  */
@@ -56,11 +56,13 @@ public class ClassificationEvalRunner implements ApplicationRunner {
     private int execute(ApplicationArguments args) {
         List<String> dirs = args.getOptionValues("eval.dir");
         List<String> sets = args.getOptionValues("eval.set");
+        List<String> files = args.getOptionValues("eval.file");
+        String file = files == null || files.isEmpty() ? "classification.json" : files.get(0);
         String dir = dirs == null || dirs.isEmpty() ? "docs/rag-eval" : dirs.get(0);
         String set = sets == null || sets.isEmpty() ? ClassifyQuestion.TUNING : sets.get(0);
         List<ClassifyQuestion> questions;
         try {
-            questions = ClassificationSetLoader.load(Path.of(dir, "classification.json"), mapper);
+            questions = ClassificationSetLoader.load(Path.of(dir, file), mapper);
         } catch (Exception e) {
             System.out.println("분류 평가 질문을 읽지 못했다: " + e.getClass().getSimpleName() + " " + e.getMessage());
             return 2;
