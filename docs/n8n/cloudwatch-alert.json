@@ -1,0 +1,78 @@
+{
+  "id": "slackLabCloudwatchExample",
+  "name": "slack-lab CloudWatch 알람 예제",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "9f0c1a10-0000-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 합성 CloudWatch(SNS) 알람 본문을 실행당 한 번만 만들고, 같은 본문의 아이템 4개(최초 1 + 재전송 3)를 낸다.\n// 재전송은 SNS가 같은 알람을 다시 보내는 상황의 모사다. 서버는 계정·리전·알람 이름·상태 변경 시각으로 중복을 억제하므로\n// 4번 보내도 리포트는 1개여야 한다. 중복 키는 여기서 만들지 않는다(서버의 CloudWatchAlertNormalizer 규칙).\n// 입력 아이템에 AlarmName·StateChangeTime·MessageId를 주면 그 값을 쓴다(고정 입력 검증용). 없으면 현재 시각으로 만든다.\nconst input = $input.first().json || {};\nconst pad = (n, w = 2) => String(n).padStart(w, '0');\nconst stamp = (d) =>\n  `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}+0000`;\nconst now = new Date();\n\nconst alarm = {\n  AlarmName: input.AlarmName || 'n8n-example-alarm',\n  AlarmDescription: input.AlarmDescription || 'n8n 예제 워크플로가 보낸 합성 알람',\n  NewStateValue: 'ALARM',\n  NewStateReason: input.NewStateReason || '임계값 초과(합성 예제)',\n  StateChangeTime: input.StateChangeTime || stamp(now),\n  Region: 'ap-northeast-2',\n  AWSAccountId: '000000000000',\n  Trigger: { MetricName: 'PendingThreads', Namespace: 'Custom/Hikari' },\n};\nconst body = {\n  Type: 'Notification',\n  MessageId: input.MessageId || `m-${now.getTime()}`,\n  Message: JSON.stringify(alarm),\n};\nreturn Array.from({ length: 4 }, () => ({ json: { ...body } }));\n"
+      },
+      "id": "9f0c1a10-0000-4000-8000-000000000002",
+      "name": "합성 알람 만들기",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/alerts/cloudwatch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "9f0c1a10-0000-4000-8000-000000000003",
+      "name": "알람 API 호출",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        520,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "합성 알람 만들기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "합성 알람 만들기": {
+      "main": [
+        [
+          {
+            "node": "알람 API 호출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
