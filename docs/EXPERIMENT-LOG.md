@@ -1258,3 +1258,12 @@ Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②
 - **적용**: 이 프롬프트는 C2·tuning 모두 develop 프롬프트(52/60, 25/30)보다 낫고 분류가 기본 꺼짐이라(`classification.enabled=false`) 기본 동작은 3단계 그대로이므로 PR #74로 병합한다. **종료 방식은 사용자 몫**: 사전 합의대로면 분류를 기본 비활성으로 4단계를 닫는다(이미 기본값). 켜서 쓰는 사용자는 정보 부족 정확도(13/20)와 사고형 장애 1~2건 누락 위험을 알고 써야 한다.
 - 한계: final을 세 번 봤고(첫 관찰은 §44) 조정 세트 점수는 낙관적이다. 표본이 작아 F-M10 같은 1건 차이는 노이즈 범위다.
 
+## 47. 5단계 M37 `metric=rag_result` 한 줄과 iCloud 중복 점검 (2026-10-09)
+
+**조건**: Apple M1 16GB, Java 21, `develop` c7ac6ce 기준 브랜치. 외부 왕복은 M42에서 한다(이 단계는 단위·빌드 검증만).
+
+- **iCloud 중복 점검**: `src/` 아래 빈 `"… 2"` 디렉터리 12개(main 2·test 10), `scripts/`에 `rag-index 2`·`rag-index 3`·`alert-roundtrip 2` 사본. 디렉터리 안 파일 0개, `src/`의 `.java` 사본 0개, 모두 `.gitignore`(`* [0-9]`)가 무시한다. 컴파일·`./gradlew build`에 섞이지 않아 삭제하지 않았다(삭제는 사용자 확인 대상).
+- **변경**: `RetrievalService.retrieve()`의 switch 식을 지역 변수로 받고 `try/finally`에서 호출당 정확히 1줄을 기록한다. unavailable은 `reason=<오류 코드 이름>`만 붙인다(`select()` 예외·`rank()` 밖 예외도 `unexpected_exception`으로 남기고 예외는 그대로 전파).
+- **단위 `RetrievalServiceMetricTest` 8건**: found·none(임계값 미달)·none(빈 질의)·unavailable(예산 없음)·unavailable 4종(임베딩 타임아웃·실패, 저장소 타임아웃·실패)과 예상 못한 예외 각각 줄 정확히 1개, `rank()` 직접 호출 0줄, 줄에 질문·문서 제목·예외 메시지 노출 0.
+- **C5**: `./gradlew build` 통과 — 테스트 522건, 실패 0·오류 0·건너뜀 2. 기존 테스트 파일은 수정하지 않았고(새 파일 1개만 추가) `ArchitectureTest` 6건 통과.
+- **한계**: 로그 줄이 실제 Slack 왕복·시도 반복에서 기대 줄 수 표와 맞는지는 M42 외부 왕복에서 판정한다.

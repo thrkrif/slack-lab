@@ -60,13 +60,35 @@ public class RetrievalService {
      *     실패·재시도로 번지면 안 되기 때문이다(PLAN M28)
      */
     public Retrieval retrieve(String promptText, long budgetMs) {
-        return switch (rank(promptText, budgetMs)) {
-            case Ranking.Unavailable u -> new Retrieval.Unavailable(u.error(), u.elapsedMs());
-            case Ranking.Ranked r -> {
-                List<DocumentHit> picked = select(r.hits());
-                yield picked.isEmpty() ? new Retrieval.NoRelevant(r.elapsedMs()) : new Retrieval.Found(picked, r.elapsedMs());
-            }
-        };
+        long start = System.nanoTime();
+        Retrieval result = null;
+        try {
+            result = switch (rank(promptText, budgetMs)) {
+                case Ranking.Unavailable u -> new Retrieval.Unavailable(u.error(), u.elapsedMs());
+                case Ranking.Ranked r -> {
+                    List<DocumentHit> picked = select(r.hits());
+                    yield picked.isEmpty() ? new Retrieval.NoRelevant(r.elapsedMs()) : new Retrieval.Found(picked, r.elapsedMs());
+                }
+            };
+            return result;
+        } finally {
+            // 5단계 지표(PLAN M37): 호출당 정확히 1줄. select()가 던져도 줄이 남도록 finally에서 쓰고, 반환·예외 동작은 바꾸지 않는다.
+            // rank()를 직접 부르는 평가 경로는 운영 검색이 아니라서 이 줄을 남기지 않는다.
+            // 빈 질의는 실제 호출이므로 none으로 센다.
+            logRagResult(result, start);
+        }
+    }
+
+    private static void logRagResult(Retrieval result, long start) {
+        switch (result) {
+            case Retrieval.Found f -> log.info("metric=rag_result result=found elapsed_ms={}", f.elapsedMs());
+            case Retrieval.NoRelevant n -> log.info("metric=rag_result result=none elapsed_ms={}", n.elapsedMs());
+            // reason에는 오류 코드 이름만 넣는다(질문·문서 제목·원문·예외 메시지·event_id는 넣지 않는다)
+            case Retrieval.Unavailable u -> log.info("metric=rag_result result=unavailable reason={} elapsed_ms={}",
+                    u.error().code().code(), u.elapsedMs());
+            case null -> log.info("metric=rag_result result=unavailable reason={} elapsed_ms={}",
+                    ErrorCode.UNEXPECTED_EXCEPTION.code(), elapsedMs(start));
+        }
     }
 
     /** 운영 검색이 가져오는 조각 수. */
