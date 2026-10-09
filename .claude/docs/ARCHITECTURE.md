@@ -397,7 +397,7 @@ flowchart TB
 | 1 | — | — | 3초 초과 · 중복 답글 |
 | 2 | 큐, 워커 | 컨트롤러·발행자·워커·상태 저장소·복구 정책 | 멱등성 · 재시도 · DLQ · 분산 dedup |
 | 3 | 임베딩, Vector DB | `LlmClient` 주변 | 색인 갱신 · 검색 품질 |
-| 4 | LangGraph, 멀티 모델 | 워커 내부 | 분기 관리 · 모델 라우팅 |
+| 4 | 요청 분류 + 모델 역할 분리(Java 워커) | 워커 내부 | 분기 관리 · 모델 라우팅 |
 | 5 | n8n, 모니터링 | 수신 API에 엔드포인트 추가 | 입력 채널별 인증 |
 
 ### 5.1 P1의 변경 범위와 책임
@@ -458,7 +458,7 @@ WebFlux도 같은 이유로 쓰지 않는다 — 비동기로 감추면 제약�
 **알고 쓰는 부채**다. P1-8에서 Redis로 교체한다.
 P0부터 원자적 선점과 처리·발신·완료·결과 불명 상태를 구분한다 (§3.2). P1에서 워커가 공유 상태를 소유한다.
 
-### ADR-5 · 워커 언어 — 2단계는 Java로 정했다(2026-09-28, 4단계에서 재검토)
+### ADR-5 · 워커 언어 — Java 유지, LangGraph 보류(2026-09-28 결정, 2026-10-06 4단계 착수 전 재검토)
 
 LangGraph는 Python 생태계다.
 
@@ -470,6 +470,10 @@ LangGraph는 Python 생태계다.
 P1 착수 직전에 정한다. 그 전까지는 어느 쪽이든 되도록 `SlackEventHandler`를 HTTP에서 떼어 둔다.
 
 **결정(2026-09-28, M9)**: 2단계 워커는 같은 Java 코드베이스에서 `app.role=worker` 프로세스로 띄운다. 검증된 핸들러, 기한 강제(M1.5), Slack 결과 분류를 재사용하려는 것이다. Python 워커의 이득(LangGraph)은 4단계에서야 생기므로 그때 다시 검토한다. 큐가 언어 경계가 되도록 메시지 스키마에 `schema_version`을 둔다.
+
+**재검토 결과(2026-10-06, 4단계 착수 전)**: LangGraph 도입을 **보류**하고 Java 워커를 유지한다.
+- 근거: ① P2-5 요청 분류·P2-6 모델 역할 분리는 분기 한 번과 모델 선택 수준이라 Java로 충분하다. ② Python 런타임을 더하면 배포·장애 대응·큐 계약(`schema_version`) 부채가 생긴다. ③ 검색·생성·전송이 이미 포트로 분리돼 있어 나중에 워커를 갈아 끼우기 쉽다. ④ PRD §1.3 "없어서 불편해진 다음에" 원칙.
+- **다시 비교할 트리거**: 답변을 검사해 부족하면 다시 검색하는 반복 / 사람 승인 뒤 재개 / 3개 이상 분기가 동시에 필요해질 때. 하나라도 실제로 필요해지면 그때 Python 워커(LangGraph)와 다시 비교한다.
 
 ### ADR-8 · 2단계 큐와 공유 상태는 Redis 하나에 둔다 (2026-09-28, M9)
 
@@ -513,6 +517,8 @@ RAG 포트 계약(M24.5b): 임베딩·검색은 `LlmResult`처럼 예외 없는 
 
 **후속 보강(2026-10-05)**: `RetrievalService.select`는 한 조각이 문맥 상한보다 크면 상한까지만 자르고(과거 큰 청크로 색인된 DB 방어), `RagGuard`는 켰을 때 `rag.index.chunk-size ≤ rag.retrieval.max-context-chars`를 설정 단계에서 강제하며, 반응 소비자도 질의 소비자처럼 기동 검사 뒤에 시작한다. 평가 요약은 "정답 문서가 실제 주입됨"을 함께 출력해 임계값을 높여 근거 주입을 지우는 튜닝(hit@K는 그대로, 근거 미주입만 좋아짐)이 드러나게 한다.
 
+**요청 분류 기반(4단계 M33, 진행 중 — 완성은 M36 ADR-10)**: 멘션 질문을 장애/단순/정보 부족으로 가르는 코어 포트 `RequestClassifier`(결과 `ClassifyResult` = `Classified(kind)`|`Failed`, 예외 없음)와 어댑터 `OpenAiCompatibleRequestClassifier`를 추가했다. 답변용 `LlmClient`를 두 번째 빈으로 늘리지 않은 이유는 그 어댑터가 답변 페르소나·temperature 0.3·한자/가나 재질문을 고정으로 갖기 때문이다(분류는 라벨 한 단어, temperature 0, `max_tokens` 16, 라벨 외 출력은 실패). 두 어댑터는 추출한 전송 계층 `LlmTransport`(마감 취소 `execute`, 모델 확인)를 공유하고, 취소 타이머는 호출자가 소유한다. 설정은 `classification.*`(`ClassificationProperties`, 어댑터·기동 검사 전용, 코어는 읽지 않음)이며 `llm.base-url`을 공유해 로컬 다중 모델까지만 가능하다. 핸들러는 RAG처럼 `Optional<RequestClassifier>`로 받고(M34), 검색 호출 앞에서 최상위 멘션에만 한 번 분류한다: 알람(`isAlert()`)·스레드 안 이벤트(`threadTs != null`)는 분류하지 않고 장애 질문으로 처리하고(스레드 후속은 단독 질문이 아니라 되묻기에 대한 사용자 답변도 장애 질문으로 가서 스레드 문맥과 함께 검색된다), 분류 실패·예외는 장애 질문으로 폴백하며(재시도 사유 아님), 시도마다 다시 분류하되 시도별 `request_kind`·`classify_ms`·`classify_fallback`을 로그에 남긴다. 장애=3단계 흐름, 단순=검색 생략·푸터 없음, 정보 부족=검색 생략·푸터 없음·`AskBackPrompt`(사용자 메시지 지시, 의문문으로 끝내는 한두 문장, 포트 변경 없음; 3b가 물음표를 겹쳐 쓰는 결함은 되묻기 답글에 한해 `tidy`가 중복만 정리한다). 기동 검사 `ClassificationStartupCheck`는 포트의 `probe`(호출별 상한 `classification.timeout-ms`를 적용하지 않고 최소 10초 마감으로 콜드 적재를 흡수, M35 실측: 3b 콜드 첫 호출 5.85초)로 확인하며 모델 ID 누락·`llm.client=ECHO` 조합·모델 없음(4xx)을 거부하고 일시 오류·비라벨 응답은 경고만 하며, 큐 소비자는 이 빈 뒤에 시작한다(`RagStartupCheck`와 같은 방식). `SlackMessageEvent.isAlert()`가 알람 판별을 한 곳에 모은다(`ts`·`threadTs` 없음). `AppRole.EVALUATOR`는 Postgres·큐·Slack 없이 분류 평가 CLI(`scripts/classify-eval`)만 띄운다. 평가 세트·합격선은 `docs/rag-eval/classification*`와 `ClassificationReport`.
+
 **3단계 실측 결론(M30, `EXPERIMENT-LOG.md` §31)**: 임베딩은 **bge-m3**(final hit@3 24/24, 근거 미주입 6/6; nomic-embed-text는 19/24, 4/6으로 불합격). 검색 임계값 `0.54`는 tuning 세트로만 정했고 문맥 상한은 Ollama 4K 컨텍스트에서 조용한 잘림을 피하려고 `1500`자로 낮췄다(프롬프트가 컨텍스트를 넘으면 Ollama가 앞부분을 잘라낸다). LLM은 합격선을 넘은 qwen2.5 3b/7b 중 더 가벼운 **3b를 권장 기본**으로 하고 7b는 선택이다(둘 다 응답 p95 45초 이내, 한자·가나 혼용 실패 0). Ollama `/v1/embeddings`는 `keep_alive`를 무시하므로 임베딩 모델을 상주시키려면 서버의 `OLLAMA_KEEP_ALIVE`를 쓴다(코드는 벤더 API에 묶지 않는다). 임베딩 콜드 적재는 2초대였고 5초 상한을 넘으면 폴백이 흡수한다.
 
 "RAG를 꺼도 Vector DB 없이 동작"은 **기능** 의미다. 인프라는 RAG 여부와 관계없이 pgvector 지원 Postgres 이미지를 공통으로 쓴다(V3 마이그레이션이 extension을 만들기 때문. 조건부 마이그레이션은 Flyway 이력 분기와 테스트 이중화 비용으로 기각). 기존 alpine 볼륨은 collation이 달라 초기화가 필요할 수 있다. RAG 설계는 `PLAN.md` 3단계 계획이 정본이고, 구현되는 마일스톤마다 이 문서를 갱신한다.
@@ -528,6 +534,14 @@ Redis 어댑터·Lua·`spring-boot-starter-data-redis`를 제거했다. 백엔�
 #### 오류 모델 (M24)
 
 실패는 예외가 아니라 결과 타입(sealed `Success/Failed/Unknown`, `PublishResult`, `HandlingResult`)으로 전달한다 — 확실한 실패·결과 불명·재시도 가능 여부가 상태 머신과 규칙 11을 정하기 때문이다. 그 안의 정보는 문자열이 아니라 타입이다: `ErrorCode`(원인 분류, 고정 저장 코드) + `ErrorInfo.detail`(Slack 오류 코드·HTTP 상태·예외 클래스 같은 외부 상세), `ProcessingStage`(어디까지 갔는가: llm/send/processing/delivered/state/resolved_*), `MessageKind`(answer/failure_notice). `Failure(stage, kind, error)`가 핸들러에서 워커·저장소까지 그대로 가므로 워커가 문자열을 잘라 종류를 복원하지 않는다(옛 `kindFromStage` 제거). 재시도 가능 여부는 오류 코드가 아니라 결과의 `retryable`이, 결과 불명은 결과 타입 `Unknown`이 정한다. DB는 `stage`·`error_code`·`error_detail`·`kind`를 따로 저장한다(고정 코드, 자바 이름 변경과 무관). 예외 계층·`@ControllerAdvice`는 도입하지 않았다 — 호출부가 다르게 처리할 예외 종류가 없고 컨트롤러 응답 의미가 서로 달라 공통 처리로 줄일 중복이 적다.
+
+### ADR-10 · 요청 분류는 전용 포트로, 모델은 같은 것을 쓴다 (2026-10-07, 4단계 M31~M36)
+
+- **결정**: 멘션 질문의 종류(장애/단순/정보 부족)는 코어 포트 `RequestClassifier`로 가르고 어댑터가 라벨 한 단어만 받는다(temperature 0, `max_tokens` 16, 라벨 외 출력은 실패). 분류는 최상위 멘션에만 적용하고(알람·스레드 안 이벤트는 장애로), 실패·예외·시간 초과는 장애 질문(3단계 흐름)으로 폴백한다(fail-open, 재시도 사유 아님). 기본 구성은 **분류 모델 = 답변 모델 = qwen2.5:3b**이다. 역할별 모델 설정(`classification.model`)은 남겨 두되 `llm.base-url`을 공유해 로컬 Ollama 다중 모델까지만 가능하다.
+- **근거**: 두 번째 `LlmClient` 빈은 답변용 어댑터의 페르소나·temperature·언어 재질문을 상속하고 한정자가 필요하다. 분리 구성(3b 분류 + 7b 답변)은 16GB 노트북에서 두 모델이 서로를 축출해(M31: 7b 재적재 8.6s) 분류가 호출별 상한(5초)에 매번 걸려 폴백했고(M36 참고 측정 16/16) 요청이 17~34초(중앙값 26.8s, 판정 구성은 약 5s)로 느려졌다.
+- **대안**: 키워드 규칙(한국어 자유 질문에 취약, P2-6 미충족), JSON 한 번에 라벨+되묻기(3b 신뢰도·언어 방어 우회), 임베딩 유사도 분류(0.54 임계값 문제와 같은 겹침, 예시 유지 비용).
+- **대가**: 호출 +1(웜 p95 412ms), 3b의 정보 부족 재현율이 낮다(final 12/20, tuning 5/10) — 틀리면 장애 질문으로 가서 되묻기가 줄 뿐 오답 방향이 안전하다. 장애 질문 안의 무관 문서 주입(평균 1건)은 해결하지 못한다. 첫 호출 콜드 로드(4.6~5.9s)는 기동 확인(`probe`)과 `keep_alive` 30분으로 흡수한다. 분리 구성의 이득은 메모리가 더 큰 장비에서만 기대할 수 있다.
+- **후속**: 질의 재작성(스레드 후속의 약한 검색 질의), 분류 결과 영속화, 정보 부족 정확도 개선(모델 상향 또는 예시), 5단계 지표.
 
 ### ADR-6 · 프로토타입은 폐기하고 지식만 승계한다
 

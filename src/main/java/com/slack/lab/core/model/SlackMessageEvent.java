@@ -22,6 +22,14 @@ public record SlackMessageEvent(
         return botId != null || subtype != null;
     }
 
+    /**
+     * 알람 경로가 만든 이벤트인가. 알람은 Slack 메시지가 아니라서 {@code ts}·{@code threadTs}가 없다({@code AlertEvent}가 그렇게
+     * 만든다). 이 규칙을 한 곳에 둬서 호출자가 {@code ts == null}을 각자 해석하지 않게 한다.
+     */
+    public boolean isAlert() {
+        return ts == null && threadTs == null;
+    }
+
     /** 스레드 안 멘션이면 원 스레드에, 아니면 원 메시지 아래에 답한다. */
     public String replyThreadTs() {
         return threadTs != null ? threadTs : ts;

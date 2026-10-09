@@ -2,11 +2,12 @@
 
 **1단계(P0): 완료** — `main` 병합(#17), 태그 `v0.1.0`
 **2단계(P1): 완료(`v0.2.0`) — 이후 ADR-9 기반 전환 M19~M24는 `develop`에서 완료**
-**3단계(RAG): 완료(`v0.3.0`, 2026-10-06) — 구현·검증 M24.5a~M30(2026-10-04) — 합격선 충족, 컨테이너 전체 스택·알람형 왕복·중복/언어 재검증 완료(EXPERIMENT-LOG §37). 실제 Slack 이벤트→ngrok→수신→RAG 답글·👀 반응도 1건 확인(EXPERIMENT-LOG §38) · 4단계는 착수 전** — 아래 `# 3단계(RAG) 계획` 참조
+**4단계(요청 분류 + 모델 역할 분리): 완료(`v0.4.0`, 2026-10-09, 분류 기본 비활성으로 종결; C4 의도 11/12 미충족) — 계획 M31~M36은 아래 `# 4단계 계획`**
+**3단계(RAG): 완료(`v0.3.0`, 2026-10-06) — 구현·검증 M24.5a~M30(2026-10-04) — 합격선 충족, 컨테이너 전체 스택·알람형 왕복·중복/언어 재검증 완료(EXPERIMENT-LOG §37). 실제 Slack 이벤트→ngrok→수신→RAG 답글·👀 반응도 1건 확인(EXPERIMENT-LOG §38) ** — 아래 `# 3단계(RAG) 계획` 참조
 2단계 계획 승인 이력: ralplan consensus 5회전(Architect 최종 APPROVE, Critic(codex) 최종 ITERATE → 마지막 지적 1건은 Planner가 반영, 재검토 없음). 사본: `.omc/plans/stage2-p1-plan.md`
 정본: 이 파일. 1단계 상세 계획은 아래 **부록**에 보존한다(1단계 사본 `.omc/plans/stage1-p0-plan.md`).
 근거: [`PRD.md`](PRD.md) §4·§5·§7, [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENTS.md`](../../AGENTS.md)
-범위: 2단계는 **P1-1 ~ P1-8만**(완료). 3단계는 **RAG(P2-1~P2-4)만**이며 LangGraph·n8n·요청 분류·모델 라우팅·지표 스택은 넣지 않는다(AGENTS.md 규칙 1).
+범위: 2단계는 **P1-1 ~ P1-8만**(완료). 3단계는 **RAG(P2-1~P2-4)만**(완료). 4단계는 **P2-5·P2-6만**(Java 워커 안의 요청 분류·모델 역할 분리)이며 LangGraph·n8n·지표 스택은 넣지 않는다(AGENTS.md 규칙 1).
 
 ## 진행 상태
 
@@ -99,16 +100,93 @@
 - [x] **M30 통합 실측·판정** — 완료·합격(`EXPERIMENT-LOG.md` §31): bge-m3 final hit@3 24/24·근거 미주입 6/6(nomic 19/24·4/6 불합격), 임계값 0.54(tuning 기준), 문맥 상한 1500(4K 잘림 방지), 3B p95 15.6s·7B p95 30.8s·한자/가나 혼용 0 → 권장 기본 bge-m3 + qwen2.5:3b
 - [x] **3단계 완료** — `develop`→`main` 병합, 태그 `v0.3.0` (사용자 요청으로 2026-10-06 전환)
 
+### 4단계 (P2: 요청 분류 + 모델 역할 분리) — 완료(`v0.4.0`)
+
+- [x] **M31 스파이크** — 완료(`docs/spikes/classification-spike.md`, `EXPERIMENT-LOG.md` §39): 3b·7b 모두 15/20·장애 재현율 8/8(멈춤선 통과), **3b와 7b는 이 장비에서 동시 상주 불가**(서로 축출, 7b 재적재 8.6s) → 분류 모델 = `llm.model` 구성으로 계속, P2-6 의도 재결정은 사용자 몫
+- [x] **M32 데이터·라벨 정의·하니스·합격선 고정** — 완료(`EXPERIMENT-LOG.md` §40): 세트 tuning 30·final 60(blob 해시 `e8746b55…` 고정), `ClassificationEvaluator`·`ClassificationReport`(합격선 정수 경계 테스트), 분류 off 주입 기준선 final 14/40 < 15 → **C3은 합격선에서 빼고 보고 항목으로**, 판정 구성 3b+3b 고정. 정확도 CLI(`scripts/classify-eval`)는 분류기 어댑터가 생기는 M33에서
+- [x] **M33 계약·분류 어댑터** — 완료(`EXPERIMENT-LOG.md` §41): `LlmTransport` 추출(기존 테스트 23건 무변경 통과), `RequestClassifier` 포트·`OpenAiCompatibleRequestClassifier`, `ClassificationStartupCheck`(큐 소비자 선행), `isAlert()`, `AppRole.EVALUATOR`·`scripts/classify-eval`. tuning 25/30(장애 10/10·단순 10/10·정보 부족 5/10, 오답은 모두 안전한 방향), 프롬프트 3회 상한 도달
+- [x] **M34 핸들러 분기·단위** — 완료(`EXPERIMENT-LOG.md` §42): `SlackEventHandler`에 `Optional<RequestClassifier>`(9인자 `@Autowired`, 7·8인자 위임), 최상위 멘션만 분류, 알람·스레드 생략, 실패·예외 fail-open, `AskBackPrompt`, 단위 17건·기존 테스트 무변경
+- [x] **M35 외부 왕복·오류 유도** — 완료(`EXPERIMENT-LOG.md` §43): 최상위 멘션 3종·되묻기→스레드 답변 왕복(실제 채널, 합성 이벤트), 분류 무효 출력·타임아웃·연결 끊김 유도 → 장애 경로 폴백, 없는 모델은 기동 거부. 실측으로 기동 확인 상한 버그(`probe` 추가)·되묻기 형식 결함(`tidy`) 발견·수정. `scripts/classify-roundtrip` 추가
+- [x] **M36 통합 실측·판정 수행 완료** — `EXPERIMENT-LOG.md` §44: C1·C2(52/60·20/20·0)·C5·C6·C7·C8·C9 합격, C3은 보고(기준선 14/40 → 6/40), **C4는 정의대로 불합격(11/15 < 14: 계획 정의 결함 + 실제 회귀 1건)이라 사용자 결정 대기**, 참고 측정(3b 분류+7b 답변)은 분류 16/16 폴백·e2e 5배 느림, ADR-10 기록
+- [x] **4단계 완료** — 2026-10-09 사용자 요청으로 "분류 기본 비활성" 종결(C4 기준은 사후 변경하지 않음), `develop`→`main` 병합·태그 `v0.4.0`
+
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-06)**: **3단계 완료 — `develop`→`main` 병합, 태그 `v0.3.0`.** 4단계는 착수 전(단계 번호 전환은 사용자 요청 시). 권장 구성: 임베딩 `bge-m3`(RAG_EMBEDDING_DIMENSION=1024) + LLM `qwen2.5:3b`(7b는 선택), 임계값 0.54·문맥 상한 1500(기본값). 색인 `scripts/rag-index`, 평가 `POSTGRES_URL=… scripts/rag-eval --confirm-eval-db [--eval.set=final|all]`, 확인 `scripts/rag-roundtrip`. 후속 후보: (처리됨, 2026-10-05) 스레드 문맥의 봇 신원 조회 실패 시 fail-closed — EXPERIMENT-LOG §36. ⓪ (완료 — EXPERIMENT-LOG §37: 컨테이너 전체 스택 RAG 켬·단절 폴백, 알람형 왕복, 중복·언어) ① 프롬프트에서 `<reference>`·문서 ID를 답변에 쓰지 않게 하기(재측정 필요) ② (실제 Slack 이벤트 경로는 §38에서 확인) 스레드 안 질문 + RAG 문맥의 4K 검증 ③ 임베딩 상주(`OLLAMA_KEEP_ALIVE`) 운영 가이드 ④ M28·M29 리뷰를 codex(오후 8시 복구)로 재검토. 사용자 조치: 기존 로컬 `postgres-data` 볼륨은 새 pgvector 이미지에서 백업(`pg_dump`) 후 `docker compose down -v`로 초기화. 검증(§37 포함)이 끝나 서버·Ollama·임시 컨테이너는 모두 내렸다. ultragoal 계획 id `stage3-rag`.
+- **상태(2026-10-09)**: 4단계 완료(`v0.4.0`). 분류 기본 비활성(`classification.enabled=false`)으로 종결했고 C4 의도 11/12는 미충족으로 남긴다(§46). 다음은 5단계(n8n 선택 어댑터·모니터링 지표)·설치 자동화이며 단계 전환은 사용자 요청 시에만 한다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
 - 클라이언트 Slack 호출만 가짜인 `FullStackWiringIT`·`RoleWiringIT`가 배선 회귀를 막는다. 테스트는 Testcontainers(postgres:16-alpine, rabbitmq:3.13-alpine).
 - **세션 종료 시 호스트 `bootRun`/컨테이너를 켜둘지 끌지 사용자에게 명시적으로 알릴 것.**
+
+---
+
+# 4단계(요청 분류 + 모델 역할 분리) 계획
+승인: 2026-10-06 사용자 요청으로 단계 전환. 합의 이력: ralplan consensus 4회전(Architect·Critic 각 4회, 최종 Critic APPROVE). 사본: `.omc/plans/stage4-plan.md`(untracked). 근거: PRD §4 "4단계 범위 확정(2026-10-06)", ARCHITECTURE ADR-5 재검토(LangGraph 보류). 
+v1→v2→v3→v4: Architect(분류 전용 포트, 알람·스레드 식별, 예산)·Critic(데이터 선행, C3·C5 무력, 되묻기 후속, 미달 규칙) 반영. 변경 요약은 맨 아래(v3 = 배선 정리·판정 구성 고정·C5 웜 정의·C7 분리).
+
+### 확정된 입력(재질문 금지)
+요청 3종(장애 질문=검색+답변 / 단순 질문=검색 없이 답변 / 정보 부족=되묻기) · 분류·검색 판단은 작은 모델, 답변은 설정된 답변 모델(`llm.model`, 이 단계는 바꾸지 않는다) · 무관 문서 주입은 분류로 흡수(임계값 재튜닝 없음) · 벤더는 로컬 Ollama 다중 모델까지 · 반복 검색·사람 승인·질의 재작성 제외.
+
+### RALPLAN-DR
+**Principles**: (1) 분류는 부가 — 꺼도·실패해도 3단계 흐름 그대로(fail-open = 장애 질문 취급) (2) 조용한 실패 금지(분류 결과·소요·폴백 사유·시도별 라벨을 로그) (3) 60초 예산·노트북 자원 불변 (4) 코어는 포트만 안다, 모델 ID는 설정, 외부 벤더 불가 (5) 합격선 사전 고정(데이터·라벨 정의가 프롬프트보다 먼저), 오분류 비용은 비대칭(장애 질문을 놓치는 쪽이 더 나쁘다).
+**Drivers**: ① 16GB 노트북 메모리(채팅 모델 2개+임베딩 동시 적재·축출·콜드 로드) ② 분류 정확도(3b가 라벨을 안정적으로 내는가) ③ 기존 `LlmClient`·재시도·폴백·푸터 계약과 충돌 최소.
+**Options**:
+- A (선택) **분류 전용 포트 `core.port.RequestClassifier`**(결과: `RequestKind | Failed`)를 두고 `adapter/llm`이 자체 프롬프트·모델·`max_tokens=16`·temperature 0·언어 재질문 없음으로 구현. 코어는 결과로 3갈래 분기하고, 되묻기 문장은 답변 모델이 쓴다. 장점: 두 번째 `LlmClient` 빈·한정자 불필요(`LlmConfig` 단일 빈·핸들러 타입 주입 유지), 답변 어댑터의 페르소나·temperature 0.3·한자/가나 재질문을 상속하지 않음. 단점: 라벨 파서 단위 테스트가 어댑터 쪽, LLM 호출 +1.
+- B 분류기가 라벨+되묻기 문장까지 JSON 출력 → 3b JSON 신뢰도·언어 방어 우회로 기각.
+- C 규칙·키워드 분류 → 한국어 자유 질문에 취약, P2-6 미충족으로 기각(알람 경로만 분류 생략으로 규칙 사용).
+- D bge-m3 임베딩으로 라벨된 예시 질문과 유사도 분류(LLM 호출 없음, ms 단위) → 단순 질문과 장애 질문의 분리가 3단계에서 본 0.54 임계값 근처의 겹침 문제와 같고, 예시 유지가 필요하며, 합의된 "작은 모델이 분류"(P2-6)를 실행하지 못해 기각. 후속 후보(사전 필터)로만 남긴다.
+**ADR(요약)**: Decision A. Consequences: 호출 +1·콜드 로드 위험, 모델 상주 증가 가능, 평가 세트 신규. **Architect 반론(분류기는 컨텍스트를 줄이기만 하고 추가하지 않는다, 3번째 모델 상주 비용이 이득보다 클 수 있다)에 대한 대응**: 분류 모델을 `llm.model`과 같게 두는 구성(추가 상주 0)을 합법 설정으로 허용하고, 구성 B의 C8이 실패하면 이 구성으로 되돌린다. Follow-ups: 질의 재작성(스레드 후속 검색 질의), 분류 결과 영속화, D 사전 필터, 5단계 지표.
+
+### 설계 결정(구현 전 고정)
+1. **포트·설정**: `RequestClassifier.classify(String question, long remainingMs)`. 설정 `ClassificationProperties`(`classification.enabled` 기본 false, `classification.model` enabled면 필수, `classification.timeout-ms` 기본 5000, `classification.keep-alive` 기본 `30m`)는 **어댑터 전용**이며 코어는 읽지 않는다(시간 상한 `min(timeout-ms, 남은 예산)`은 어댑터가 clamp). 배선은 RAG 선례를 따른다: `@ConditionalOnProperty(classification.enabled)` 설정 클래스 + 핸들러에 `Optional<RequestClassifier>` 주입(기존 7인자·8인자 생성자를 위임 생성자로 유지하고 `@Autowired`를 새 9인자 생성자로 옮겨 C1 테스트 무변경 — `SlackEventHandlerRagTest`가 8인자를 쓴다). 따라서 `ArchitectureTest`는 **바뀌지 않는다**. 기동 검사는 `StartupInvariants` 생성자를 넓히지 않고 `ClassificationStartupCheck`(`RagStartupCheck` 형식, `@ConditionalOnRole(WORKER, ALL)`)로 둔다. **큐 소비자는 이 검사가 끝난 뒤 시작해야 하므로** `RabbitConfig`의 `ObjectProvider<RagStartupCheck>`와 같은 방식으로 `ObjectProvider<ClassificationStartupCheck>`를 소비자 선행 조건에 추가한다(검사 거부 전 메시지 소비 방지): enabled인데 model 공백 거부, `llm.client=ECHO`와 enabled 조합 거부, 기동 로그에 `classification=on|off`. 분류 모델이 `llm.model`과 같으면 keep-alive는 `llm.keep-alive`를 상속한다(같은 모델에 두 값이 경합하지 않게). 분류기 워밍업은 자체 짧은 마감을 쓴다. 분류기는 `llm.base-url`을 공유한다 → 로컬 외 벤더는 구조적으로 불가.
+2. **프롬프트·파서**: 분류 프롬프트는 어댑터 안(코어는 모름). 질문은 데이터 블록으로 감싼다(최악 영향=RAG 생략, 보안 경계 아님). 엄격 파싱, 그 외 출력·실패·타임아웃·예외 → `Failed` → 코어가 `TROUBLE`(fail-open) + 사유 로그.
+3. **분류 생략(→TROUBLE)**: ① 알람 경로 — `SlackMessageEvent.isAlert()`를 한 곳에 정의(`ts==null && threadTs==null`, `AlertEvent.java:33`)하고 `SlackEventHandler.java:182`의 인라인 검사를 이것으로 교체 ② **스레드 안 이벤트 전부**(`threadTs != null`; 스레드 후속은 단독 질문이 아니라서 SIMPLE/NEEDS_INFO가 오분류를 낳는다. 되묻기에 대한 사용자 답변도 여기서 TROUBLE로 가서 스레드 문맥과 함께 검색·답변). 즉 분류는 **최상위 멘션**에만 적용된다.
+4. **분기**: TROUBLE = 3단계 그대로. SIMPLE = 검색 생략, 푸터 없음. NEEDS_INFO = 검색 생략, 푸터 없음, 코어가 사용자 메시지에 "부족한 정보를 되묻는 한 문장" 지시를 합성(`RagPrompt`와 같은 방식, 포트 변경 없음).
+5. **예산·재시도**: 분류는 LLM 단계 예산(`llmBudgetMs`, 50초)에서 `min(timeout-ms, 남은 예산)`만 쓴다. 시도마다 재분류하되 temperature 0이고 **시도별 라벨을 로그**에 남긴다(attempt_id). 분류 실패는 재시도 사유가 아니다. 복구 `reprocess`도 같은 규칙.
+6. **로그/메트릭**: `classify_ms`, `request_kind`, `classify_fallback=reason`, `classify_slow`(분류 시간 > 2s, 콜드 로드 식별용), event_id·attempt_id.
+7. **RAG off + 분류 on**: 허용(NEEDS_INFO만 의미 있음).
+
+### 마일스톤 (M31~M36)
+**미달 공통 규칙**(M30 선례): 어느 기준이든 미달이면 원인 단계(분류 / 검색 / LLM·콜드 로드)를 특정하고 개선안 또는 목표 변경안을 올린 뒤 **멈춤 → 사용자 결정**. 수행 완료와 합격을 구분해 기록하고 합격 항목만 PRD 체크.
+- **M31 스파이크** (`docs/spikes/`, 코드 폐기): 임시 질문 20개(장애 8·단순 6·정보 부족 6, 이후 세트와 분리·폐기)로 3b·7b 라벨 신뢰도 1회, 3b+7b+bge-m3 동시 적재 `ollama ps`·메모리·콜드/웜 분류 시간 1회, 끝에 `ollama stop`. **멈춤**: 3b·7b 모두 전체 < 14/20 또는 장애 질문 재현율 < 7/8이면 사용자 결정. 3b만 미달이면 7b 분류기로 계속. 동시 적재 불가면 "분류 모델 = `llm.model`" 구성으로 계속(사용자에게 알림).
+- **M32 데이터·라벨 정의·하니스** (프롬프트보다 먼저): 라벨 정의 문서(경계 규칙 포함), `docs/rag-eval/classification.json`(가상 질문, tuning 30 + final 60=장애 20·단순 20·정보 부족 20, 멘션 최상위 형태), 하니스 `scripts/classify-eval`(정확도·혼동 행렬·NEEDS_INFO 정밀도·주입 건수), **분류 off 주입 기준선**(검색만, LLM 없음) 측정. **판정 구성(2026-10-07 사용자 결정, M31 동시 적재 불가 반영)**: 분류 모델 = 답변 모델 `llm.model` = `qwen2.5:3b`(3단계 권장 기본과 같음, 3b+bge-m3 공존은 M31에서 확인). C2·C5·C8·e2e는 이 구성으로 판정한다. 3b가 C2를 못 넘으면 **멈춤 → 사용자 결정**(7b로 둘 다 올리면 답변 모델이 바뀌므로 자동 전환하지 않는다). **final은 커밋 해시로 고정**하고 프롬프트 튜닝에 쓰지 않는다. 3단계 final 멘션 15문항(C4)도 튜닝 금지로 표시. 기준선에서 "분류 off일 때 문서가 주입되는 단순+정보 부족 질문"이 15개 미만이면 C3을 **합격선에서 빼고 보고 항목으로 내린다**(M32에서 확정, 이후 변경 금지). 완료: 가짜 분류기로 경계(C2 51/60·18/20·NEEDS_INFO 오판 2건, C3 기준선 대비 90%) 검증.
+- **M33 계약·분류 어댑터**: 먼저 `OpenAiCompatibleLlmClient`의 전송부(마감 취소 타이머 `execute`, `verifyModelExists(String)`)를 **패키지 전용 전송 클래스로 추출**(3단계 어댑터 회귀 위험 — 기존 `LlmClient` 단위 테스트 무변경이 완료 조건; 마감 취소 로직 복제 금지). 이어 `RequestClassifier` 포트·`RequestKind`, `ClassificationProperties`, `adapter/llm` 분류기(프롬프트는 **tuning 세트로만** 조정, 기동 시 모델 검증, 워밍업·keep_alive), `ClassificationStartupCheck`, `isAlert()`. 착수 전 `src/` 전체(main·test)의 iCloud 중복 파일("X 2.java")이 로컬 빌드에 컴파일되지 않는지 확인하고, 있으면 사용자에게 알린 뒤 정리한다(삭제는 사용자 확인 후). 완료: ArchitectureTest 무변경 통과, 어댑터 단위(파싱 표, 잡음·빈 출력·타임아웃·예외 → Failed) + 오류 유도(없는 모델 ID로 기동 거부) + tuning 정확도 기록.
+- **M34 핸들러 분기·단위**: 분기 삽입(검색 호출 앞), 되묻기 지시, 알람·스레드 생략, 로그, 분류 off 회귀 0. 완료: 단위(3갈래×푸터·검색 호출 여부, 알람·스레드 생략, 시도별 라벨 로그, 재시도 시 재분류, fail-open) + `FullStackWiringIT`류 배선 회귀.
+- **M35 외부 왕복·오류 유도**: 호스트 bootRun에서 최상위 멘션 3종 각 1건, 되묻기→스레드 답변→근거 답변 왕복 1건, 분류 모델 단절·무효 출력·타임아웃 유도 후 장애 질문 경로 폴백 확인, 확인 뒤 즉시 내림(M16·M28 선례).
+- **M36 통합 실측·판정**(1회, 장비·Ollama 버전 기록은 M30과 동일 형식): 판정 구성 = 3b 분류 + 3b 답변(위 결정). **참고 측정**(판정 아님): 3b 분류 + 7b 답변(분리 구성)을 같은 질문 세트로 한 번 재서 M31에서 본 축출·재적재 지연이 실제 요청 e2e에 얼마나 더하는지 기록한다("분리가 이 장비에서 왜 성립하지 않는가"의 근거). 측정: 분류 하니스 final 60, 분류 on/off 주입 건수, Slack 왕복 15문항(장애 5·단순 5·정보 부족 5) 종류별 e2e, 웜·콜드 분류 시간과 폴백률, `ollama ps` 상주·시스템 메모리 압박·축출. ARCHITECTURE(ADR-10)·PRD 체크·EXPERIMENT-LOG·PLAN 갱신.
+
+### 합격선(M32 시점에 고정, 이후 변경 금지)
+- **C1 off 회귀 0**: `classification.enabled=false`에서 전체 빌드·기존 테스트 통과, 핸들러 동작 변경 없음.
+- **C2 정확도(final 60)**: `Failed`(폴백)는 **오답으로 센다**(TROUBLE로 처리돼 재현율에 공짜 점수가 되지 않게; C5 폴백 건수와는 별도로 기록). 전체 ≥ 51/60 **그리고** 장애 질문 재현율 ≥ 18/20 **그리고** 장애·단순 40문항 중 NEEDS_INFO 오판 ≤ 2. 분류 후보 3b 우선; 3b 미달·7b 통과면 7b; 둘 다 미달이면 멈춤. 불확실성: 51/60의 Wilson 95% 구간 ≈ 74~92%, 18/20 ≈ 70~97% — 기능 검증용 관문이며 품질 보장이 아니다.
+- **C3 주입 흡수**(M32 결과 기준선 14/40 < 15 → **합격선에서 제외, M36에서 분류 on/off 주입 건수만 보고**. 원래 규칙: 기준선 ≥15문항일 때만 합격선): 분류 off에서 문서가 주입된 단순+정보 부족 질문 중 ≥ 90%가 분류 on에서 주입 0. 장애 질문 **내부**의 무관 문서 1건 평균 주입(§31.1)은 이 단계가 해결하지 못함을 결과에 명시한다.
+- **C4 3단계 회귀**: 3단계 final 멘션 15문항 중 ≥ 14가 TROUBLE. `scripts/rag-eval`(검색 불변) hit@3 ≥ 20/24, 근거 미주입 ≥ 5/6 유지 — 후자는 분류가 검색을 건드리지 않음을 확인하는 **회귀 점검**이며 실패 가능성이 낮다.
+- **C5 지연**(위 판정 구성): **웜의 정의 = 워밍업 호출 1회 뒤 final 60개를 모두 센다(사후 제외 없음)**. 분류 p95 ≤ 2초(nearest-rank, 2초 초과 호출도 p95에 포함되고 `classify_slow`로도 기록) **그리고** 폴백 ≤ 3/60. 콜드 첫 호출 시간과 5초 초과 폴백 여부는 별도 기록(keep-alive 30m 설정 하에서 유휴 후 첫 질문 포함). 정상 답변 e2e p95 ≤ 45초(n=15 nearest-rank라 최댓값과 같음을 명시, 종류별 n=5 e2e는 **보고만** 하고 판정에 쓰지 않는다). 웜 측정 중 판정 구성(qwen2.5:7b + bge-m3 상주)을 실제로 적재한 상태에서 돌리고 시작·끝에 `ollama ps`를 기록한다(분류기 단독 측정 금지).
+- **C6 fail-open**: 분류 모델 단절·무효 출력·타임아웃 각 유도 시 장애 질문 흐름으로 답하고 안내·푸터가 3단계와 같으며 로그에 사유와 시도별 라벨이 남는다.
+- **C7 되묻기**(오분류는 C2에서 이미 센다 — 이중 계산하지 않는다): M36 Slack 왕복에서 `request_kind=NEEDS_INFO` 이벤트가 **3건 미만이면 C7 미합격**(검사 대상이 없는 합격 금지). 있으면 그 이벤트 전부에서 답변 끝이 `?`이고 검색 호출·푸터 없음(규칙 검사). 되묻기→스레드 답변 왕복 1건(스레드 답변은 봇 멘션이 있어야 이벤트가 생긴다)이 TROUBLE 경로로 답변 생성(검색 관련도는 보고만 하며 약한 질의는 "질의 재작성" 후속으로 기록).
+- **C8 자원**: 판정 구성에서 동시 적재가 모델 축출로 LLM 50초 초과를 만들지 않는다. 만들면(3b+bge-m3가 축출되는 경우) 원인(메모리 압박·다른 프로세스)을 기록하고 멈춤 → 사용자 결정. 판정 구성은 단일 채팅 모델이므로 채팅 모델 간 축출은 구조적으로 없고, 임베딩과의 공존만 확인한다.
+- **C9 구조**: `ArchitectureTest` 무변경 통과(분류 설정은 어댑터 전용). ARCHITECTURE·PRD·EXPERIMENT-LOG를 같은 작업에서 갱신.
+
+### 수락 기준 ↔ 마일스톤
+| 기준 | 마일스톤 |
+|---|---|
+| C1 | M33, M34 |
+| C2·C3(기준선)·C4 | M32(하니스·기준선), M36 |
+| C5·C8 | M36 |
+| C6 | M33(단위), M35(유도) |
+| C7 | M34(단위), M35(왕복), M36 |
+| C9 | M33, M36 |
+
+### 리스크
+3b 라벨 신뢰도(M31 멈춤) · 라벨 경계 모호(정의 문서·tuning) · 콜드 로드로 분류가 사실상 꺼짐(keep-alive·C5 콜드 기록) · 3모델 동시 적재 축출(C8, 동일 모델 구성으로 완화) · 분류 세트 소규모(기능 검증용) · 장애 질문 내부 무관 문서는 못 줄임 · 프롬프트 주입으로 RAG 생략(영향 작음) · 스레드 후속은 분류하지 않으므로 단순 질문에도 검색이 돌 수 있음(수용, 재시도 시 라벨 비결정은 temperature 0·로그로 완화).
+
+### 변경 요약(v1→v2)
+분류 전용 포트(두 번째 `LlmClient` 폐기) · `isAlert()` 명시·스레드 전부 생략 · 데이터·기준선을 프롬프트 앞(M32)으로, final 해시 고정 · C3 기준선 조건 · C5 실질 한계(웜 p95 2s·폴백률) · 콜드/keep-alive · NEEDS_INFO 정밀도·M31 멈춤선 상향 · 미달 공통 규칙 · 판정 구성 = C2 선택 구성(A·B·C는 참고) · M33 분할(M34 단위, M35 왕복) · 대안 D 기각 근거 · Wilson 구간.
+
+### 변경 요약(v2→v3)
+`Optional<RequestClassifier>`+조건부 설정 배선(ArchitectureTest 무변경) · 전송부 추출·ECHO 조합 거부·워밍업 마감·keep-alive 상속 · `isAlert()` 단일 정의 · 판정 구성을 M32에 고정(답변 qwen2.5:7b) 및 C8 대체 절차 · C5 웜 정의(사후 제외 없음) · C7을 NEEDS_INFO 로그 이벤트로 한정 · C4 rag-eval은 회귀 점검임을 명시.
 
 ---
 

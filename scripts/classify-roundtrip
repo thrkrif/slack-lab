@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""요청 분류 외부 왕복 확인(4단계 M35·M36). 합성 서명 app_mention을 실제 테스트 채널로 보내고 봇 답글을 확인한다.
+합성 이벤트라 Slack→ngrok→수신 경로는 검증하지 않는다(rag-roundtrip과 같다). **보낸 질문 수만큼 실제 테스트 채널에 글이 올라간다.**
+
+사용: scripts/classify-roundtrip single "<질문>" [라벨]          최상위 멘션 1건: 답글과 참고 문서·물음표 여부
+      scripts/classify-roundtrip thread "<첫 질문>" "<후속>" [라벨]  첫 질문 답글 뒤 같은 스레드에서 후속 멘션(되묻기→답변 왕복)
+      scripts/classify-roundtrip batch <classification.json> <라벨> <set> <id,id,...>   지정한 질문들을 순차로(JSON 한 줄씩 + 집계)
+환경: rag-roundtrip과 같다(.env의 SLACK_SIGNING_SECRET·SLACK_BOT_TOKEN·SLACK_TEST_CHANNEL, RAG_URL).
+분류 결과(request_kind)는 답글이 아니라 서버 로그에 있다 — 판정할 때 로그와 함께 본다.
+"""
+import hashlib
+import hmac
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("rag_roundtrip", os.path.join(HERE, "rag-roundtrip"))
+_spec = importlib.util.spec_from_loader("rag_roundtrip", _loader)
+rt = importlib.util.module_from_spec(_spec)
+_loader.exec_module(rt)
+
+
+def features(text):
+    return {"references": "*참고 문서*" in text, "no_relevant_notice": "관련 문서 근거를 찾지 못해" in text,
+            "search_unavailable_notice": "문서 검색을 완료하지 못해" in text,
+            "ends_with_question": text.strip().endswith("?"), "failure_notice": text.startswith(rt.FAILURE_NOTICE_PREFIX),
+            "foreign_script": bool(rt.FOREIGN.search(text))}
+
+
+def post_event(text, ts, bot, thread_ts=None):
+    event = {"type": "app_mention", "channel": rt.CHANNEL, "user": "U0TESTUSER", "text": f"<@{bot}> {text}", "ts": ts}
+    if thread_ts:
+        event["thread_ts"] = thread_ts
+    body = json.dumps({"type": "event_callback", "event_id": f"EvCLS{int(time.time() * 1000)}",
+                       "authorizations": [{"user_id": bot}], "event": event})
+    stamp = str(int(time.time()))
+    sig = "v0=" + hmac.new(rt.SECRET.encode(), f"v0:{stamp}:{body}".encode(), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(f"{rt.URL}/slack/events", data=body.encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Slack-Request-Timestamp": stamp,
+                                          "X-Slack-Signature": sig})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except urllib.error.URLError:
+        return -1
+
+
+def wait_replies(parent_ts, already=0, timeout=120):
+    """부모 아래 봇 답글이 already개를 넘을 때까지 2초 간격으로 기다린다. (답글 목록, 걸린 초)."""
+    start = time.time()
+    while time.time() - start < timeout:
+        res = rt.slack("conversations.replies", query={"channel": rt.CHANNEL, "ts": parent_ts, "limit": 100})
+        msgs = res.get("messages", [])[1:] if res.get("ok") else []
+        if len(msgs) > already:
+            return msgs, time.time() - start
+        time.sleep(2)
+    return [], time.time() - start
+
+
+def top_level(question, label, bot):
+    parent = rt.slack("chat.postMessage", {"channel": rt.CHANNEL, "text": f"[분류 검증] {label}: {question}"})
+    if not parent.get("ok"):
+        sys.exit(f"부모 메시지 실패: {parent.get('error')}")
+    time.sleep(1.1)
+    code = post_event(question, parent["ts"], bot)
+    if code != 200:
+        return parent["ts"], [], 0.0, code
+    msgs, secs = wait_replies(parent["ts"])
+    return parent["ts"], msgs, secs, code
+
+
+def single(question, label):
+    bot = rt.slack("auth.test")["user_id"]
+    ts, msgs, secs, code = top_level(question, label, bot)
+    print(f"수신 응답 {code}")
+    if not msgs:
+        print("시간 초과: 답글 없음")
+        sys.exit(1)
+    text = msgs[0].get("text", "")
+    print(f"답글 {len(msgs)}개 / {secs:.1f}s")
+    print(json.dumps(features(text), ensure_ascii=False))
+    print("-----\n" + text + "\n-----")
+
+
+def thread(first, follow, label):
+    bot = rt.slack("auth.test")["user_id"]
+    ts, msgs, secs, code = top_level(first, label, bot)
+    if not msgs:
+        print("첫 질문 답글 없음")
+        sys.exit(1)
+    first_text = msgs[0].get("text", "")
+    print(f"[1] 첫 질문 답글 ({secs:.1f}s) {json.dumps(features(first_text), ensure_ascii=False)}\n{first_text}\n-----")
+    time.sleep(1.1)
+    reply = rt.slack("chat.postMessage", {"channel": rt.CHANNEL, "thread_ts": ts, "text": f"[분류 검증] {label} 후속: {follow}"})
+    if not reply.get("ok"):
+        sys.exit(f"스레드 메시지 실패: {reply.get('error')}")
+    time.sleep(1.1)
+    code = post_event(follow, reply["ts"], bot, thread_ts=ts)
+    print(f"수신 응답 {code}")
+    msgs2, secs2 = wait_replies(ts, already=len(msgs) + 1)  # 봇 답글 1개 + 내가 올린 후속 메시지 1개
+    new = [m for m in msgs2 if m.get("ts") not in {x.get("ts") for x in msgs} and m.get("ts") != reply["ts"]]
+    if not new:
+        print("후속 답글 없음")
+        sys.exit(1)
+    text2 = new[0].get("text", "")
+    print(f"[2] 후속 답글 ({secs2:.1f}s) {json.dumps(features(text2), ensure_ascii=False)}\n{text2}\n-----")
+
+
+def batch(path, label, set_name, ids):
+    bot = rt.slack("auth.test")["user_id"]
+    wanted = ids.split(",")
+    qs = {q["id"]: q for q in json.load(open(path, encoding="utf-8"))["questions"] if q["set"] == set_name}
+    rows = []
+    for qid in wanted:
+        q = qs[qid]
+        ts, msgs, secs, code = top_level(q["text"], f"{label} {qid}", bot)
+        text = msgs[0].get("text", "") if msgs else ""
+        row = {"id": qid, "expected": q["expected"], "seconds": round(secs, 1), "code": code, "replies": len(msgs),
+               **features(text), "answer": text}
+        rows.append(row)
+        print(json.dumps(row, ensure_ascii=False), flush=True)
+    for kind in ("TROUBLE", "SIMPLE", "NEEDS_INFO"):
+        rs = [r for r in rows if r["expected"] == kind]
+        done = sorted(r["seconds"] for r in rs if r["replies"] and not r["failure_notice"])
+        print(json.dumps({"summary": label, "expected": kind, "n": len(rs), "no_reply": sum(1 for r in rs if not r["replies"]),
+                          "failure_notices": sum(r["failure_notice"] for r in rs), "foreign_script": sum(r["foreign_script"] for r in rs),
+                          "duplicates": sum(1 for r in rs if r["replies"] > 1), "with_references": sum(r["references"] for r in rs),
+                          "no_relevant_notices": sum(r["no_relevant_notice"] for r in rs),
+                          "ends_with_question": sum(r["ends_with_question"] for r in rs), "p50_s": done[len(done) // 2] if done else None,
+                          "max_s": done[-1] if done else None}, ensure_ascii=False))
+
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        sys.exit(__doc__)
+    if a[0] == "single" and len(a) >= 2:
+        single(a[1], a[2] if len(a) > 2 else "cls")
+    elif a[0] == "thread" and len(a) >= 3:
+        thread(a[1], a[2], a[3] if len(a) > 3 else "cls")
+    elif a[0] == "batch" and len(a) >= 5:
+        batch(a[1], a[2], a[3], a[4])
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

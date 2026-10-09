@@ -45,3 +45,16 @@ scripts/rag-eval --confirm-eval-db --eval.pairs          # 답변 쌍(RAG 끔/�
 
 - tuning 세트의 정답 없는 질문은 2개뿐이라 임계값 조정의 근거가 약하다. 조정은 "상한선을 넘기는 값을 찾는" 거친 용도로만 쓴다.
 - tuning과 final은 같은 문서(지식 베이스)를 공유하므로 정답 문서가 겹친다(질문은 겹치지 않는다). 의역 수준의 유사 질문은 사람이 확인해야 한다.
+
+## 분류 평가 세트 (4단계 M32)
+
+`classification.json`(tuning 30 + final 60)과 `classification-labels.md`(라벨 정의·경계·합격선)가 4단계 요청 분류를 위한 세트다. 3단계 `questions.json`과 질문이 겹치지 않는다(`ClassificationSetTest`가 고정). **final은 blob 해시 `e8746b557d667e9fdbc6ded658e6cc769a0f30f5`(`git hash-object docs/rag-eval/classification.json`)로 고정**하며 프롬프트 튜닝에 쓰지 않는다. 라벨 정의 문서의 해시는 `b974f9898bd5c612aeb048a5d4d596c3896f4fac`.
+
+```bash
+# 분류 off 주입 기준선(LLM 불필요, bge-m3 임베딩만). 평가용 DB에서만 — 색인을 가상 문서로 교체한다.
+POSTGRES_URL=jdbc:postgresql://localhost:5432/slacklab RAG_ENABLED=true RAG_EMBEDDING_MODEL=bge-m3 RAG_EMBEDDING_DIMENSION=1024 \
+  scripts/classify-baseline --confirm-eval-db [--eval.set=tuning|final|all]
+```
+
+정확도 하니스(`ClassificationEvaluator`)는 코어에 있고 분류기 어댑터는 M33에서 붙는다(`scripts/classify-eval`은 그때 추가).
+

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 분류 정확도·지연 평가(M33·M36, 4단계 C2·C5). 예: scripts/classify-eval | scripts/classify-eval --eval.set=final
+# 기본은 tuning만 돈다(프롬프트를 조정하는 동안 final을 보지 않는다). 분류기는 .env의 LLM_BASE_URL과 아래 환경변수를 쓴다. Postgres·RabbitMQ 없이 돈다(app.role=evaluator).
+# 필요: CLASSIFICATION_ENABLED=true CLASSIFICATION_MODEL=<ollama list의 모델 ID> (+ 평소 .env). 종료 코드: 0 합격(또는 final 미실행), 1 불합격, 2 입력 오류
+set -euo pipefail
+cd "$(dirname "$0")/.."
+./gradlew -q bootJar -x test
+JAR=$(ls build/libs/*.jar | grep -v -- '-plain' | head -1)
+set -a; source .env; set +a
+APP_ROLE=evaluator exec java -jar "$JAR" --spring.main.banner-mode=off --logging.level.root=WARN \
+  --classify-eval "$@"

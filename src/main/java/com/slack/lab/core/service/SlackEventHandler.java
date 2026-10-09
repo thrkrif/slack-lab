@@ -13,6 +13,9 @@ import com.slack.lab.config.ConditionalOnRole;
 import com.slack.lab.config.ExperimentProperties;
 import com.slack.lab.config.ProcessingProperties;
 import com.slack.lab.core.port.LlmClient;
+import com.slack.lab.core.port.RequestClassifier;
+import com.slack.lab.core.model.ClassifyResult;
+import com.slack.lab.core.model.RequestKind;
 import com.slack.lab.core.model.LlmMessage;
 import com.slack.lab.config.LlmProperties;
 import com.slack.lab.core.model.LlmResult;
@@ -55,6 +58,8 @@ public class SlackEventHandler {
     private final ThreadContextSource threadContext;
     // RAG를 끄면 비어 있고 흐름은 3단계 이전과 같다(꺼도 동작). 있으면 스레드 문맥 조회 뒤·LLM 호출 앞에서 한 번 검색한다.
     private final Optional<RetrievalService> retrieval;
+    // 분류를 끄면 비어 있고 흐름은 3단계와 같다(꺼도 동작). 있으면 최상위 멘션에만 한 번 분류하고 결과로 검색·되묻기를 가른다.
+    private final Optional<RequestClassifier> classifier;
     // 테스트가 프로세스를 죽이지 않고 halt 지점 도달만 확인하려고 바꿔 끼운다. 운영 경로는 항상 halt다.
     private Runnable halter = () -> Runtime.getRuntime().halt(137);
 
@@ -65,10 +70,18 @@ public class SlackEventHandler {
                 Optional.empty());
     }
 
-    @Autowired
     public SlackEventHandler(LlmClient llmClient, ChatNotifier chatNotifier, LlmProperties llmProps,
             SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps,
             ThreadContextSource threadContext, Optional<RetrievalService> retrieval) {
+        this(llmClient, chatNotifier, llmProps, slackProps, processingProps, experimentProps, threadContext, retrieval,
+                Optional.empty());
+    }
+
+    @Autowired
+    public SlackEventHandler(LlmClient llmClient, ChatNotifier chatNotifier, LlmProperties llmProps,
+            SlackProperties slackProps, ProcessingProperties processingProps, ExperimentProperties experimentProps,
+            ThreadContextSource threadContext, Optional<RetrievalService> retrieval,
+            Optional<RequestClassifier> classifier) {
         this.llmClient = llmClient;
         this.chatNotifier = chatNotifier;
         this.llmProps = llmProps;
@@ -77,6 +90,7 @@ public class SlackEventHandler {
         this.experimentProps = experimentProps;
         this.threadContext = threadContext;
         this.retrieval = retrieval;
+        this.classifier = classifier;
     }
 
     void setHalter(Runnable halter) {
@@ -113,7 +127,12 @@ public class SlackEventHandler {
         // 처리 실패나 재시도 사유가 아니다 — RAG 없이 답하고 서버가 안내를 붙인다. 시도마다 새로 검색한다(결과를 저장하지 않는다).
         ReplyFooter footer = ReplyFooter.NONE;
         String question = event.promptText();
-        if (retrieval.isPresent()) {
+        RequestKind requestKind = classify(event, attempt, t0);
+        if (requestKind == RequestKind.NEEDS_INFO) {
+            // 정보 부족: 검색 없이 부족한 정보를 되묻는다. 푸터도 없다(근거를 쓰지 않았으므로 출처를 붙이지 않는다).
+            question = AskBackPrompt.compose(event.promptText());
+        }
+        if (retrieval.isPresent() && requestKind == RequestKind.TROUBLE) {
             long ragStart = System.nanoTime();
             Retrieval found = retrieval.get().retrieve(event.promptText(), llmBudgetMs(t0));
             attempt.recordPhase("rag_ms", elapsedMs(ragStart));
@@ -158,7 +177,8 @@ public class SlackEventHandler {
         ReplyFooter replyFooter = footer;
         if (llmResult instanceof LlmResult.Success success) {
             kind = MessageKind.ANSWER;
-            text = success.text();
+            // 되묻기 답글은 3b가 물음표를 겹쳐 쓰는 형식 결함이 있어(M35 실측 "…나요? ?") 중복만 정리한다. 내용은 건드리지 않는다.
+            text = requestKind == RequestKind.NEEDS_INFO ? AskBackPrompt.tidy(success.text()) : success.text();
             log.info("LLM 성공 event_id={} attempt_id={} elapsed_ms={}", event.eventId(), attempt.attemptId(),
                     success.elapsedMs());
         } else {
@@ -179,7 +199,7 @@ public class SlackEventHandler {
             kind = MessageKind.FAILURE_NOTICE;
             replyFooter = ReplyFooter.NONE; // 실패 안내에는 참고 문서·검색 안내를 붙이지 않는다
             // 알람 리포트에는 "다시 멘션" 안내가 맞지 않는다(멘션할 원 메시지가 없다).
-            text = event.ts() == null ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
+            text = event.isAlert() ? ALERT_FAILURE_NOTICE : FAILURE_NOTICE;
             log.warn("LLM 실패 → 실패 안내로 전환 event_id={} attempt_id={} error={} final_attempt={}", event.eventId(),
                     attempt.attemptId(), llmError.text(), finalAttempt);
         }
@@ -188,6 +208,37 @@ public class SlackEventHandler {
         log.info("처리 종료 event_id={} attempt_id={} kind={} result={} 총_소요_ms={}",
                 event.eventId(), attempt.attemptId(), kind.code(), result.getClass().getSimpleName(), elapsedMs(t0));
         return result;
+    }
+
+    /**
+     * 요청 종류를 정한다(4단계). 분류는 최상위 멘션에만 적용한다: 알람은 정의상 장애이고, 스레드 안 이벤트는 앞 대화에 기대는
+     * 후속이라 단독 질문으로 분류하면 틀린다(되묻기에 대한 사용자 답변도 여기서 장애 질문으로 가서 스레드 문맥과 함께 검색된다).
+     * 분류가 실패하거나 예외를 던져도 처리 실패·재시도 사유가 아니다 — 장애 질문(3단계 흐름)으로 폴백한다(fail-open).
+     * 시도마다 다시 분류하되(저장하지 않는다) 시도별 라벨을 로그에 남긴다.
+     */
+    private RequestKind classify(SlackMessageEvent event, AttemptHandle attempt, long t0) {
+        if (classifier.isEmpty() || event.isAlert() || event.threadTs() != null) {
+            return RequestKind.TROUBLE;
+        }
+        long start = System.nanoTime();
+        RequestKind kind = RequestKind.TROUBLE;
+        try {
+            ClassifyResult result = classifier.get().classify(event.promptText(), llmBudgetMs(t0));
+            if (result instanceof ClassifyResult.Classified c) {
+                kind = c.kind();
+                log.info("요청 분류 event_id={} attempt_id={} request_kind={} elapsed_ms={}", event.eventId(),
+                        attempt.attemptId(), kind, c.elapsedMs());
+            } else if (result instanceof ClassifyResult.Failed f) {
+                log.warn("요청 분류 실패 → 장애 질문으로 진행 event_id={} attempt_id={} classify_fallback={} elapsed_ms={}",
+                        event.eventId(), attempt.attemptId(), f.error().text(), f.elapsedMs());
+            }
+        } catch (RuntimeException e) {
+            // 포트 계약은 예외를 던지지 않지만, 부가 기능이 처리 전체를 막으면 안 된다.
+            log.warn("요청 분류 예외 → 장애 질문으로 진행 event_id={} attempt_id={} classify_fallback={}", event.eventId(),
+                    attempt.attemptId(), e.getClass().getSimpleName());
+        }
+        attempt.recordPhase("classify_ms", elapsedMs(start));
+        return kind;
     }
 
     /**
