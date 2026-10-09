@@ -116,7 +116,7 @@
 
 - [x] **M37-0 단계 착수** — 2026-10-09 사용자 요청으로 단계 전환. PLAN 5단계 계획 추가, `AGENTS.md` "현재 단계" 갱신
 - [x] **M37 사전 점검 + `metric=rag_result` 한 줄** — 완료(`EXPERIMENT-LOG.md` §47): iCloud 중복은 빈 디렉터리·gitignore 사본뿐이라 컴파일 무영향, `retrieve()` try/finally 1줄·단위 8건, 전체 빌드 522건 통과(C5)
-- [ ] **M38 `scripts/p1-metrics` 시간 구간·6개 지표** — C1·C2·C3·C4
+- [x] **M38 `scripts/p1-metrics` 시간 구간·6개 지표** — 완료(`EXPERIMENT-LOG.md` §48): `--since`/`--now`·6개 지표·부분 스냅샷 KeyError 수정·stale 경고, 옵션 없는 출력은 골든으로 불변, 단위 23건 통과
 - [ ] **M39 `scripts/env-check`** — C10
 - [ ] **M40 Slack App Manifest + 설치 가이드** — C11
 - [ ] **M41 n8n 예제 워크플로 + 본문 동일성 검사** — C8·C9
@@ -128,7 +128,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-09)**: 5단계 착수(M37-0 완료). 4단계는 `v0.4.0`으로 종결(분류 기본 비활성, C4 의도 11/12 미충족은 §46에 남김). M37 완료(`metric=rag_result` 한 줄, 빌드 522건 통과). 다음은 M38(`scripts/p1-metrics` `--since`·6개 지표·부분 스냅샷 KeyError 수정). M42b에서 n8n Credential 입력·Slack 앱 생성·설치·채널 초대·터널 URL 등록은 사람이 하며, 그 지점에서 멈추고 사용자가 할 일을 안내한다.
+- **상태(2026-10-09)**: 5단계 착수(M37-0 완료). 4단계는 `v0.4.0`으로 종결(분류 기본 비활성, C4 의도 11/12 미충족은 §46에 남김). M37 완료(`metric=rag_result` 한 줄, 빌드 522건 통과). M38 완료(`p1-metrics --since` 6개 지표, 단위 23건). 다음은 M39(`scripts/env-check`). M42b에서 n8n Credential 입력·Slack 앱 생성·설치·채널 초대·터널 URL 등록은 사람이 하며, 그 지점에서 멈추고 사용자가 할 일을 안내한다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
