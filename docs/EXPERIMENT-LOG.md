@@ -1313,3 +1313,29 @@ Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②
 - **단위 `python3 scripts/test_n8n_example.py` 37건 통과**(외부 호출 0): 노드 3종·연결 순서·HTTP 계약·Credential/시크릿 패턴/실제 `.env` 비밀값 0건(값 미출력), 고정 입력·시각에서 `alert-roundtrip`(수정 없음, `exec`+`datetime`·`clock` 교체+`send_fn` 500)과 호스트 `node`로 실행한 Code 노드 본문의 필드·값 불일치 0·재전송 간 차이 0·`Message`가 문자열임·입력 없을 때 시각 형식, `n8n-watch` 판정(expect 1: 10초·179초 합격 / 181초·2개·실패 안내·없음·다른 알람 불합격 / 발행 줄 없음 종료 2, expect 0: 합격과 불합격 3종·관찰 시작 이전 401 무시), Slack 오류 종료 3, `ALERT_CHANNEL`·토큰 없음 거부, 상태 파일 저장소 밖 강제, 출력에 event_id·채널 ID·토큰 0.
 - **한계**: 호스트 `node`와 n8n 안의 Code 실행기가 다를 수 있어 실제 실행 본문과의 대조는 M42b(`n8n-watch`의 리포트 1개 판정)에서 한다. 실제 UI의 Credential 입력·Import는 사람 단계다.
 - **판정**: C8·C9 단위 통과(C9의 컨테이너·볼륨 제거는 스모크에서 확인). C6·C7은 M42b에서 판정한다.
+
+## 52. 5단계 M42 자동 통합 실측 (2026-10-09)
+
+**검증 환경**: Apple M1 16GB, macOS 26.6.1, Docker 27.3.1, Ollama 0.34.0(`ollama serve`는 실측 전부터 실행 중), Java 21.0.9, `develop` 3d6a715 기준. 호스트 `bootRun`(역할 `all`) + RabbitMQ·Postgres(`pgvector/pgvector:pg16`) 컨테이너, 분류 off, RAG on(가상 문서 20개를 저장소 밖 임시 경로로 복사해 `scripts/rag-index --rebuild --confirm-delete`로 재색인 → 20개 추가), 임베딩 `bge-m3`(1024차원). **검증 설정으로 `LLM_MODEL=qwen2.5:3b`를 `.env`의 `qwen2.5:7b` 위에 덮어썼다**(3단계 권장 기본, 지연이 짧음). 재시도는 기본값(5·30·120초). 로그는 시나리오마다 새 파일(저장소 밖), 각 시나리오 직후 `scripts/p1-metrics --since 5m`. event_id·채널 ID는 기록하지 않는다.
+
+### 시나리오별 결과 vs 기대 줄 수 표 (C1·C3)
+| 시나리오 | 처리 지표(시도) | 이벤트 단위 | `rag_result` | LLM 시도 n(③) | `answer_ms` n(④) | 기타 |
+|---|---|---|---|---|---|---|
+| **S1 정상 5건**(tuning 멘션 5개) | 정상 답변 5 ✓ | 정상 5 ✓ | 5 = found 4 + none 1 ✓ | 5 ✓ | 5 ✓ | 반응 성공 5 ✓, 시작→끝 44초(<5분) ✓, 참고 문서 4·근거 없음 안내 1 |
+| **S2 LLM 실패 1건** | 재시도 요청 3 + 실패 안내 1 = 4 ✓ | 실패 안내 1 ✓ | 4 = found 4 ✓(시도마다 검색) | 4 ✓(각 1ms, 연결 거부) | 0 ✓ | 웜업 실패 로그 1(`LLM 웜업 결과=Failed`) ✓, 전체 165초(첫 재시도 +9.6s·+44.6s·+165.3s) |
+| **S3 RAG 장애 1건** | 정상 답변 1 ✓ | 정상 1 ✓ | unavailable 1(`embedding_connect_failed`) ✓ | 1 ✓ | 1 ✓ | 답글에 "문서 검색을 완료하지 못해 일반 지식으로 답변합니다…" 부착 ✓ |
+| **S4 전송 결과 불명 1건** | 결과 불명 1(kind=-) ✓ | 결과 불명 1 ✓ | 1 = found ✓ | 1 ✓ | 0 ✓ | 반응 실패 1 ✓, 스텁의 `/chat.postMessage` 접속 **1회**(자동 재발신 0) ✓, 스냅샷 `recovery=1` ✓ |
+
+- **C1 합격**: 4개 시나리오 모두 기대 줄 수와 오차 0(시도·이벤트 단위). **C3 합격**: `rag_result` 합계 11줄 = S1~S4의 `retrieve()` 호출 5+4+1+1, found 9·none 1·unavailable 1(각 1회 이상). **C2 합격**: 최신 스냅샷 경과 S1 0초·S2 4초·S3 4초·S4 5초(≤30).
+- **C4 합격**: `metric=rag_result` 11줄과 `p1-metrics` 출력 5개에서 질문 원문(60개)·문서 제목(20개)·시크릿(3종)·event_id/attempt_id 패턴 노출 **0건**, 줄 형식 이탈 0. **C5**: M42는 코드 변경이 없고 M37~M41의 단위·전체 빌드(522건) 결과가 유효하다.
+- **S1 지연(참고)**: `answer_ms` p50 5.7s·p95 8.1s, LLM 시도 p95 7.5s, 큐 대기 p95 76ms, 반응 p95 657ms, 왕복 스크립트 기준 p50 8.0s·p95 9.7s.
+- **S0 `RAG_ALLOWEDHOSTS` 바인딩 확인(M39에서 이월)**: `RAG_ALLOWEDHOSTS=ollama.invalid`로 기동하면 "rag.embedding-base-url 호스트 'localhost'가 rag.allowed-hosts에 없다 …"로 **기동이 거부**된다 → 환경변수가 기본 목록을 대신하도록 실제 바인딩된다(`env-check`의 대체 규칙이 맞다). `LLM_BASE_URL`·`LLM_VERIFYMODELONSTARTUP`·`RAG_EMBEDDING_BASE_URL`·`SLACK_BASEURL` 덮어쓰기도 시나리오에서 의도대로 동작했다.
+
+### 계획과 달랐던 점
+- **기존 Postgres 볼륨 사용 불가**: 사용자의 기존 로컬 볼륨(`slack-lab_postgres-data`)에는 `Migration checksum mismatch for migration version 1`로 Flyway 검증이 실패했다. V1이 2026-10-03(M24 오류 모델 정리)에 수정되어, 그 전에 만들어진 볼륨의 체크섬과 다르다(3단계 M25의 "기존 볼륨은 백업 후 초기화" 상태). **삭제·repair하지 않고** 별도 compose 프로젝트(`slack-lab-m42`)의 새 볼륨으로 실측했으며, 끝난 뒤 그 프로젝트의 컨테이너·볼륨만 제거했다. 기존 `slack-lab_*` 볼륨 3개는 그대로다.
+- **S1 첫 시도 무효**: 배치 인자를 `set=tuning`으로 잘못 넘겨(위치 인자 `tuning mention`이 맞다) 질문 0건이었다. 같은 환경에서 새 로그 파일(`S1r`)로 다시 돌린 결과만 판정에 썼다.
+- **S4 정리**: 계획의 "실제 Slack으로 재기동" 단계는 생략했다. `scripts/recovery`가 별도 프로세스로 실제 Slack을 직접 조회하므로 앱 재기동이 필요 없다. `list`(UNKNOWN 1건) → `check`("답글 없음(스레드 전체 확인) → 미전송으로 볼 수 있다") → `close` → `list`(미해결 0건) → `p1-residue-check`(해결 8건, 잔존물 0, 컨테이너 이름은 `PSQL`·`RABBITCTL`로 덮어씀).
+- **새 관찰(S4)**: 스텁이 `/conversations.replies` 조회를 6번 받았다. 결과 불명 건을 maintenance 스레드가 스레드 조회로 자동 판정하려는 시도이고(로그: `스레드 조회 실패 reason=IOException` 3회), 스텁이 연결을 끊으니 판정에 실패해 `Unknown`이 유지됐다. 재발신은 없었다. (Unknown 건에 대한 자동 조회 접속은 계획 표에 없던 항목이다.)
+
+### 자원
+S2의 재시도 대기 때문에 서버가 약 3분 떠 있었고, 실측 동안 `qwen2.5:3b`(2.2GB)와 `bge-m3`(673MB)만 적재했다(둘 다 GPU 100%). 끝나고 컨테이너 0·임시 볼륨 제거·`ollama stop` 두 모델·`bootRun` 종료를 확인했다. 시스템 압축 메모리는 약 5.9GB 수준이었다. n8n 이미지(약 1GB)는 M42b를 위해 로컬에 남겨 두었다.
