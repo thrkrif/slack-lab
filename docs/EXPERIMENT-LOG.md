@@ -1288,3 +1288,14 @@ Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②
 - **단위 `python3 scripts/test_env_check.py` 47건 통과**: 정상 구성 exit 0, 오류 유도 3종(필수값 누락 / RAG 조합 오류 / 알람 한쪽 누락) 각 exit 1과 해당 키 이름, 필수 5키 각각, 빈 URL·잘못된/빈 boolean·분류 모델·echo 조합, 외부 호스트 허용·거부, 호스트 우회 시도, 와일드카드·CIDR·`RAG_ALLOWEDHOSTS` 대체, `--index` 경로 규칙, 파일 없음 exit 1·알 수 없는 옵션 exit 2, 오류가 겹쳐도 stdout·stderr에 픽스처 비밀값 4종 0건.
 - **실제 `.env` 1회 실행**: exit 0(출력은 커밋하지 않음).
 - **판정**: C10 단위 통과. 비밀값 출력 0건 확인.
+
+## 50. 5단계 M40 Slack App Manifest와 설치 가이드 (2026-10-09)
+
+**조건**: 정적 검증만(Slack 화면 조작·실제 앱 생성은 M42b 사람 단계). 외부 호출 없음.
+
+- **산출물**: `docs/slack-app-manifest.json`, `docs/SETUP.md`(앱 생성 → 설치 → 토큰 입력·`env-check` → 기동 → URL 검증 → 채널 초대, 막혔을 때 표, 앱 교체 절차), `README.md`(소개와 링크).
+- **코드 근거 대조**: `src/main`·`scripts`에서 추출한 Slack 메서드는 `chat.postMessage`·`reactions.add`·`conversations.replies`·`conversations.history`·`auth.test` 5개다. 필요 스코프는 `chat:write`·`reactions:write`·`channels:history`(둘 다)이고 `auth.test`는 스코프가 필요 없다. 이벤트 수신에 `app_mentions:read`가 필요해 선언 스코프는 4개로 일치한다.
+- **계획 변경(Request URL)**: 계획은 "Request URL을 Manifest에서 생략"이었다. 그러나 Slack 문서의 검증 오류 예시에 "Event Subscription requires either Request URL or Socket Mode Enabled"가 있어, `request_url` 없이 `bot_events`만 두면 거부될 가능성이 높다. 속성 레퍼런스상 `request_url`은 선택이고 "설정하면 앱 설정에서 직접 Verify해야 한다"고 한다. 이벤트 선언을 아예 빼면 설치 자동화가 없애려던 "구독 누락 → 무응답" 마찰이 되살아나므로, **`bot_events: [app_mention]`은 유지하고 `request_url`은 자리표시자(`https://your-ngrok-host.example.com/slack/events`)로 두었다.** 가이드 4단계에서 실제 터널 주소로 바꾸고 Verified를 확인한다. 테스트가 `*.example.com` 밖의 주소를 막아 실제 터널 주소가 공개 저장소에 커밋되지 않게 한다.
+- **미확인(M42b)**: Slack이 자리표시자 URL이 든 Manifest를 실제로 받아들이는지는 사람 단계에서만 확인할 수 있다. 거부되면 가이드 1단계의 우회(이벤트 구독 블록을 지우고 생성 뒤 화면에서 켠다)를 쓰고 Manifest와 가이드를 고친다.
+- **단위 `python3 scripts/test_manifest.py` 10건 통과**: JSON 파싱·필수 필드, 코드의 메서드가 모두 표에 있음, 추출기 회귀 방지(알려진 5개 모두 발견), 스코프·이벤트·URL 일치, 오류 유도 6종(스코프를 뺀 사본·안 쓰는 스코프를 더한 사본·이벤트를 더한 사본·실제 터널 주소가 든 사본·소켓 모드 사본·새 메서드 출현)이 각각 실패.
+- **판정**: C11 단위 통과. C12(Manifest로 만든 새 앱에서 멘션 → 답글 1 + 👀 1)는 M42b 사람 단계에서 판정한다.

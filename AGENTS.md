@@ -74,6 +74,7 @@ scripts/p1-metrics <로그...>                      # 2단계: 로그 집계 (p5
 scripts/p1-metrics --since 5m <로그...>          # 5단계: 최근 5분 구간 6개 지표(적체·큐 대기·LLM 시도·답변·결과 분포·RAG 분포, --now로 재현)
 python3 scripts/test_p1_metrics.py                # 5단계: p1-metrics 단위 검증(합성 로그, 외부 호출 없음)
 scripts/env-check [--index]                       # 5단계: .env 점검(필수값·RAG/알람/분류 조합, 키 이름·사유만 출력, exit 0/1). 단위: python3 scripts/test_env_check.py
+python3 scripts/test_manifest.py                  # 5단계: Manifest 정적 검증(코드가 부르는 Slack 메서드 ↔ 스코프·이벤트 대조, 외부 호출 없음)
 scripts/p1-load <warmup|seq|burst|dup|distinct>   # 2단계: 검증 부하 생성기 (합성 서명 요청)
 scripts/rag-index [--rebuild] [--confirm-delete]  # 3단계: RAG 색인 CLI (RAG_ENABLED·RAG_EMBEDDING_MODEL·RAG_EMBEDDING_DIMENSION·RAG_DOCS_DIR 필요, 문서는 저장소 밖)
 scripts/rag-roundtrip "<질문>" [라벨]             # 3단계: 합성 멘션을 실제 테스트 채널에 보내 RAG 답글을 확인 (--batch <questions.json> <라벨>: 질문 세트 일괄)
