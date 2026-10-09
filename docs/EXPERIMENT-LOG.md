@@ -1278,3 +1278,13 @@ Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②
 - **한계**: 예산 소진처럼 호출 없이 약 0ms로 기록된 시도와 빠른 실제 실패(연결 거부)를 로그만으로 구분할 수 없어 ③은 0ms 시도도 센다(구분하려면 Java 변경이 필요하며 5단계 비목표). 구간 경계에 걸친 이벤트는 "구간 안 마지막 줄"로 센다.
 - **단위 `python3 scripts/test_p1_metrics.py` 23건 통과**: 기존 출력 골든 일치, 구간 경계(직전·직후·시작·끝)·`Z`/`+09:00` 혼재, 시각 없는 줄 귀속(직전 줄·파일 첫머리), 부분 스냅샷, stale 31초 경고·29초 비경고, `llm_ms=0` 포함·`-1` 제외, S2 형태(시도 4줄 → 이벤트 1), 기존 `RAG 검색 result=` 줄 무시, 장애 사유 표시, event_id·attempt_id 출력 0건, 깨진 타임스탬프·빈 입력·`negative_interval=true`·숫자 쓰레기·잘못된 옵션.
 - **판정**: C4(출력의 금지 정보 0건)의 스크립트 쪽 단위는 통과했고, C1·C2·C3의 실측 판정은 M42 외부 왕복에서 한다.
+
+## 49. 5단계 M39 `scripts/env-check` (2026-10-09)
+
+**조건**: Python 3.11.7(표준 라이브러리만), 합성 env 파일. Spring 기동 검증은 하지 않는다(기동 때 Spring이 거부하는 흔한 실수를 앞당겨 보여주는 도구다).
+
+- **규칙(코드 근거)**: 필수 5키 비공백. `RAG_ENABLED`면 모델·차원(양의 정수), 임베딩/LLM 호스트가 허용 목록 밖이면 `RAG_ALLOW_EXTERNAL_*` 필요(`RagGuard`와 같은 호스트 파싱·`*.` 접미사·IPv4 CIDR, `localhost.evil.com`·`http://localhost@evil.com` 거부). `RAG_ALLOWEDHOSTS`가 있으면 기본 목록을 **대신**한다(Spring 목록 바인딩은 덮어쓰기). `RAG_DOCS_DIR`는 `--index`일 때만 필수(존재·저장소 밖). `ALERT_SECRET`·`ALERT_CHANNEL`은 둘 다 채우거나 둘 다 비움(`AlertProperties`). `CLASSIFICATION_ENABLED`면 `CLASSIFICATION_MODEL` 필요, echo 클라이언트와 함께 못 쓴다. 명시한 빈 URL·잘못된 boolean은 오류, 생략은 기본값.
+- **판단**: 빈 boolean(`RAG_ENABLED=`)은 Spring이 어떻게 바인딩할지 확인하지 못해 보수적으로 오류로 센다("키를 지운다"). `RAG_ALLOWEDHOSTS`가 환경변수로 실제 바인딩되는지는 M42 기동 한 번으로 확인한다(안 되면 env-check 출력에 "기본 목록 기준" 표시로 낮춘다).
+- **단위 `python3 scripts/test_env_check.py` 47건 통과**: 정상 구성 exit 0, 오류 유도 3종(필수값 누락 / RAG 조합 오류 / 알람 한쪽 누락) 각 exit 1과 해당 키 이름, 필수 5키 각각, 빈 URL·잘못된/빈 boolean·분류 모델·echo 조합, 외부 호스트 허용·거부, 호스트 우회 시도, 와일드카드·CIDR·`RAG_ALLOWEDHOSTS` 대체, `--index` 경로 규칙, 파일 없음 exit 1·알 수 없는 옵션 exit 2, 오류가 겹쳐도 stdout·stderr에 픽스처 비밀값 4종 0건.
+- **실제 `.env` 1회 실행**: exit 0(출력은 커밋하지 않음).
+- **판정**: C10 단위 통과. 비밀값 출력 0건 확인.
