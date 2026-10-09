@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
-"""P1 로그 집계(M17, B14). 지표 라이브러리 없이 로그를 grep해 구간별 건수·p50·p95·max와 결과별 건수, 적체를 낸다.
+"""P1 로그 집계(M17, B14) + 5단계 시간 구간·6개 지표(M38). 지표 라이브러리 없이 로그를 grep해 구간별 건수·p50·p95·max와
+결과별 건수, 적체를 낸다.
 
-사용: scripts/p1-metrics <로그 파일...>          (여러 파일을 합친다)
-      docker compose logs --no-log-prefix worker receiver reactor | scripts/p1-metrics
+사용: scripts/p1-metrics <로그 파일...>          (여러 파일을 합친다. 옵션이 없으면 아래 5단계 이전 출력 그대로)
+      scripts/p1-metrics --since 5m <로그 파일...>   (최근 5분만 6개 지표로 본다)
+      docker compose logs --no-log-prefix worker receiver reactor | scripts/p1-metrics --since 5m
+      set -a && source .env && set +a && ./gradlew bootRun 2>&1 | tee -a <저장소 밖 또는 gitignore된 경로>   (-a: 재기동해도 덮어쓰지 않는다)
+옵션: --since <5m|300s|2h|1d|ISO-8601>   상대 값은 기준 시각(now)에서 거슬러 올라간 구간이다. ISO면 그 시각부터다.
+      --now <ISO-8601>                   기준 시각(구간 끝). 단위 테스트와 기록된 판정의 재현용이며, 없으면 현재 시각이다.
+
 p95는 PRD §5의 판정 규칙대로 정렬한 표본의 ceil(0.95*N)번째 값이다.
 답변 지표(queue_wait_ms·llm_ms·send_ms·answer_ms)는 정상 답변(kind=answer, Delivered)의 **첫 시도**(gen=0, 수동 재처리 아님)만
 센다 — 실패 안내와 재시도·재처리 시도는 제외한다: 그 시도의 queue_wait_ms·answer_ms에는 앞선 시도와 재시도 대기가 들어가 p95를 왜곡한다.
 recv_ms는 200을 돌려준 응답(ack_delivered=true)만 센다. 적체 스냅샷은 워커 수만큼 찍히므로 "횟수"는 워커 수에 비례한다.
 성공률은 시도가 아니라 event_id별 마지막 결과로 센다.
 negative_interval=true인 줄이 하나라도 있으면 시계 문제로 그 배치의 성능 측정은 무효다.
+
+구간 모드(--since)의 시각은 줄 앞 ISO-8601(Spring Boot 기본 로그, `Z` 또는 `±HH:MM`)을 UTC로 바꿔 비교한다. 시각이 없는 줄(스택트레이스
+등)은 직전 시각 줄에 귀속하고, 파일 첫머리라 직전 줄이 없으면 "시각 없음"으로 센다.
+LLM 시도 시리즈(③)의 한계: 예산 소진처럼 호출 없이 약 0ms로 기록된 시도와 빠른 실제 실패(연결 거부 수 ms)를 로그만으로는 구분할 수
+없어 llm_ms가 0 이상인 모든 시도를 센다. 구분하려면 운영 코드를 바꿔야 하는데 5단계 비목표다.
+출력에는 event_id·attempt_id 원본을 쓰지 않는다(내부 집계 키로만 쓴다).
 """
 import math
 import re
 import sys
 from collections import Counter
+from datetime import datetime, timedelta, timezone
+
+STALE_SECONDS = 30  # C2: 최신 적체 스냅샷이 조회 시점 기준 이 값을 넘으면 경고한다
+TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))")
+SINCE_RE = re.compile(r"^(\d+)([smhd])$")
+UNIT = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+
+RESULT_LABEL = {  # (result, kind) → 표시 이름
+    ("Delivered", "answer"): "정상 답변",
+    ("Delivered", "failure_notice"): "실패 안내",
+    ("RetryRequested", None): "재시도 요청",
+    ("Failed", None): "DLQ(실패 확정)",
+    ("Unknown", None): "결과 불명",
+}
+
 
 def read_lines(paths):
     if not paths:
@@ -23,12 +50,15 @@ def read_lines(paths):
         with open(p, errors="replace") as f:
             yield from f
 
+
 def kv(line):
     return dict(re.findall(r"(\w+)=(\S+)", line))
+
 
 def pct(values, q):
     s = sorted(values)
     return s[max(0, math.ceil(q * len(s)) - 1)]
+
 
 def show(name, values):
     if not values:
@@ -36,65 +66,260 @@ def show(name, values):
         return
     print(f"{name:<14} n={len(values):<4} p50={pct(values, .5):<7} p95={pct(values, .95):<7} max={max(values)}")
 
-series = {k: [] for k in ("recv_ms", "enqueue_ms", "queue_wait_ms", "llm_ms", "send_ms", "answer_ms", "reaction_ms")}
-results = Counter()
-negative = 0
-excluded = 0
-last_result = {}
-publish_fail = reaction_fail = snapshot_fail = 0
-backlog = []
-for line in read_lines(sys.argv[1:]):
-    if "ack_delivered=true" in line and "recv_ms=" in line:
-        series["recv_ms"].append(int(kv(line)["recv_ms"]))
+
+def label(result, kind):
+    return RESULT_LABEL.get((result, kind)) or RESULT_LABEL.get((result, None)) or f"기타({result})"
+
+
+def parse_iso(text):
+    dt = datetime.fromisoformat(text)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def fmt(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TimeStats:
+    """시각 귀속 결과. 깨진 타임스탬프는 직전 시각에 귀속하고 따로 센다."""
+
+    def __init__(self):
+        self.no_time = 0
+        self.broken = 0
+        self.outside = 0
+
+
+def stamped(lines, stats):
+    """(시각 또는 None, 줄)을 낸다. 시각 없는 줄·깨진 시각 줄은 직전 시각에 붙인다."""
+    current = None
+    for line in lines:
+        m = TS_RE.match(line)
+        if m:
+            try:
+                current = parse_iso(m.group(1).replace("Z", "+00:00"))
+            except ValueError:
+                stats.broken += 1
+        if current is None:
+            stats.no_time += 1
+        yield current, line
+
+
+def in_window(stamped_lines, start, end, stats):
+    for ts, line in stamped_lines:
+        if ts is None or ts < start or (end is not None and ts > end):
+            stats.outside += 1
+            continue
+        yield ts, line
+
+
+class Collected:
+    def __init__(self):
+        self.series = {k: [] for k in ("recv_ms", "enqueue_ms", "queue_wait_ms", "llm_ms", "send_ms", "answer_ms", "reaction_ms")}
+        self.llm_attempts = []  # ③: llm_ms >= 0인 모든 시도(재시도·실패·시간 초과 포함)
+        self.results = Counter()
+        self.last_result = {}
+        self.negative = self.excluded = self.malformed = 0
+        self.publish_fail = self.reaction_fail = self.snapshot_fail = 0
+        self.backlog = []  # 레거시: queue_ready가 있는 스냅샷
+        self.snapshots = []  # (시각, kv) — 키가 빠진 부분 스냅샷 포함
+        self.rag = Counter()
+        self.rag_reasons = Counter()
+
+
+def to_int(v, default=-1):
+    return int(v) if v is not None else default
+
+
+def collect(stamped_lines):
+    c = Collected()
+    for ts, line in stamped_lines:
+        try:
+            handle(c, ts, line)
+        except ValueError:
+            c.malformed += 1  # 숫자 자리에 쓰레기가 있는 줄: 집계를 멈추지 않는다
+    return c
+
+
+def handle(c, ts, line):
+    if "metric=rag_result" in line:
+        # 이 키가 있는 줄만 센다: 핸들러의 기존 "RAG 검색 … result=found|none" 줄과 같은 result 키라 이중 계산을 막는다
+        f = kv(line)
+        result = f.get("result")
+        if result in ("found", "none", "unavailable"):
+            c.rag[result] += 1
+            if result == "unavailable" and f.get("reason"):
+                c.rag_reasons[f["reason"]] += 1
+    elif "ack_delivered=true" in line and "recv_ms=" in line:
+        c.series["recv_ms"].append(int(kv(line)["recv_ms"]))
     elif "큐 저장 확인" in line and "enqueue_ms=" in line:
-        series["enqueue_ms"].append(int(kv(line)["enqueue_ms"]))
+        c.series["enqueue_ms"].append(int(kv(line)["enqueue_ms"]))
     elif "발행 실패 event_id=" in line or "발행 확인 불가 event_id=" in line:
         # 컨트롤러 줄만 센다: 발행자 쪽 "큐 저장 실패"·"큐 저장 확인 실패"까지 세면 한 건이 경로에 따라 1~2건이 된다.
-        publish_fail += 1
+        c.publish_fail += 1
     elif "처리 지표" in line:
         f = kv(line)
-        results[(f.get("result"), f.get("kind"))] += 1
+        c.results[(f.get("result"), f.get("kind"))] += 1
         if "event_id" in f:
-            last_result[f["event_id"]] = (f.get("result"), f.get("kind"))
+            c.last_result[f["event_id"]] = (f.get("result"), f.get("kind"))
         if f.get("negative_interval") == "true":
-            negative += 1
+            c.negative += 1
+        if to_int(f.get("llm_ms")) >= 0:
+            c.llm_attempts.append(int(f["llm_ms"]))
         if f.get("result") == "Delivered" and f.get("kind") == "answer":
             first_attempt = f.get("gen") == "0" and f.get("manual_run") != "true"
             if not first_attempt:
-                excluded += 1
+                c.excluded += 1
             else:
                 for k in ("queue_wait_ms", "llm_ms", "send_ms", "answer_ms"):
-                    if int(f.get(k, "-1")) >= 0:
-                        series[k].append(int(f[k]))
+                    if to_int(f.get(k)) >= 0:
+                        c.series[k].append(int(f[k]))
     elif "반응 성공" in line and "reaction_ms=" in line:
         v = int(kv(line)["reaction_ms"])
         if v >= 0:
-            series["reaction_ms"].append(v)
+            c.series["reaction_ms"].append(v)
     elif "반응 실패" in line:
-        reaction_fail += 1
-    elif "적체 스냅샷 " in line and "queue_ready=" in line:
-        backlog.append(kv(line))
+        c.reaction_fail += 1
     elif "적체 스냅샷 실패" in line:
-        snapshot_fail += 1
+        c.snapshot_fail += 1
+    elif "적체 스냅샷 " in line:
+        f = kv(line)
+        if f:
+            c.snapshots.append((ts, f))
+        if "queue_ready" in f:
+            c.backlog.append(f)
 
-for k, v in series.items():
-    show(k, v)
-print()
-print("결과별 건수(시도 단위):")
-for (r, kind), n in sorted(results.items(), key=lambda x: str(x)):
-    print(f"  {r} kind={kind}: {n}")
-total = sum(results.values())
-ok = sum(n for (r, k), n in results.items() if r == "Delivered" and k == "answer")
-print(f"  정상 답변 {ok}/{total} 시도" + (f" ({100 * ok / total:.1f}%)" if total else ""))
-events = len(last_result)
-done = sum(1 for r in last_result.values() if r == ("Delivered", "answer"))
-print(f"  event_id별 마지막 결과: 정상 답변 {done}/{events}" + (f" ({100 * done / events:.1f}%)" if events else "")
-      + f", 재시도·재처리 시도로 표본에서 뺀 정상 답변 {excluded}건")
-print(f"발행 실패 {publish_fail}건, 반응 실패 {reaction_fail}건, 스냅샷 실패 {snapshot_fail}건, 음수 구간 {negative}건"
-      + (" ← 측정 무효" if negative else ""))
-if backlog:
-    def mx(key):
-        return max(int(b[key]) for b in backlog)
-    last = backlog[-1]
-    print(f"적체(스냅샷 {len(backlog)}줄, 워커 수만큼 중복): queue_ready 최대 {mx('queue_ready')}, defer 최대 {mx('defer')}, dead 최대 {mx('dead')}, "
-          f"마지막 retry={last['retry']} dlq={last['dlq']} recovery={last['recovery']}")
+
+def render_legacy(c):
+    for k, v in c.series.items():
+        show(k, v)
+    print()
+    print("결과별 건수(시도 단위):")
+    for (r, kind), n in sorted(c.results.items(), key=lambda x: str(x)):
+        print(f"  {r} kind={kind}: {n}")
+    total = sum(c.results.values())
+    ok = sum(n for (r, k), n in c.results.items() if r == "Delivered" and k == "answer")
+    print(f"  정상 답변 {ok}/{total} 시도" + (f" ({100 * ok / total:.1f}%)" if total else ""))
+    events = len(c.last_result)
+    done = sum(1 for r in c.last_result.values() if r == ("Delivered", "answer"))
+    print(f"  event_id별 마지막 결과: 정상 답변 {done}/{events}" + (f" ({100 * done / events:.1f}%)" if events else "")
+          + f", 재시도·재처리 시도로 표본에서 뺀 정상 답변 {c.excluded}건")
+    print(f"발행 실패 {c.publish_fail}건, 반응 실패 {c.reaction_fail}건, 스냅샷 실패 {c.snapshot_fail}건, 음수 구간 {c.negative}건"
+          + (" ← 측정 무효" if c.negative else ""))
+    if c.malformed:
+        print(f"형식 오류로 건너뛴 줄 {c.malformed}건")
+    if c.backlog:
+        def mx(key):
+            vals = [int(b[key]) for b in c.backlog if key in b]  # 부분 스냅샷(키 누락)에서 죽지 않게 있는 줄로만 계산
+            return max(vals) if vals else "-"
+        last = c.backlog[-1]
+        print(f"적체(스냅샷 {len(c.backlog)}줄, 워커 수만큼 중복): queue_ready 최대 {mx('queue_ready')}, defer 최대 {mx('defer')}, dead 최대 {mx('dead')}, "
+              f"마지막 retry={last.get('retry', '-')} dlq={last.get('dlq', '-')} recovery={last.get('recovery', '-')}")
+
+
+def render_window(c, start, end, now, ts_stats):
+    print(f"구간: {fmt(start)} ~ {fmt(end) if end else '(제한 없음)'} (UTC), 기준 시각 {fmt(now)}")
+    print(f"  구간 밖 제외 {ts_stats.outside}줄, 시각 없음 {ts_stats.no_time}줄, 깨진 타임스탬프 {ts_stats.broken}줄"
+          + (f", 형식 오류로 건너뜀 {c.malformed}줄" if c.malformed else ""))
+    if c.negative:
+        print(f"  ⚠ 음수 구간 {c.negative}건 ← 시계 문제, 이 구간의 성능 측정은 무효")
+    print()
+
+    print("① 최신 적체 스냅샷")
+    if c.snapshots:
+        ts, f = c.snapshots[-1]
+        age = (now - ts).total_seconds()
+        cells = " ".join(f"{k}={f.get(k, '-')}" for k in ("queue_ready", "defer", "dead", "retry", "dlq", "recovery"))
+        print(f"  {fmt(ts)} ({age:.0f}초 전) {cells}")
+        missing = [k for k in ("queue_ready", "defer", "dead", "retry", "dlq", "recovery") if k not in f]
+        if missing:
+            print(f"  ⚠ 부분 스냅샷: 누락 키 {','.join(missing)} (일부 조회 실패)")
+        if age > STALE_SECONDS:
+            print(f"  ⚠ stale: 최신 스냅샷이 {STALE_SECONDS}초를 넘었다")
+    else:
+        print("  스냅샷 없음")
+    if c.snapshot_fail:
+        print(f"  스냅샷 실패 {c.snapshot_fail}건")
+
+    print("② 큐 대기(정상 첫 시도)")
+    show("  queue_wait_ms", c.series["queue_wait_ms"])
+    print("③ LLM 호출 시도(재시도·실패·시간 초과 포함, 호출 없이 0ms로 기록된 시도도 포함)")
+    show("  llm_attempt_ms", c.llm_attempts)
+    print("④ 전체 답변(정상 첫 시도)")
+    show("  answer_ms", c.series["answer_ms"])
+
+    print("⑤ 처리 결과 분포")
+    print("  시도 단위:")
+    by_label = Counter()
+    for (r, kind), n in c.results.items():
+        by_label[label(r, kind if r == "Delivered" else None)] += n
+    for name, n in sorted(by_label.items()):
+        print(f"    {name}: {n}")
+    if not by_label:
+        print("    (없음)")
+    print("  이벤트 단위(구간 안 마지막 결과 기준 — 구간 경계에 걸친 이벤트는 구간 안 마지막 줄로 센다):")
+    ev = Counter(label(r, kind if r == "Delivered" else None) for r, kind in c.last_result.values())
+    for name, n in sorted(ev.items()):
+        print(f"    {name}: {n}")
+    if not ev:
+        print("    (없음)")
+
+    print("⑥ RAG 결과 분포(metric=rag_result 줄만)")
+    total = sum(c.rag.values())
+    if total == 0:
+        print("  RAG 호출 0 (비활성이거나 검색 생략 — 장애 아님)")
+    else:
+        un = c.rag["unavailable"]
+        print(f"  found={c.rag['found']} none={c.rag['none']} unavailable={un} (호출 {total}, unavailable {100 * un / total:.1f}%)")
+        if un:
+            reasons = ", ".join(f"{k}={v}" for k, v in sorted(c.rag_reasons.items())) or "reason 없음"
+            print(f"  검색 장애 있음: {reasons}")
+        else:
+            print("  검색 장애 없음")
+    print(f"발행 실패 {c.publish_fail}건, 반응 실패 {c.reaction_fail}건")
+
+
+def parse_args(argv):
+    since = now = None
+    paths = []
+    it = iter(argv)
+    for a in it:
+        if a.startswith("--since") or a.startswith("--now"):
+            name, _, val = a.partition("=")
+            if not val:
+                val = next(it, None)
+            if val is None:
+                sys.exit(f"{name} 값이 필요하다")
+            if name == "--since":
+                since = val
+            elif name == "--now":
+                now = val
+            else:
+                sys.exit(f"알 수 없는 옵션: {a}")
+        elif a.startswith("--"):
+            sys.exit(f"알 수 없는 옵션: {a}")
+        else:
+            paths.append(a)
+    return since, now, paths
+
+
+def main(argv):
+    since, now_arg, paths = parse_args(argv)
+    if since is None and now_arg is not None:
+        sys.exit("--now는 --since와 함께 쓴다")
+    ts_stats = TimeStats()
+    if since is None:
+        render_legacy(collect((None, line) for line in read_lines(paths)))
+        return
+    try:
+        now = parse_iso(now_arg) if now_arg else datetime.now(timezone.utc)
+        m = SINCE_RE.match(since)
+        start = now - timedelta(**{UNIT[m.group(2)]: int(m.group(1))}) if m else parse_iso(since)
+    except ValueError:
+        sys.exit("--since/--now 값은 5m·300s·2h·1d 또는 ISO-8601이어야 한다")
+    end = now if (now_arg or m) else None
+    lines = in_window(stamped(read_lines(paths), ts_stats), start, end, ts_stats)
+    render_window(collect(lines), start, end, now, ts_stats)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

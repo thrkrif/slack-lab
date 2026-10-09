@@ -71,6 +71,8 @@ docker compose --profile app up --build           # 전체 스택: 수신·워�
 scripts/recovery list                             # 2단계: 결과 불명·DLQ 복구 CLI (check·resolve-completed·reprocess·close)
 scripts/p1-residue-check                          # 2단계: 해결된 건의 본문 잔존 검사(B18)
 scripts/p1-metrics <로그...>                      # 2단계: 로그 집계 (p50/p95·결과별 건수·적체, B14)
+scripts/p1-metrics --since 5m <로그...>          # 5단계: 최근 5분 구간 6개 지표(적체·큐 대기·LLM 시도·답변·결과 분포·RAG 분포, --now로 재현)
+python3 scripts/test_p1_metrics.py                # 5단계: p1-metrics 단위 검증(합성 로그, 외부 호출 없음)
 scripts/p1-load <warmup|seq|burst|dup|distinct>   # 2단계: 검증 부하 생성기 (합성 서명 요청)
 scripts/rag-index [--rebuild] [--confirm-delete]  # 3단계: RAG 색인 CLI (RAG_ENABLED·RAG_EMBEDDING_MODEL·RAG_EMBEDDING_DIMENSION·RAG_DOCS_DIR 필요, 문서는 저장소 밖)
 scripts/rag-roundtrip "<질문>" [라벨]             # 3단계: 합성 멘션을 실제 테스트 채널에 보내 RAG 답글을 확인 (--batch <questions.json> <라벨>: 질문 세트 일괄)
