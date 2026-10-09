@@ -118,7 +118,7 @@
 - [x] **M37 사전 점검 + `metric=rag_result` 한 줄** — 완료(`EXPERIMENT-LOG.md` §47): iCloud 중복은 빈 디렉터리·gitignore 사본뿐이라 컴파일 무영향, `retrieve()` try/finally 1줄·단위 8건, 전체 빌드 522건 통과(C5)
 - [x] **M38 `scripts/p1-metrics` 시간 구간·6개 지표** — 완료(`EXPERIMENT-LOG.md` §48): `--since`/`--now`·6개 지표·부분 스냅샷 KeyError 수정·stale 경고, 옵션 없는 출력은 골든으로 불변, 단위 23건 통과
 - [x] **M39 `scripts/env-check`** — 완료(`EXPERIMENT-LOG.md` §49): 필수 5키·RAG/알람/분류 조합·호스트 규칙(RagGuard 동일)·`--index`, 단위 47건, 비밀값 출력 0, 실제 `.env` exit 0
-- [ ] **M40 Slack App Manifest + 설치 가이드** — C11
+- [x] **M40 Slack App Manifest + 설치 가이드** — 완료(`EXPERIMENT-LOG.md` §50): Manifest·`SETUP.md`·`README.md`, 코드가 부르는 Slack 메서드 5개↔스코프 4·이벤트 1 대조, 단위 10건. **계획 변경**: Request URL은 생략이 아니라 자리표시자(`*.example.com`) — Slack이 Request URL 없는 이벤트 구독을 거부할 가능성이 커서. 수락 여부는 M42b에서 확인
 - [ ] **M41 n8n 예제 워크플로 + 본문 동일성 검사** — C8·C9
 - [ ] **M42 자동 통합 실측(무거운 기동 1회)** — C1·C2·C3·C4·C13
 - [ ] **M42b 사람 입력 세션(멈춤 지점)** — C6·C7·C8·C9·C12·C13
@@ -128,7 +128,7 @@
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-09)**: 5단계 착수(M37-0 완료). 4단계는 `v0.4.0`으로 종결(분류 기본 비활성, C4 의도 11/12 미충족은 §46에 남김). M37 완료(`metric=rag_result` 한 줄, 빌드 522건 통과). M38 완료(`p1-metrics --since` 6개 지표, 단위 23건). M39 완료(`scripts/env-check`, 단위 47건). 다음은 M40(Slack App Manifest·설치 가이드, 코드가 쓰는 Slack 메서드와 스코프 정적 대조). M42b에서 n8n Credential 입력·Slack 앱 생성·설치·채널 초대·터널 URL 등록은 사람이 하며, 그 지점에서 멈추고 사용자가 할 일을 안내한다.
+- **상태(2026-10-09)**: 5단계 착수(M37-0 완료). 4단계는 `v0.4.0`으로 종결(분류 기본 비활성, C4 의도 11/12 미충족은 §46에 남김). M37 완료(`metric=rag_result` 한 줄, 빌드 522건 통과). M38 완료(`p1-metrics --since` 6개 지표, 단위 23건). M40 완료(Manifest·SETUP.md·README, 단위 10건; Request URL은 자리표시자). 다음은 M41(n8n 예제 워크플로 + 본문 동일성 검사). M42b에서 n8n Credential 입력·Slack 앱 생성·설치·채널 초대·터널 URL 등록은 사람이 하며, 그 지점에서 멈추고 사용자가 할 일을 안내한다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
@@ -857,7 +857,7 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 ### 확정된 입력(재질문 금지)
 - **모니터링 지표**: 개발자가 지연·무응답의 원인 구간(큐/LLM/RAG/전송)을 판단하는 것이 목적이다. 형태는 `scripts/p1-metrics` 로그 집계 확장(시나리오 직후 `--since 5m`)이고, 지표는 6개(큐 적체, 큐 대기 p95, LLM p95, 답변 p95, 처리 결과 분포, RAG 결과 분포)다. 운영 코드 변경은 `RetrievalService.retrieve()`의 호출당 정확히 1줄 `metric=rag_result result=found|none|unavailable`뿐이다(동작 불변, 로그에 질문·문서 원문/제목·시크릿·event_id 원본 금지). 버림: Actuator/Micrometer, HTTP 지표 API, 외부 대시보드, 수집 컨테이너, 로그 저장소.
 - **n8n 선택 어댑터**: 예제 워크플로 JSON + 문서만(`docs/n8n/`). Java·`compose.yaml` 변경 없음. Manual Trigger → Code 노드(합성 CloudWatch SNS 알람) → HTTP Request(`POST /alerts/cloudwatch`, `X-Alert-Secret`은 n8n Header Auth Credential, JSON에 시크릿 미포함). 검증 때만 로컬 기동 후 제거.
-- **설치 자동화**: 설치 가이드 + `scripts/env-check`(Python3 표준 라이브러리) + `docs/slack-app-manifest.json`(스코프 `app_mentions:read`·`chat:write`·`reactions:write`·`channels:history`, 이벤트 `app_mention`, Request URL은 가이드 안내). 도구 설치·모델 pull·터널 자동화는 하지 않는다.
+- **설치 자동화**: 설치 가이드 + `scripts/env-check`(Python3 표준 라이브러리) + `docs/slack-app-manifest.json`(스코프 `app_mentions:read`·`chat:write`·`reactions:write`·`channels:history`, 이벤트 `app_mention`, Request URL은 자리표시자 `*.example.com`을 가이드에서 실제 터널 주소로 교체). 도구 설치·모델 pull·터널 자동화는 하지 않는다.
 - **제외**: LangGraph, 분류 개선(분류 기본 비활성 유지), 모델 확대.
 
 ### 합격선(M37 착수 시점에 고정, 이후 변경 금지)
