@@ -110,11 +110,25 @@
 - [x] **M36 통합 실측·판정 수행 완료** — `EXPERIMENT-LOG.md` §44: C1·C2(52/60·20/20·0)·C5·C6·C7·C8·C9 합격, C3은 보고(기준선 14/40 → 6/40), **C4는 정의대로 불합격(11/15 < 14: 계획 정의 결함 + 실제 회귀 1건)이라 사용자 결정 대기**, 참고 측정(3b 분류+7b 답변)은 분류 16/16 폴백·e2e 5배 느림, ADR-10 기록
 - [x] **4단계 완료** — 2026-10-09 사용자 요청으로 "분류 기본 비활성" 종결(C4 기준은 사후 변경하지 않음), `develop`→`main` 병합·태그 `v0.4.0`
 
+### 5단계 (P2: 모니터링 지표 + n8n 예제 + 설치 자동화) — 진행 중
+
+계획 정본은 아래 "5단계 계획". 자동 진행 구간은 M37~M42, 사람 구간은 M42b·M43이다.
+
+- [x] **M37-0 단계 착수** — 2026-10-09 사용자 요청으로 단계 전환. PLAN 5단계 계획 추가, `AGENTS.md` "현재 단계" 갱신
+- [ ] **M37 사전 점검 + `metric=rag_result` 한 줄** — C3·C4·C5
+- [ ] **M38 `scripts/p1-metrics` 시간 구간·6개 지표** — C1·C2·C3·C4
+- [ ] **M39 `scripts/env-check`** — C10
+- [ ] **M40 Slack App Manifest + 설치 가이드** — C11
+- [ ] **M41 n8n 예제 워크플로 + 본문 동일성 검사** — C8·C9
+- [ ] **M42 자동 통합 실측(무거운 기동 1회)** — C1·C2·C3·C4·C13
+- [ ] **M42b 사람 입력 세션(멈춤 지점)** — C6·C7·C8·C9·C12·C13
+- [ ] **M43 단계 완료** — 사용자 요청 시에만
+
 ### 다음 세션 핸드오프
 
 단위를 끝낼 때마다 이 소절을 덮어쓴다. 재현 가능한 사실만 적고, 진행 체크는 위 목록이 정본이다.
 
-- **상태(2026-10-09)**: 4단계 완료(`v0.4.0`). 분류 기본 비활성(`classification.enabled=false`)으로 종결했고 C4 의도 11/12는 미충족으로 남긴다(§46). 다음은 5단계(n8n 선택 어댑터·모니터링 지표)·설치 자동화이며 단계 전환은 사용자 요청 시에만 한다.
+- **상태(2026-10-09)**: 5단계 착수(M37-0 완료). 4단계는 `v0.4.0`으로 종결(분류 기본 비활성, C4 의도 11/12 미충족은 §46에 남김). 다음은 M37(`RetrievalService.retrieve()`에 `metric=rag_result` 한 줄). M42b에서 n8n Credential 입력·Slack 앱 생성·설치·채널 초대·터널 URL 등록은 사람이 하며, 그 지점에서 멈추고 사용자가 할 일을 안내한다.
 - 실행: `docker compose up -d rabbitmq postgres`(.env에 `POSTGRES_PASSWORD`) + 호스트 `bootRun`, 또는 `docker compose --profile app up --build`. 호스트 8080을 옛 `bootRun`(Redis 시절 코드)이 점유하고 있을 수 있다 — 컨테이너는 `RECEIVER_PORT=18080`으로 띄웠다.
 - 부하·실험은 노트북 부담이 크다(Docker + Ollama 약 8GB). 개발 중 검증은 가볍게, 전체 스택·LLM 실험은 마일스톤 끝에 한 번만 하고 바로 내린다(`docker compose down --remove-orphans`, `ollama stop qwen2.5:7b`).
 - M22 실측: 순차 20건 수신 p95 71ms·답변 p95 6.4s, 버스트 수신 p95 129ms, D1~D3 중복 0, R1~R3 통과(R2 인수 64초, R3 자동 조회 완료). 언어 방어가 실제로 작동해 일부 질문은 재시도 뒤 실패 안내로 끝난다(§21).
@@ -833,3 +847,46 @@ Slack `app_mention` → 서명 검증 → 중복 억제 → Ollama 답변 → �
 - **Architect MAJOR**: Option A를 A1/A2로 분리(A1 제외), `sendAsync`+`cancel(true)` 및 소켓 종료 판정으로 정정, 예산 소진 경로(A15)와 총 60초(A16) 검증 추가, 3초 뒤 연결 단절 대응(`ack_delivered`), dedup 해제 배치, 스파이크를 M1.5로 이동.
 - **MINOR**: FAILED 축출·CAS 전이, A13 grep 범위 확장·경로 고정, 설정 키 확정(`llm.client` 등), 폴백 모델, Slack 구독 자동 비활성화 체크리스트, 정본 `.claude/docs/PLAN.md` 동기화·문서 링크 교정.
 - **미반영(사유)**: Architect의 "예산 사실상 무한 배치"는 선택 배치(M8-5)로 격하해 반영. Option 3(콜백)은 기각 근거만 §7에 기록.
+
+---
+
+# 5단계(모니터링 지표 + n8n 예제 + 설치 자동화) 계획
+
+승인: 2026-10-09 사용자 요청으로 단계 전환. 요구사항은 deep-interview 6라운드(ambiguity 13.3%, 답변은 사용자가 codex에 위임)로 확정했고, ralplan consensus 3회전(Architect·Critic 각 3회, 최종 Critic APPROVE)을 거쳤다. 사본: `.omc/specs/deep-interview-stage5.md`, `.omc/plans/stage5-plan.md`(untracked, 상세 기대 줄 수 표·마일스톤 작업·검증 포함).
+
+### 확정된 입력(재질문 금지)
+- **모니터링 지표**: 개발자가 지연·무응답의 원인 구간(큐/LLM/RAG/전송)을 판단하는 것이 목적이다. 형태는 `scripts/p1-metrics` 로그 집계 확장(시나리오 직후 `--since 5m`)이고, 지표는 6개(큐 적체, 큐 대기 p95, LLM p95, 답변 p95, 처리 결과 분포, RAG 결과 분포)다. 운영 코드 변경은 `RetrievalService.retrieve()`의 호출당 정확히 1줄 `metric=rag_result result=found|none|unavailable`뿐이다(동작 불변, 로그에 질문·문서 원문/제목·시크릿·event_id 원본 금지). 버림: Actuator/Micrometer, HTTP 지표 API, 외부 대시보드, 수집 컨테이너, 로그 저장소.
+- **n8n 선택 어댑터**: 예제 워크플로 JSON + 문서만(`docs/n8n/`). Java·`compose.yaml` 변경 없음. Manual Trigger → Code 노드(합성 CloudWatch SNS 알람) → HTTP Request(`POST /alerts/cloudwatch`, `X-Alert-Secret`은 n8n Header Auth Credential, JSON에 시크릿 미포함). 검증 때만 로컬 기동 후 제거.
+- **설치 자동화**: 설치 가이드 + `scripts/env-check`(Python3 표준 라이브러리) + `docs/slack-app-manifest.json`(스코프 `app_mentions:read`·`chat:write`·`reactions:write`·`channels:history`, 이벤트 `app_mention`, Request URL은 가이드 안내). 도구 설치·모델 pull·터널 자동화는 하지 않는다.
+- **제외**: LangGraph, 분류 개선(분류 기본 비활성 유지), 모델 확대.
+
+### 합격선(M37 착수 시점에 고정, 이후 변경 금지)
+| ID | 기준 |
+|---|---|
+| C1 | 정상 왕복 5건 + LLM 실패·RAG 장애·전송 결과 불명 각 1건을 유도해, 시나리오 직후 `p1-metrics --since 5m` 결과 건수가 기대 줄 수 표와 오차 0(시도·이벤트 단위) |
+| C2 | 최신 적체 스냅샷이 조회 시점 기준 30초 이내 |
+| C3 | RAG found·none·unavailable 각 1회 이상 유도, 실제 `retrieve()` 호출 수와 `rag_result` 집계 수 오차 0 |
+| C4 | 새 로그·출력의 금지 정보 노출 0건 |
+| C5 | 기존 테스트 무변경 통과 + `ArchitectureTest` 통과 |
+| C6 | n8n 예제 실행 성공, 최초+재전송 3회 모두 200·리포트 정확히 1개, 잘못된 Credential은 401·리포트 0개 |
+| C7 | 첫 리포트까지 180초 이내, 이후 15초 중복 관찰 유지 |
+| C8 | n8n과 `alert-roundtrip` 생성 본문을 고정 입력·시각으로 JSON 파싱 비교해 불일치 0 |
+| C9 | 배포 JSON·export에 실제 시크릿 0건, 검증 후 컨테이너·볼륨 제거 |
+| C10 | `env-check`: 정상 exit 0, 필수값 누락·RAG 조합 오류·알람 한쪽 누락 3종 각각 exit 1, 비밀값 출력 0건 |
+| C11 | Manifest JSON 파싱 성공, 스코프·이벤트가 코드 근거와 일치 |
+| C12 | (사람 단계 후) Manifest로 만든 새 앱에서 실제 멘션 1건 → 스레드 답글 1개 + 👀 1개 |
+| C13 | 결과를 `EXPERIMENT-LOG.md`에 검증 환경과 함께 기록, 구조 변경 시 `ARCHITECTURE.md` 갱신 |
+
+**미달 공통 규칙**(M30·4단계 선례): 하나라도 미달하면 원인(로그 형식 / 유도 방법 / 코드 / 환경)을 특정하고, 개선안 또는 목표 변경안을 올린 뒤 **멈춰서 사용자 결정을 받는다**. 합격선은 사후에 바꾸지 않는다.
+
+### 마일스톤(M37~M43)
+- **자동 진행 구간 M37~M42**: 브랜치 → 커밋 → PR → `develop` squash 병합. 무거운 기동(Docker 인프라 + bootRun + Ollama)은 **최대 2회**(M42 1회, M42b 1회)다.
+- **M37** iCloud 중복 점검 후 `retrieve()` 지역 변수 + try/finally로 `metric=rag_result` 1줄. **M38** `p1-metrics` `--since`·6개 지표·부분 스냅샷 KeyError 수정·stale 경고. **M39** `scripts/env-check`. **M40** Manifest·설치 가이드(코드가 쓰는 Slack 메서드와 스코프 정적 대조). **M41** n8n 예제 JSON·README, 본문 동일성 검사, 시크릿 0건 검사, `scripts/n8n-watch`. **M42** 시나리오 S1~S5 자동 통합 실측.
+- **M42b 사람 입력 세션(멈춤 지점)**: n8n Credential 입력, Manifest로 Slack 앱 생성·설치, 채널 초대, 터널 URL 등록·이벤트 구독. 이 지점에서 멈추고 사용자가 할 일과 필요한 정보를 안내한다. 사용자 입력 없이 Slack 화면 조작이나 외부 설정 변경을 하지 않는다.
+- **M43** `develop` → `main` 병합·태그는 사용자 요청 시에만.
+
+### 멈춤 지점(5단계)
+(1) M42b의 사람 입력 절차 전부(AGENTS.md의 Slack 화면 조작·터널 URL 재등록에 n8n Credential 입력을 더함) (2) 각 합격선 미달 시 사용자 결정 (3) 단계 완료(M43)의 `main` 병합·태그. PRD 5단계 항목 추가 여부는 사용자가 정한다(계획 R9).
+
+### ADR(요약)
+Decision: 지표는 로그 집계 확장 + 로그 1줄, n8n은 예제만, 설치는 Manifest·가이드·`env-check`로 한정한다. Drivers: 비용 0원·16GB 자원·추가 상주 서비스 없음, 기존 core 경계(ADR-9) 유지, 검증 가능한 최소 범위. Rejected: Actuator/Micrometer·외부 대시보드(상주 비용), n8n Java 어댑터(직접 수신이 이미 P2-7·P2-8 충족), setup 스크립트까지의 설치 자동화(OS·계정 분기), `처리 지표` 줄에 rag 필드 추가(스펙의 "최종 반환 지점 별도 1줄"과 충돌). Follow-ups: 재시도 분포 지표, n8n CLI 자동 import 검토(미검증), 구조화 로그 정비.
