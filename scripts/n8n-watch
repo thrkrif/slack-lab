@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""n8n 예제 관찰(5단계 M41, M42b 사람 단계에서 쓴다). n8n이 보낸 알람의 리포트를 **알람 채널(ALERT_CHANNEL)** 에서 읽고 판정한다.
+실제 Slack을 읽는다 — 단위 테스트(scripts/test_n8n_example.py)와 분리한 이유다. 판정 규칙은 scripts/alert-roundtrip과 같다
+(첫 리포트 뒤 15초 관찰, 정확히 1개, 실패 안내는 실패). alert-roundtrip은 고치지 않고 exec로 불러와 history·is_report·event_id를 재사용한다.
+
+순서:
+  1) 사람이 n8n에서 Execute를 누르기 **전에**: scripts/n8n-watch start
+     (관찰 시작 시각 −1초를 상태 파일에 적는다. ALERT_CHANNEL이 비어 있으면 거부한다)
+  2) 사람이 n8n을 실행한 뒤 Code 노드 출력의 Message 안에서 AlarmName·StateChangeTime을 복사해 준다(시크릿이 아니다)
+  3) scripts/n8n-watch judge <AlarmName> <StateChangeTime> --expect 1 --log <수신 로그 파일> [--state <상태 파일>]
+     --expect 1: 정상 Credential. 첫 리포트 Slack ts − 수신 로그의 첫 '알람 발행 완료' 시각 ≤ 180초, 그 뒤 15초 관찰해 정확히 1개
+     --expect 0: 잘못된 Credential. 수신 로그에 '알람 인증 실패 → 401'이 1줄 이상, '알람 발행 완료' 0줄, 60초 동안 리포트 0개
+수신 로그는 Spring 로그 줄(맨 앞 ISO-8601 시각)이어야 한다. 출력에는 event_id·채널 ID·토큰을 쓰지 않는다.
+종료 코드: 0 합격, 1 불합격, 2 사용법·상태 오류, 3 Slack API·네트워크 오류
+"""
+import datetime
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+FIRST_REPORT_LIMIT = 180   # 스펙 C7
+OBSERVE_AFTER_FIRST = 15   # 스펙 C7
+EXPECT_ZERO_OBSERVE = 60
+TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))")
+
+
+def read_dotenv(path):
+    env = {}
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def watch_env(environ, dotenv):
+    """관찰에 쓸 값. 프로세스 환경이 .env보다 우선한다. ALERT_CHANNEL이 없으면 None을 돌려준다(거부)."""
+    merged = {**dotenv, **{k: v for k, v in environ.items() if k in ("SLACK_BOT_TOKEN", "ALERT_CHANNEL")}}
+    if not merged.get("SLACK_BOT_TOKEN", "").strip() or not merged.get("ALERT_CHANNEL", "").strip():
+        return None
+    return merged
+
+
+def load_roundtrip(env):
+    """alert-roundtrip을 수정 없이 불러온다. 그 모듈은 SLACK_TEST_CHANNEL을 관찰 채널로 쓰므로 알람 채널 값을 넣어 준다."""
+    os.environ["SLACK_BOT_TOKEN"] = env["SLACK_BOT_TOKEN"]
+    os.environ["SLACK_TEST_CHANNEL"] = env["ALERT_CHANNEL"]
+    os.environ.setdefault("ALERT_SECRET", "unused-for-watch")
+    path = os.path.join(HERE, "alert-roundtrip")
+    src = open(path, encoding="utf-8").read().replace('if __name__ == "__main__":\n    main()\n', "")
+    ns = {"__file__": path}
+    exec(compile(src, "alert-roundtrip", "exec"), ns)
+    return ns
+
+
+def log_epoch(line):
+    m = TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def scan_log(lines, eid, since_epoch):
+    """수신 로그에서 (이 알람의 첫 '알람 발행 완료' 시각 또는 None, 발행 줄 수, 시작 이후 '알람 인증 실패' 줄 수)."""
+    first, published, auth_fail = None, 0, 0
+    for line in lines:
+        ts = log_epoch(line)
+        if f"알람 발행 완료 event_id={eid}" in line:
+            published += 1
+            if ts is not None and (first is None or ts < first):
+                first = ts
+        elif "알람 인증 실패" in line and ts is not None and ts >= since_epoch:
+            auth_fail += 1
+    return first, published, auth_fail
+
+
+def evaluate_expect_one(reports, published_at, failure_prefixes):
+    """reports: [(slack ts 초, 본문)] 시각 순. (종료 코드, 메시지 목록)."""
+    msgs = []
+    if published_at is None:
+        return 2, ["수신 로그에서 이 알람의 '알람 발행 완료' 줄을 찾지 못했다(--log가 맞는지, 최초 전송이 큐 저장까지 갔는지 확인)"]
+    if not reports:
+        return 1, ["시간 초과: 이 알람의 리포트 없음"]
+    first = min(ts for ts, _ in reports)
+    elapsed = first - published_at
+    msgs.append(f"이 알람의 봇 메시지 {len(reports)}개 (발행 완료 후 첫 리포트까지 {elapsed:.1f}s)")
+    if any(text.startswith(failure_prefixes) for _, text in reports):
+        return 1, msgs + ["실패 안내가 올라왔다"]
+    if elapsed > FIRST_REPORT_LIMIT:
+        return 1, msgs + [f"첫 리포트가 {FIRST_REPORT_LIMIT}초를 넘었다"]
+    if len(reports) != 1:
+        return 1, msgs + [f"리포트가 정확히 1개여야 하는데 {len(reports)}개다"]
+    return 0, msgs
+
+
+def evaluate_expect_zero(report_count, published, auth_fail):
+    msgs = [f"401 줄 {auth_fail}개, 발행 완료 줄 {published}개, 리포트 {report_count}개"]
+    if auth_fail < 1:
+        return 1, msgs + ["수신 로그에 '알람 인증 실패 → 401'이 없다(요청이 안 왔거나 Credential이 맞았다)"]
+    if published or report_count:
+        return 1, msgs + ["인증에 실패했는데 발행 또는 리포트가 있다"]
+    return 0, msgs
+
+
+def state_path(argv):
+    return argv[argv.index("--state") + 1] if "--state" in argv else os.path.join(tempfile.gettempdir(), "slack-lab-n8n-watch.json")
+
+
+def cmd_start(argv, env, clock=time):
+    path = state_path(argv)
+    if os.path.commonpath([os.path.realpath(os.path.dirname(path) or "."), os.path.realpath(ROOT)]) == os.path.realpath(ROOT):
+        print("상태 파일은 저장소 밖에 둔다")
+        return 2
+    json.dump({"oldest": clock.time() - 1}, open(path, "w"))
+    print("관찰 시작을 기록했다. 이제 n8n에서 Execute를 누른다.")
+    return 0
+
+
+def cmd_judge(argv, env, clock=time, slack_fn=None, log_lines=None, rt=None):
+    try:
+        name, changed = argv[0], argv[1]
+        expect = argv[argv.index("--expect") + 1]
+        logpath = argv[argv.index("--log") + 1]
+        oldest = json.load(open(state_path(argv)))["oldest"]
+    except (IndexError, ValueError, OSError, KeyError):
+        print("사용법 오류 또는 상태 파일 없음: 먼저 `scripts/n8n-watch start` 를 실행했는지 확인한다")
+        return 2
+    if expect not in ("0", "1"):
+        print("--expect는 1 또는 0")
+        return 2
+    rt = rt or load_roundtrip(env)  # 테스트가 이미 불러온 모듈을 주입한다(SlackError 클래스를 맞추려고)
+    slack_fn = slack_fn or rt["slack"]
+    eid = rt["event_id"](name, changed)
+    lines = log_lines if log_lines is not None else open(logpath, encoding="utf-8", errors="replace").read().splitlines()
+    first_pub, published, auth_fail = scan_log(lines, eid, oldest)
+    try:
+        auth = slack_fn("auth.test")
+        bot_user, bot_id = auth["user_id"], auth.get("bot_id")
+        found, first_seen = {}, None
+        deadline = clock.time() + (FIRST_REPORT_LIMIT if expect == "1" else EXPECT_ZERO_OBSERVE)
+        while True:
+            for m in rt["history"](env["ALERT_CHANNEL"], oldest, slack_fn):
+                if rt["is_report"](m, bot_user, bot_id, eid):
+                    found[m["ts"]] = m
+            if found and first_seen is None:
+                first_seen = clock.time()
+            if expect == "1" and first_seen is not None and clock.time() - first_seen >= OBSERVE_AFTER_FIRST:
+                break
+            if (first_seen is None or expect == "0") and clock.time() >= deadline:
+                break
+            clock.sleep(2)
+    except rt["SlackError"] as e:
+        print(f"Slack 오류: {e}")
+        return 3
+    reports = sorted((float(m["ts"]), m.get("text", "")) for m in found.values())
+    if expect == "1":
+        code, msgs = evaluate_expect_one(reports, first_pub, rt["FAILURE_PREFIXES"])
+    else:
+        code, msgs = evaluate_expect_zero(len(reports), published, auth_fail)
+    print("\n".join(msgs))
+    return code
+
+
+def main(argv):
+    if not argv or argv[0] not in ("start", "judge"):
+        print(__doc__)
+        return 2
+    env = watch_env(os.environ, read_dotenv(os.path.join(ROOT, ".env")))
+    if env is None:
+        print("ALERT_CHANNEL(알람 채널)과 SLACK_BOT_TOKEN이 .env에 있어야 한다. 알람 리포트는 알람 채널에 올라간다")
+        return 2
+    return cmd_start(argv[1:], env) if argv[0] == "start" else cmd_judge(argv[1:], env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

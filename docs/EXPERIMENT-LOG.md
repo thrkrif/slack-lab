@@ -1299,3 +1299,17 @@ Codex 독립 판정(TAG-AFTER-CHECKS)이 요구한 ①알람형 Slack 왕복 ②
 - **미확인(M42b)**: Slack이 자리표시자 URL이 든 Manifest를 실제로 받아들이는지는 사람 단계에서만 확인할 수 있다. 거부되면 가이드 1단계의 우회(이벤트 구독 블록을 지우고 생성 뒤 화면에서 켠다)를 쓰고 Manifest와 가이드를 고친다.
 - **단위 `python3 scripts/test_manifest.py` 10건 통과**: JSON 파싱·필수 필드, 코드의 메서드가 모두 표에 있음, 추출기 회귀 방지(알려진 5개 모두 발견), 스코프·이벤트·URL 일치, 오류 유도 6종(스코프를 뺀 사본·안 쓰는 스코프를 더한 사본·이벤트를 더한 사본·실제 터널 주소가 든 사본·소켓 모드 사본·새 메서드 출현)이 각각 실패.
 - **판정**: C11 단위 통과. C12(Manifest로 만든 새 앱에서 멘션 → 답글 1 + 👀 1)는 M42b 사람 단계에서 판정한다.
+
+## 51. 5단계 M41 n8n 예제 워크플로와 본문 동일성 검사 (2026-10-09)
+
+**조건**: Apple M1 16GB, Docker Desktop. n8n 컨테이너만 검증 때 띄움(메모리 상한 1GiB·CPU 1, 검증 전용 볼륨), 수신 서버·Ollama·실제 Slack 없음. 가짜 수신 서버(호스트 파이썬 스텁)와 더미 Credential을 썼고 저장소에는 아무것도 남기지 않았다.
+
+- **이미지 고정**: `n8nio/n8n:2.42.6@sha256:526daa38b68e923cc00c5280d18b4da5d489f115a73bdbf3b8e452b184197a9a`. `stable` 태그가 가리키는 버전을 확인한 뒤 같은 digest의 버전 태그가 존재함을 `docker pull`로 확인해 고정했다. 이 버전이 지원하는 노드 버전은 HTTP Request 4.5(기본)·Code 2·Manual Trigger 1이다.
+- **import/export**: `n8n import:workflow` 성공(CLI import는 최상위 `id`가 필요 — 없으면 `workflow_entity.id NOT NULL` 오류). export한 노드·연결·설정이 저장소 JSON과 완전히 같다(export는 시각·버전 필드만 더한다).
+- **실행 스모크(n8n 2.42.6, CLI `execute`)**: 정상 Credential로 스텁이 **정확히 4건**(`/alerts/cloudwatch`, `Content-Type: application/json`, `X-Alert-Secret` 일치) 받았고, 서로 다른 본문 수 1, 바깥 키 `Type·MessageId·Message`, `Message` 안 키 8개와 `Trigger` 하위 필드가 `alert-roundtrip`과 같다.
+- **잘못된 Credential**: 계획은 "n8n HTTP Request는 첫 4xx에서 멈춘다"고 추정했으나 이 버전은 **4건 모두 보낸 뒤 실행을 실패로 끝냈고 4건 모두 401**을 받았다. 스펙의 "401·리포트 0개"와는 모순되지 않는다(판정은 401 1줄 이상·발행 0줄·리포트 0개로 유지). 이 관찰은 CLI 실행 기준이며 UI 실행은 M42b에서 확인한다.
+- **CLI 실행 주의**: 서버가 떠 있는 컨테이너에서 `n8n execute`를 쓰면 태스크 브로커 포트 충돌이 난다 → `N8N_RUNNERS_BROKER_PORT`·`N8N_PORT`를 바꿔 실행했다. 이는 스모크 도구일 뿐 사람 단계의 근거가 아니다(UI 실행이 정본).
+- **정리**: 컨테이너·볼륨·스텁 포트 모두 0(확인함).
+- **단위 `python3 scripts/test_n8n_example.py` 37건 통과**(외부 호출 0): 노드 3종·연결 순서·HTTP 계약·Credential/시크릿 패턴/실제 `.env` 비밀값 0건(값 미출력), 고정 입력·시각에서 `alert-roundtrip`(수정 없음, `exec`+`datetime`·`clock` 교체+`send_fn` 500)과 호스트 `node`로 실행한 Code 노드 본문의 필드·값 불일치 0·재전송 간 차이 0·`Message`가 문자열임·입력 없을 때 시각 형식, `n8n-watch` 판정(expect 1: 10초·179초 합격 / 181초·2개·실패 안내·없음·다른 알람 불합격 / 발행 줄 없음 종료 2, expect 0: 합격과 불합격 3종·관찰 시작 이전 401 무시), Slack 오류 종료 3, `ALERT_CHANNEL`·토큰 없음 거부, 상태 파일 저장소 밖 강제, 출력에 event_id·채널 ID·토큰 0.
+- **한계**: 호스트 `node`와 n8n 안의 Code 실행기가 다를 수 있어 실제 실행 본문과의 대조는 M42b(`n8n-watch`의 리포트 1개 판정)에서 한다. 실제 UI의 Credential 입력·Import는 사람 단계다.
+- **판정**: C8·C9 단위 통과(C9의 컨테이너·볼륨 제거는 스모크에서 확인). C6·C7은 M42b에서 판정한다.
