@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""설치 점검(5단계 M39): .env를 **실행하지 않고** 읽어 필수값 누락과 선택 기능 설정 조합의 오류를 기동 전에 알려준다.
+
+사용: scripts/env-check              (저장소 루트의 .env)
+      scripts/env-check <파일>        (다른 env 파일)
+      scripts/env-check --index       (RAG 색인 CLI를 돌릴 때: RAG_DOCS_DIR도 점검한다)
+종료 코드: 0=이상 없음, 1=설정 오류(키 이름·사유만 출력), 2=사용법 오류.
+
+비밀값은 어떤 경우에도 출력하지 않는다 — 오류에는 키 이름과 사유만 쓴다. Spring 설정 검증기를 복제하지 않는다: 기동 때 Spring이
+거부하는 흔한 실수(RagGuard의 호스트 규칙, AlertProperties의 짝, 분류 모델 누락)를 앞당겨 보여줄 뿐이며, 이 점검을 통과해도
+기동 검사(RagStartupCheck 등)는 따로 돈다. 생략한 키는 application.yml의 기본값을 쓴 것으로 본다.
+"""
+import ipaddress
+import os
+import re
+import sys
+from urllib.parse import urlsplit
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REQUIRED = ("SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "POSTGRES_PASSWORD", "LLM_MODEL", "SLACK_TEST_CHANNEL")
+BOOLEANS = ("RAG_ENABLED", "RAG_ALLOW_EXTERNAL_EMBEDDING", "RAG_ALLOW_EXTERNAL_LLM", "CLASSIFICATION_ENABLED")
+TRUE = {"true", "on", "yes", "1"}
+FALSE = {"false", "off", "no", "0"}
+# RagProperties.allowedHosts의 기본값과 같다(.env에 RAG_ALLOWEDHOSTS가 있으면 이 목록을 **대신**한다 — Spring 목록 바인딩은 덮어쓴다)
+DEFAULT_ALLOWED = ["localhost", "127.0.0.1", "::1", "host.docker.internal"]
+DEFAULT_LLM_URL = "http://localhost:11434/v1"
+IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+
+def parse_env(path):
+    """`source` 없이 읽는다. 따옴표 처리는 alert-roundtrip의 load_env와 같다. 같은 키가 또 나오면 마지막 값이 이긴다."""
+    env = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def host_of(url):
+    """RagGuard.hostOf와 같다: http(s)만, 호스트를 파싱해 소문자·대괄호·끝의 점을 뗀다. 못 구하면 None."""
+    try:
+        parts = urlsplit(url.strip())
+        if parts.scheme.lower() not in ("http", "https"):
+            return None
+        host = parts.hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host.lower().rstrip(".")
+    return host or None
+
+
+def in_cidr(host, cidr):
+    # IPv4 리터럴만 비교한다(호스트 이름을 DNS로 풀지 않는다 — RagGuard와 같다)
+    base, _, bits = cidr.partition("/")
+    if not (IPV4.match(host) and IPV4.match(base)) or not bits.isdigit() or int(bits) > 32:
+        return False
+    try:
+        return ipaddress.ip_address(host) in ipaddress.ip_network(f"{base}/{bits}", strict=False)
+    except ValueError:
+        return False
+
+
+def is_allowed_host(url, allowed):
+    host = host_of(url)
+    if host is None:
+        return False
+    for raw in allowed:
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if entry == host:
+            return True
+        if entry.startswith("*.") and host.endswith(entry[1:]) and len(host) > len(entry) - 1:
+            return True
+        if "/" in entry and in_cidr(host, entry):
+            return True
+    return False
+
+
+def as_bool(value):
+    v = value.strip().lower()
+    return True if v in TRUE else False if v in FALSE else None
+
+
+def check(env, index=False):
+    """(키, 사유) 목록을 돌려준다. 값은 사유에 넣지 않는다."""
+    errors = []
+
+    def blank(key):
+        return not env.get(key, "").strip()
+
+    for key in REQUIRED:
+        if blank(key):
+            errors.append((key, "필수 값이 없거나 비어 있다"))
+
+    flags = {}
+    for key in BOOLEANS:
+        if key not in env:
+            flags[key] = False
+            continue
+        parsed = as_bool(env[key])
+        if parsed is None:
+            errors.append((key, "true 또는 false여야 한다(빈 값이면 키를 지운다)"))
+        flags[key] = bool(parsed)
+
+    llm_client = env.get("LLM_CLIENT", "ollama").strip().lower()
+    llm_uses_network = llm_client != "echo"
+    if "LLM_BASE_URL" in env and blank("LLM_BASE_URL"):
+        errors.append(("LLM_BASE_URL", "명시했지만 비어 있다(키를 지우면 기본값을 쓴다)"))
+    llm_url = env.get("LLM_BASE_URL", DEFAULT_LLM_URL)
+
+    if flags["RAG_ENABLED"]:
+        if blank("RAG_EMBEDDING_MODEL"):
+            errors.append(("RAG_EMBEDDING_MODEL", "RAG를 켰으면 모델 ID가 필요하다(ollama list로 확인)"))
+        dim = env.get("RAG_EMBEDDING_DIMENSION", "").strip()
+        if not (dim.isdigit() and int(dim) > 0):
+            errors.append(("RAG_EMBEDDING_DIMENSION", "RAG를 켰으면 양의 정수가 필요하다"))
+        allowed = DEFAULT_ALLOWED
+        if "RAG_ALLOWEDHOSTS" in env:
+            allowed = [h for h in env["RAG_ALLOWEDHOSTS"].split(",") if h.strip()]
+        if "RAG_EMBEDDING_BASE_URL" in env and blank("RAG_EMBEDDING_BASE_URL"):
+            errors.append(("RAG_EMBEDDING_BASE_URL", "명시했지만 비어 있다(키를 지우면 기본값을 쓴다)"))
+        else:
+            emb_url = env.get("RAG_EMBEDDING_BASE_URL", DEFAULT_LLM_URL)
+            if not is_allowed_host(emb_url, allowed) and not flags["RAG_ALLOW_EXTERNAL_EMBEDDING"]:
+                errors.append(("RAG_EMBEDDING_BASE_URL", "호스트가 허용 목록 밖이다 — 문서 원문이 밖으로 나간다. "
+                               "의도했다면 RAG_ALLOW_EXTERNAL_EMBEDDING=true, 사내 호스트라면 RAG_ALLOWEDHOSTS에 추가한다"))
+        llm_url_given_blank = "LLM_BASE_URL" in env and blank("LLM_BASE_URL")  # 위에서 이미 오류로 셌다
+        if llm_uses_network and not llm_url_given_blank:
+            if not is_allowed_host(llm_url, allowed) and not flags["RAG_ALLOW_EXTERNAL_LLM"]:
+                errors.append(("LLM_BASE_URL", "호스트가 허용 목록 밖이다 — 검색된 문서 조각과 질문이 밖으로 나간다. "
+                               "의도했다면 RAG_ALLOW_EXTERNAL_LLM=true, 사내 호스트라면 RAG_ALLOWEDHOSTS에 추가한다"))
+        if index:
+            docs = env.get("RAG_DOCS_DIR", "").strip()
+            if not docs:
+                errors.append(("RAG_DOCS_DIR", "색인을 돌리려면 문서 디렉터리가 필요하다"))
+            elif not os.path.isdir(docs):
+                errors.append(("RAG_DOCS_DIR", "디렉터리가 없다"))
+            else:
+                real, root = os.path.realpath(docs), os.path.realpath(ROOT)
+                if os.path.commonpath([real, root]) == root:
+                    errors.append(("RAG_DOCS_DIR", "저장소 안이다 — 내부 문서가 커밋될 수 있어 저장소 밖이어야 한다"))
+    elif index:
+        errors.append(("RAG_ENABLED", "--index는 RAG를 켠 설정에서만 점검한다"))
+
+    secret, channel = not blank("ALERT_SECRET"), not blank("ALERT_CHANNEL")
+    if secret != channel:
+        errors.append(("ALERT_CHANNEL" if secret else "ALERT_SECRET", "알람 수신은 ALERT_SECRET과 ALERT_CHANNEL을 둘 다 채우거나 둘 다 비워야 한다"))
+
+    if flags["CLASSIFICATION_ENABLED"]:
+        if blank("CLASSIFICATION_MODEL"):
+            errors.append(("CLASSIFICATION_MODEL", "분류를 켰으면 모델 ID가 필요하다"))
+        if llm_client == "echo":
+            errors.append(("LLM_CLIENT", "분류를 켠 채 echo 클라이언트는 쓸 수 없다"))
+
+    features = {"RAG": flags["RAG_ENABLED"], "알람": secret and channel, "분류": flags["CLASSIFICATION_ENABLED"]}
+    return errors, features
+
+
+def main(argv):
+    index = "--index" in argv
+    args = [a for a in argv if a != "--index"]
+    if any(a.startswith("-") for a in args) or len(args) > 1:
+        print(__doc__.split("\n\n")[1], file=sys.stderr)
+        return 2
+    path = args[0] if args else os.path.join(ROOT, ".env")
+    if not os.path.isfile(path):
+        print(f"오류: env 파일이 없다({'지정한 경로' if args else '저장소 루트의 .env'}). .env.example을 복사해 채운다")
+        return 1
+    errors, features = check(parse_env(path), index=index)
+    for key, reason in errors:
+        print(f"오류 {key}: {reason}")
+    if errors:
+        print(f"→ {len(errors)}건. 값은 출력하지 않는다.")
+        return 1
+    on = ", ".join(f"{k}={'켬' if v else '끔'}" for k, v in features.items())
+    print(f"이상 없음 (필수 {len(REQUIRED)}개 확인; 선택 기능: {on})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
